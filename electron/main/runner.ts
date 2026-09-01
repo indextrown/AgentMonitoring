@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
-import type { EventRecord, TaskRecord } from '../../src/shared/types'
+import type { EventRecord, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
 import { isActiveTask } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
@@ -52,6 +52,23 @@ function redact(value: string): string {
     .slice(0, 8_000)
 }
 
+export function parseReviewerFindings(report: string): Array<{ severity: Severity; title: string }> {
+  const findings: Array<{ severity: Severity; title: string }> = []
+  const seen = new Set<string>()
+  for (const line of report.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:[-*]\s*)?\[(critical|high|medium|low)]\s+(.+?)\s*$/i)
+    if (!match) continue
+    const severity = match[1].toLowerCase() as Severity
+    const title = match[2].trim().slice(0, 500)
+    const key = `${severity}:${title.toLowerCase()}`
+    if (!title || seen.has(key)) continue
+    seen.add(key)
+    findings.push({ severity, title })
+    if (findings.length >= 20) break
+  }
+  return findings
+}
+
 function safeSlug(value: string): string {
   const slug = value
     .normalize('NFKD')
@@ -94,6 +111,116 @@ export class AgentRunner {
 
   isRunning(taskId: string): boolean {
     return this.activeRuns.has(taskId)
+  }
+
+  async getChanges(taskId: string): Promise<TaskChanges> {
+    const task = this.store.getTask(taskId)
+    if (!task.worktreePath) {
+      return { taskId, available: false, files: [], stat: '', patch: '', truncated: false }
+    }
+
+    try {
+      await stat(task.worktreePath)
+    } catch {
+      return { taskId, available: false, files: [], stat: '', patch: '', truncated: false }
+    }
+
+    const project = this.store.getProject(task.projectId)
+    const projectHead = await this.requireGit(['rev-parse', 'HEAD'], project.path, '원본 기준 commit을 확인할 수 없습니다.')
+    const mergeBase = await this.requireGit(
+      ['merge-base', 'HEAD', projectHead.output.trim()],
+      task.worktreePath,
+      '작업 변경의 공통 기준 commit을 확인할 수 없습니다.'
+    )
+    const baseCommit = mergeBase.output.trim()
+    const [statusResult, numstatResult, statResult, patchResult] = await Promise.all([
+      this.requireGit(
+        ['status', '--short', '--untracked-files=all'],
+        task.worktreePath,
+        '작업 변경 파일을 확인할 수 없습니다.'
+      ),
+      this.requireGit(['diff', '--numstat', baseCommit, '--'], task.worktreePath, '작업 변경 통계를 확인할 수 없습니다.'),
+      this.requireGit(['diff', '--stat', baseCommit, '--'], task.worktreePath, '작업 변경 요약을 확인할 수 없습니다.'),
+      this.requireGit(
+        ['diff', '--no-ext-diff', '--unified=3', baseCommit, '--'],
+        task.worktreePath,
+        '작업 diff를 확인할 수 없습니다.'
+      )
+    ])
+
+    const counts = new Map<string, { additions: number | null; deletions: number | null }>()
+    for (const line of numstatResult.output.split(/\r?\n/)) {
+      const [rawAdditions, rawDeletions, ...pathParts] = line.split('\t')
+      const path = pathParts.join('\t')
+      if (!path) continue
+      counts.set(path, {
+        additions: rawAdditions === '-' ? null : Number(rawAdditions),
+        deletions: rawDeletions === '-' ? null : Number(rawDeletions)
+      })
+    }
+
+    const statusLines = statusResult.output.split(/\r?\n/).filter(Boolean)
+    let combinedPatch = patchResult.output
+    let truncated = patchResult.output.length >= 79_000
+    for (const line of statusLines.filter((item) => item.startsWith('?? '))) {
+      const path = line.slice(3).trim()
+      const absolutePath = resolve(task.worktreePath, path)
+      if (!absolutePath.startsWith(`${resolve(task.worktreePath)}/`)) continue
+      const [untrackedNumstat, untrackedPatch] = await Promise.all([
+        this.runProcess('git', ['diff', '--no-index', '--numstat', '--', '/dev/null', absolutePath], task.worktreePath, null),
+        this.runProcess(
+          'git',
+          ['diff', '--no-index', '--no-ext-diff', '--unified=3', '--', '/dev/null', absolutePath],
+          task.worktreePath,
+          null
+        )
+      ])
+      if (![0, 1].includes(untrackedNumstat.code) || ![0, 1].includes(untrackedPatch.code)) continue
+      const [rawAdditions, rawDeletions] = untrackedNumstat.output.trim().split('\t')
+      counts.set(path, {
+        additions: rawAdditions === '-' ? null : Number(rawAdditions),
+        deletions: rawDeletions === '-' ? null : Number(rawDeletions)
+      })
+      const normalizedPatch = untrackedPatch.output
+        .split(absolutePath)
+        .join(path)
+        .replace(/^diff --git .*$/m, `diff --git a/${path} b/${path}`)
+        .replace(/^\+\+\+ .*$/m, `+++ b/${path}`)
+      const nextPatch = [combinedPatch.trimEnd(), normalizedPatch.trim()].filter(Boolean).join('\n')
+      if (nextPatch.length > 79_000) truncated = true
+      combinedPatch = nextPatch.slice(0, 79_000)
+    }
+
+    const fileMap = new Map<string, TaskChanges['files'][number]>()
+    for (const line of statusLines) {
+      const path = line.slice(3).trim()
+      const count = counts.get(path)
+      fileMap.set(path, {
+        path,
+        status: line.slice(0, 2).trim() || 'M',
+        additions: count?.additions ?? null,
+        deletions: count?.deletions ?? null
+      })
+    }
+    for (const [path, count] of counts) {
+      if (fileMap.has(path)) continue
+      fileMap.set(path, { path, status: 'M', additions: count.additions, deletions: count.deletions })
+    }
+    const files = [...fileMap.values()].sort((left, right) => left.path.localeCompare(right.path))
+    const untrackedCount = statusLines.filter((line) => line.startsWith('?? ')).length
+    const statSummary = [
+      statResult.output.trim(),
+      untrackedCount > 0 ? `${untrackedCount} untracked ${untrackedCount === 1 ? 'file' : 'files'}` : ''
+    ].filter(Boolean).join('\n')
+
+    return {
+      taskId,
+      available: true,
+      files,
+      stat: statSummary,
+      patch: combinedPatch,
+      truncated
+    }
   }
 
   async run(taskId: string): Promise<void> {
@@ -204,7 +331,8 @@ export class AgentRunner {
         return
       }
 
-      await this.runCodexStage(
+      this.store.resolveTaskFindings(task.id)
+      const review = await this.runCodexStage(
         this.store.getTask(taskId),
         worktreePath,
         'reviewer',
@@ -214,9 +342,14 @@ export class AgentRunner {
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
+          '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
+          '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
           '코드는 수정하지 마세요.'
         ].join('\n\n')
       )
+      for (const finding of parseReviewerFindings(review.finalMessage)) {
+        this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
+      }
 
       this.store.transitionTask(taskId, 'awaiting_approval')
       this.emit(task, 'agent', 'orchestrator', '모든 자동 단계가 끝났습니다. 사람의 최종 승인을 기다립니다.')
@@ -322,6 +455,38 @@ export class AgentRunner {
       const project = this.store.getProject(task.projectId)
       await this.runProcess('git', ['worktree', 'remove', '--force', task.worktreePath], project.path, null)
     }
+  }
+
+  async removeProject(projectId: string): Promise<void> {
+    const project = this.store.getProject(projectId)
+    const tasks = this.store.listTasks(projectId)
+    if (tasks.some((task) => this.activeRuns.has(task.id))) {
+      throw new Error('실행 중인 작업이 있는 프로젝트는 제거할 수 없습니다.')
+    }
+
+    let projectAvailable = true
+    try {
+      await stat(project.path)
+    } catch {
+      projectAvailable = false
+    }
+
+    if (projectAvailable) {
+      for (const task of tasks) {
+        if (!task.worktreePath) continue
+        try {
+          await stat(task.worktreePath)
+        } catch {
+          continue
+        }
+        const result = await this.runProcess('git', ['worktree', 'remove', '--force', task.worktreePath], project.path, null)
+        if (result.code !== 0) {
+          throw new Error(`격리 작업공간을 정리하지 못해 프로젝트 제거를 중단했습니다.\n${result.output.slice(-2_000)}`)
+        }
+      }
+    }
+
+    this.store.deleteProject(projectId)
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {

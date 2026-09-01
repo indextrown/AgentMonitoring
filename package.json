@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:package": "pnpm package && node scripts/smoke-packaged.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm build:web",
     "postinstall": "node node_modules/electron/install.js"
   },

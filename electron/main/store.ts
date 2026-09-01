@@ -259,6 +259,12 @@ export class AppStore {
     return this.getProject(input.projectId)
   }
 
+  deleteProject(projectId: string): ProjectRecord {
+    const project = this.getProject(projectId)
+    this.database.prepare('DELETE FROM projects WHERE id = ?').run(projectId)
+    return project
+  }
+
   createTask(projectId: string, title: string, prompt: string, maxAttempts: number): TaskRecord {
     this.getProject(projectId)
     const now = new Date().toISOString()
@@ -294,6 +300,14 @@ export class AppStore {
     return taskFromRow(row)
   }
 
+  listTasks(projectId: string): TaskRecord[] {
+    return (
+      this.database
+        .prepare(`SELECT ${taskColumns} FROM tasks WHERE project_id = ? ORDER BY created_at DESC`)
+        .all(projectId) as Row[]
+    ).map(taskFromRow)
+  }
+
   transitionTask(taskId: string, status: TaskStatus, attempt?: number): TaskRecord {
     const task = this.getTask(taskId)
     if (task.status !== status) assertTransition(task.status, status)
@@ -319,6 +333,26 @@ export class AppStore {
       .prepare('UPDATE tasks SET worktree_path = NULL, updated_at = ? WHERE id = ?')
       .run(now, taskId)
     return this.getTask(taskId)
+  }
+
+  recoverInterruptedTasks(): TaskRecord[] {
+    const interrupted = (
+      this.database
+        .prepare(`SELECT ${taskColumns} FROM tasks WHERE status IN ('running', 'testing') ORDER BY created_at`)
+        .all() as Row[]
+    ).map(taskFromRow)
+
+    return interrupted.map((task) => {
+      const recovered = this.transitionTask(task.id, 'stopped')
+      this.addEvent(
+        task.projectId,
+        task.id,
+        'task_recovered',
+        'orchestrator',
+        '앱이 다시 시작되어 이전 실행을 안전하게 중단 상태로 복구했습니다.'
+      )
+      return recovered
+    })
   }
 
   addEvent(
@@ -366,6 +400,40 @@ export class AppStore {
     return finding
   }
 
+  getFinding(findingId: string): FindingRecord {
+    const row = this.database.prepare(`SELECT ${findingColumns} FROM findings WHERE id = ?`).get(findingId) as
+      | Row
+      | undefined
+    if (!row) throw new Error('버그를 찾을 수 없습니다.')
+    return findingFromRow(row)
+  }
+
+  setFindingResolved(findingId: string, resolved: boolean): FindingRecord {
+    const finding = this.getFinding(findingId)
+    if (finding.resolved === resolved) return finding
+    const resolvedAt = resolved ? new Date().toISOString() : null
+    this.database
+      .prepare('UPDATE findings SET resolved = ?, resolved_at = ? WHERE id = ?')
+      .run(resolved ? 1 : 0, resolvedAt, findingId)
+    const updated = this.getFinding(findingId)
+    this.addEvent(
+      finding.projectId,
+      finding.taskId,
+      resolved ? 'finding_resolved' : 'finding_reopened',
+      'human',
+      `${finding.title} ${resolved ? '해결 처리' : '다시 열기'}`,
+      finding.severity
+    )
+    return updated
+  }
+
+  resolveTaskFindings(taskId: string): FindingRecord[] {
+    const rows = this.database
+      .prepare(`SELECT ${findingColumns} FROM findings WHERE task_id = ? AND resolved = 0`)
+      .all(taskId) as Row[]
+    return rows.map((row) => this.setFindingResolved(findingFromRow(row).id, true))
+  }
+
   addNote(projectId: string, title: string, body: string): NoteRecord {
     const note: NoteRecord = {
       id: randomUUID(),
@@ -378,6 +446,29 @@ export class AppStore {
       .prepare('INSERT INTO notes (id, project_id, title, body, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(note.id, projectId, note.title, note.body, note.createdAt)
     this.addEvent(projectId, null, 'note_created', 'human', `${note.title} 메모 작성`)
+    return note
+  }
+
+  getNote(noteId: string): NoteRecord {
+    const row = this.database.prepare(`SELECT ${noteColumns} FROM notes WHERE id = ?`).get(noteId) as Row | undefined
+    if (!row) throw new Error('메모를 찾을 수 없습니다.')
+    return noteFromRow(row)
+  }
+
+  updateNote(noteId: string, title: string, body: string): NoteRecord {
+    const note = this.getNote(noteId)
+    this.database
+      .prepare('UPDATE notes SET title = ?, body = ? WHERE id = ?')
+      .run(title.trim(), body.trim(), noteId)
+    const updated = this.getNote(noteId)
+    this.addEvent(note.projectId, null, 'note_updated', 'human', `${updated.title} 메모 수정`)
+    return updated
+  }
+
+  deleteNote(noteId: string): NoteRecord {
+    const note = this.getNote(noteId)
+    this.addEvent(note.projectId, null, 'note_deleted', 'human', `${note.title} 메모 삭제`)
+    this.database.prepare('DELETE FROM notes WHERE id = ?').run(noteId)
     return note
   }
 
@@ -394,11 +485,7 @@ export class AppStore {
       }
     }
     const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0]
-    const tasks = (
-      this.database
-        .prepare(`SELECT ${taskColumns} FROM tasks WHERE project_id = ? ORDER BY created_at DESC`)
-        .all(selectedProject.id) as Row[]
-    ).map(taskFromRow)
+    const tasks = this.listTasks(selectedProject.id)
     const events = (
       this.database
         .prepare(`SELECT ${eventColumns} FROM events WHERE project_id = ? ORDER BY created_at DESC LIMIT 500`)
