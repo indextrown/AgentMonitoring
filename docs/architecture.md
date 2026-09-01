@@ -10,6 +10,7 @@ React renderer
    ▼
 Electron main
    ├── SQLite event store
+   ├── read-only ProjectInspector
    ├── 작업 상태 머신
    └── AgentRunner
           ├── Git worktree
@@ -20,6 +21,12 @@ Electron main
 
 Renderer에는 Node.js 권한이 없다. 파일 선택, 외부 경로 열기, 데이터 변경, 프로세스 실행은 preload가 공개한 제한된 IPC를 통해서만 요청한다.
 Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되도록 CommonJS 진입점으로 빌드하며, 패키지 스모크 테스트가 bridge 연결 신호를 검증한다.
+
+## 프로젝트 준비 상태
+
+작업 이력이 없는 프로젝트를 선택하면 Renderer가 제한된 `project:inspect` IPC를 호출한다. `ProjectInspector`는 Git 명령으로 현재 브랜치, commit, remote, clean/dirty 상태와 tracked 파일 목록을 읽는다. 파일 확장자와 알려진 manifest 이름만으로 언어·도구·검증 명령 후보를 계산하며 소스나 설정 파일 내용을 앱으로 가져오지 않는다.
+
+검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
 
 ## 상태 전이
 
@@ -74,6 +81,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 
 - Codex 프로세스 비정상 종료: 작업을 `failed`로 전환하고 high finding을 등록한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
+- 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
 - 재시도 한도 초과: 작업을 `failed`로 전환한다.
 - 사용자 중단: 현재 child process에 `SIGTERM`을 보내고 `stopped`로 전환한다.
 - 앱 종료·비정상 재시작: 남아 있는 `running`·`testing` 작업을 `stopped`로 전환하고 복구 이벤트를 기록한다. 기존 worktree는 보존해 사용자가 검토하거나 재실행할 수 있다.
@@ -86,6 +94,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - IPC 입력은 Zod schema로 검증한다.
 - Codex sandbox 우회 옵션을 사용하지 않는다.
 - 검증 명령은 shell을 거치지 않고 허용 목록의 실행 파일만 `spawn`한다.
+- 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`만 사용하며 `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용을 검사 응답으로 가져오지 않는다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.

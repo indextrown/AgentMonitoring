@@ -30,6 +30,19 @@ test('opens search and task detail interactions', async ({ page }) => {
   await expect(page.getByText('작업 계약')).toBeVisible()
 })
 
+test('shows repository readiness when selecting a project without tasks', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' }).click()
+
+  await expect(page.getByRole('heading', { name: 'AgentMonitoring', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '작업 전에 준비할 항목이 있습니다' })).toBeVisible()
+  await expect(page.getByText('검증 명령을 먼저 연결하세요')).toBeVisible()
+  await expect(page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' })).toHaveClass(/selected/)
+
+  await page.locator('.project-list button').filter({ hasText: 'ElmwoodOnline' }).click()
+  await expect(page.getByText('최근 24시간')).toBeVisible()
+})
+
 test('uses dashboard chart links and expands the complete activity history', async ({ page }) => {
   await page.goto('/')
   const activity = page.locator('.activity-card')
@@ -121,13 +134,27 @@ test('starts from a real-project onboarding state without seeded data', async ({
 
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   await expect(page.getByRole('heading', { name: 'ConnectedRepository' })).toBeVisible()
-  await expect(page.getByText('등록된 작업이 없습니다.')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '작업 전에 준비할 항목이 있습니다' })).toBeVisible()
+  await expect(page.getByText('검증 명령을 먼저 연결하세요')).toBeVisible()
+  await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeDisabled()
+  await expect(page).toHaveScreenshot('project-readiness.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await expect(page.getByText('설정 완료')).toBeVisible()
+  await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
 })
 
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
-  await page.locator('.current-footer').getByRole('button', { name: '새 작업' }).click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
   await page.getByPlaceholder('예: 네비게이션 경로 이탈 감지 구현').fill('승인 적용 확인')
   await page
     .getByPlaceholder('구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다.')

@@ -53,6 +53,7 @@ import type {
   EventRecord,
   NoteRecord,
   ProjectRecord,
+  ProjectInspection,
   TaskChanges,
   TaskRecord,
   TaskStatus
@@ -128,6 +129,8 @@ export function App(): React.JSX.Element {
   const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string>()
   const selectedProjectRef = useRef<string | undefined>(undefined)
+  const loadRequestRef = useRef(0)
+  const inspectionRequestRef = useRef(0)
   const [page, setPage] = useState<Page>('dashboard')
   const [range, setRange] = useState<Range>('all')
   const [taskModal, setTaskModal] = useState(false)
@@ -136,18 +139,39 @@ export function App(): React.JSX.Element {
   const [searchModal, setSearchModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
   const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
+  const [inspection, setInspection] = useState<ProjectInspection | null>(null)
+  const [inspectionLoading, setInspectionLoading] = useState(false)
+  const [selectingProjectId, setSelectingProjectId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async (projectId?: string) => {
+    const requestId = ++loadRequestRef.current
     try {
       const next = await bridge.getSnapshot(projectId)
+      if (requestId !== loadRequestRef.current) return false
       setSnapshot(next)
       setSelectedProjectId(next.selectedProject?.id)
       selectedProjectRef.current = next.selectedProject?.id
       setSelectedTask((current) => (current ? next.tasks.find((task) => task.id === current.id) ?? null : null))
+      return true
     } catch (loadError) {
-      setError(String(loadError))
+      if (requestId === loadRequestRef.current) setError(String(loadError))
+      return false
+    }
+  }, [])
+
+  const refreshInspection = useCallback(async (projectId: string) => {
+    const requestId = ++inspectionRequestRef.current
+    setInspectionLoading(true)
+    setInspection(null)
+    try {
+      const next = await bridge.inspectProject(projectId)
+      if (requestId === inspectionRequestRef.current) setInspection(next)
+    } catch (inspectionError) {
+      if (requestId === inspectionRequestRef.current) setError(String(inspectionError))
+    } finally {
+      if (requestId === inspectionRequestRef.current) setInspectionLoading(false)
     }
   }, [])
 
@@ -220,10 +244,28 @@ export function App(): React.JSX.Element {
     }
   }, [selectedTask?.id, selectedTask?.updatedAt, selectedTask?.worktreePath])
 
+  useEffect(() => {
+    const projectId = snapshot?.selectedProject?.id
+    if (!projectId || electronBridgeUnavailable) {
+      setInspection(null)
+      return
+    }
+    void refreshInspection(projectId)
+  }, [refreshInspection, snapshot?.selectedProject?.id])
+
   const selectProject = async (projectId: string): Promise<void> => {
+    const previousProjectId = selectedProjectRef.current
     setSelectedProjectId(projectId)
     selectedProjectRef.current = projectId
-    await load(projectId)
+    setSelectingProjectId(projectId)
+    setSelectedTask(null)
+    setPage('dashboard')
+    const loaded = await load(projectId)
+    if (!loaded && selectedProjectRef.current === projectId) {
+      selectedProjectRef.current = previousProjectId
+      setSelectedProjectId(previousProjectId)
+    }
+    setSelectingProjectId((current) => current === projectId ? null : current)
   }
 
   const addProject = async (): Promise<void> => {
@@ -239,6 +281,13 @@ export function App(): React.JSX.Element {
   }
 
   const runTask = (task: TaskRecord): void => {
+    const project = snapshot?.projects.find((item) => item.id === task.projectId)
+    if (!project?.testCommand.trim()) {
+      setPage('projects')
+      setSelectedTask(null)
+      setError('작업을 실행하기 전에 프로젝트 검증 명령을 등록하세요.')
+      return
+    }
     setSelectedTask(task)
     void bridge.runTask(task.id).catch((runError) => setError(String(runError)))
     void load(task.projectId)
@@ -325,6 +374,16 @@ export function App(): React.JSX.Element {
     }
   }
 
+  const applySuggestedTestCommand = async (project: ProjectRecord, command: string): Promise<void> => {
+    if (!window.confirm(`“${command}”을 ${project.name}의 검증 명령으로 저장할까요?`)) return
+    try {
+      await bridge.updateProject({ projectId: project.id, name: project.name, testCommand: command })
+      await load(project.id)
+    } catch (commandError) {
+      setError(String(commandError))
+    }
+  }
+
   if (electronBridgeUnavailable) {
     return <RuntimeErrorScreen />
   }
@@ -361,6 +420,7 @@ export function App(): React.JSX.Element {
         selectedProjectId={selectedProjectId ?? selectedProject?.id}
         page={page}
         busy={busy}
+        selectingProjectId={selectingProjectId}
         onPage={setPage}
         onProject={selectProject}
         onAddProject={addProject}
@@ -369,7 +429,7 @@ export function App(): React.JSX.Element {
       />
 
       <main className="main-content">
-        <header className="workspace-header">
+        <header className="workspace-header" aria-busy={Boolean(selectingProjectId)}>
           <div>
             <p className="eyebrow">PROJECT CONTROL PLANE</p>
             <h1>{selectedProject?.name ?? '프로젝트 연결'}</h1>
@@ -391,10 +451,24 @@ export function App(): React.JSX.Element {
           </div>
         </header>
 
+        {selectingProjectId && <div className="project-loading-bar"><span /></div>}
+
         {!selectedProject && (
           <EmptyWorkspace busy={busy} onAddProject={addProject} />
         )}
-        {selectedProject && page === 'dashboard' && (
+        {selectedProject && page === 'dashboard' && snapshot.tasks.length === 0 && (
+          <ProjectStartPage
+            project={selectedProject}
+            inspection={inspection}
+            loading={inspectionLoading}
+            onRefresh={() => void refreshInspection(selectedProject.id)}
+            onOpen={() => void bridge.openPath(selectedProject.path)}
+            onConfigure={() => setPage('projects')}
+            onApplyCommand={(command) => void applySuggestedTestCommand(selectedProject, command)}
+            onNewTask={() => setTaskModal(true)}
+          />
+        )}
+        {selectedProject && page === 'dashboard' && snapshot.tasks.length > 0 && (
           <DashboardPage
             snapshot={snapshot}
             activeTask={activeTask}
@@ -579,6 +653,122 @@ function EmptyWorkspace({
   )
 }
 
+function ProjectStartPage({
+  project,
+  inspection,
+  loading,
+  onRefresh,
+  onOpen,
+  onConfigure,
+  onApplyCommand,
+  onNewTask
+}: {
+  project: ProjectRecord
+  inspection: ProjectInspection | null
+  loading: boolean
+  onRefresh: () => void
+  onOpen: () => void
+  onConfigure: () => void
+  onApplyCommand: (command: string) => void
+  onNewTask: () => void
+}): React.JSX.Element {
+  const hasTestCommand = Boolean(project.testCommand.trim())
+  const ready = hasTestCommand && inspection?.clean
+
+  return (
+    <section className="project-start-page">
+      <article className="panel project-start-hero">
+        <div className={`readiness-mark ${ready ? 'ready' : 'attention'}`}>
+          {loading ? <LoaderCircle className="spin" size={22} /> : ready ? <CheckCircle2 size={22} /> : <Gauge size={22} />}
+        </div>
+        <div className="project-start-copy">
+          <p className="eyebrow">PROJECT READINESS</p>
+          <h2>{loading ? '저장소 상태를 확인하고 있습니다' : ready ? '첫 작업을 시작할 준비가 되었습니다' : '작업 전에 준비할 항목이 있습니다'}</h2>
+          <p>
+            AgentMonitoring은 원본 checkout을 직접 수정하지 않고 격리된 worktree에서 Codex와 검증 명령을 실행합니다.
+          </p>
+        </div>
+        <div className="project-start-actions">
+          <button className="secondary-button" disabled={project.isDemo} onClick={onOpen}><FolderOpen size={14} />저장소 열기</button>
+          <button className="secondary-button" disabled={loading} onClick={onRefresh}><Activity size={14} />다시 검사</button>
+        </div>
+      </article>
+
+      {inspection ? (
+        <div className="readiness-grid">
+          <article className="panel readiness-card">
+            <GitBranch size={16} />
+            <span>Git 상태</span>
+            <strong>{inspection.branch ?? 'detached HEAD'}</strong>
+            <small>{inspection.headCommit ? `${inspection.headCommit} · ${inspection.lastCommitAt ? timeAgo(inspection.lastCommitAt) : '최근 commit'}` : '아직 commit이 없습니다.'}</small>
+          </article>
+          <article className="panel readiness-card">
+            <Bot size={16} />
+            <span>감지된 구성</span>
+            <strong>{inspection.primaryLanguage ?? '언어 미감지'}</strong>
+            <small>{[...inspection.languages, ...inspection.tools].join(' · ') || '표준 프로젝트 파일을 찾지 못했습니다.'}</small>
+          </article>
+          <article className="panel readiness-card">
+            <FileText size={16} />
+            <span>추적 파일</span>
+            <strong>{inspection.trackedFileCount.toLocaleString('ko-KR')}개</strong>
+            <small>테스트 파일 {inspection.testFileCount.toLocaleString('ko-KR')}개 · manifest {inspection.manifests.length}개</small>
+          </article>
+          <article className={`panel readiness-card ${hasTestCommand ? 'ready' : 'attention'}`}>
+            <ShieldCheck size={16} />
+            <span>검증 명령</span>
+            <strong>{hasTestCommand ? '설정 완료' : '설정 필요'}</strong>
+            <small>{project.testCommand || '자동 성공 처리를 막기 위해 실행 전에 반드시 등록합니다.'}</small>
+          </article>
+        </div>
+      ) : (
+        <article className="panel inspection-empty">
+          {loading ? <LoaderCircle className="spin" size={18} /> : <AlertTriangle size={18} />}
+          <span>{loading ? 'Git과 프로젝트 구성을 읽는 중입니다.' : '저장소 검사 결과를 불러오지 못했습니다. 다시 검사해 주세요.'}</span>
+        </article>
+      )}
+
+      {inspection && !inspection.clean && (
+        <div className="readiness-warning" role="status">
+          <AlertTriangle size={15} />
+          <p><strong>원본 저장소에 변경 {inspection.changeCount}개가 있습니다.</strong>격리 작업은 만들 수 있지만 `원본에 적용`하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
+        </div>
+      )}
+
+      {!hasTestCommand && (
+        <article className="panel validation-setup">
+          <div>
+            <p className="eyebrow">REQUIRED VALIDATION</p>
+            <h3>검증 명령을 먼저 연결하세요</h3>
+            <p>테스트가 실제로 통과한 작업만 승인 단계로 보냅니다. 감지 결과는 후보만 제안하며, 저장은 직접 확인해야 합니다.</p>
+          </div>
+          {inspection?.suggestedTestCommands.length ? (
+            <div className="command-suggestions">
+              {inspection.suggestedTestCommands.map((command) => (
+                <button key={command} onClick={() => onApplyCommand(command)}><code>{command}</code><span>이 명령 사용</span></button>
+              ))}
+            </div>
+          ) : (
+            <button className="secondary-button" onClick={onConfigure}><Settings2 size={14} />직접 설정</button>
+          )}
+        </article>
+      )}
+
+      <article className="panel first-task-card">
+        <div>
+          <p className="eyebrow">NEXT STEP</p>
+          <h3>첫 에이전트 작업을 등록하세요</h3>
+          <p>{hasTestCommand ? '목표와 완료 조건을 작성하면 테스트 설계부터 Reviewer 검토까지 격리 실행합니다.' : '검증 명령을 저장하면 첫 작업을 만들 수 있습니다.'}</p>
+        </div>
+        <div>
+          <button className="secondary-button" onClick={onConfigure}><Settings2 size={14} />프로젝트 설정</button>
+          <button className="primary-button" disabled={!hasTestCommand} onClick={onNewTask}><Plus size={14} />첫 작업 만들기</button>
+        </div>
+      </article>
+    </section>
+  )
+}
+
 function CodexLoginScreen({
   status,
   onLogin,
@@ -649,6 +839,7 @@ function Sidebar({
   selectedProjectId,
   page,
   busy,
+  selectingProjectId,
   onPage,
   onProject,
   onAddProject,
@@ -659,6 +850,7 @@ function Sidebar({
   selectedProjectId?: string
   page: Page
   busy: boolean
+  selectingProjectId: string | null
   onPage: (page: Page) => void
   onProject: (id: string) => void
   onAddProject: () => void
@@ -719,8 +911,15 @@ function Sidebar({
       </button>
       <div className="project-list">
         {snapshot.projects.map((project, index) => (
-          <button key={project.id} onClick={() => onProject(project.id)} className={selectedProjectId === project.id ? 'selected' : ''}>
-            <span className={`project-dot dot-${index % 3}`} />
+          <button
+            key={project.id}
+            aria-busy={selectingProjectId === project.id}
+            onClick={() => onProject(project.id)}
+            className={selectedProjectId === project.id ? 'selected' : ''}
+          >
+            {selectingProjectId === project.id
+              ? <LoaderCircle className="spin" size={8} />
+              : <span className={`project-dot dot-${index % 3}`} />}
             <span>{project.name}</span>
           </button>
         ))}
@@ -1032,7 +1231,7 @@ function ProjectsPage({
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label><span>저장소 경로</span><div className="path-field"><code>{project.path}</code><button type="button" disabled={project.isDemo} onClick={onOpen}><FolderOpen size={14} /> 열기</button></div></label>
         <label><span>검증 명령</span><input value={testCommand} placeholder="예: pnpm check 또는 xcodebuild test ..." onChange={(event) => setTestCommand(event.target.value)} /><small>shell 연산자 없이 허용된 실행 파일과 인자만 입력한다.</small></label>
-        <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
+        <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
         <button className="primary-button" type="submit">설정 저장</button>
       </form>
       <section className="panel danger-zone">

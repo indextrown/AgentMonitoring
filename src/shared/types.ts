@@ -48,6 +48,24 @@ export interface ProjectRecord {
   createdAt: string
 }
 
+export interface ProjectInspection {
+  projectId: string
+  branch: string | null
+  headCommit: string | null
+  lastCommitAt: string | null
+  clean: boolean
+  changeCount: number
+  hasRemote: boolean
+  primaryLanguage: string | null
+  languages: string[]
+  tools: string[]
+  manifests: string[]
+  trackedFileCount: number
+  testFileCount: number
+  suggestedTestCommands: string[]
+  inspectedAt: string
+}
+
 export interface TaskRecord {
   id: string
   projectId: string
@@ -139,6 +157,7 @@ export interface AgentMonitoringBridge {
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
+  inspectProject: (projectId: string) => Promise<ProjectInspection>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
