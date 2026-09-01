@@ -236,13 +236,27 @@ export const demoBridge: AgentMonitoringBridge = {
     const project = state.projects.find((item) => item.id === requestedProjectId)
     if (!project) throw new Error('프로젝트를 찾을 수 없습니다.')
     const connected = !project.isDemo
+    const dirty = connected && searchParams.get('inspection') === 'dirty'
+    const dirtyFiles = [0, 1, 2, 3, 4].map((index) => ({
+      kind: 'untracked' as const,
+      path: `fastlane/screenshots/ko/${index}_APP_IPHONE_65_${index}.png`
+    }))
     return {
       projectId: project.id,
       branch: connected ? 'main' : 'demo/main',
       headCommit: 'a1b2c3d',
       lastCommitAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-      clean: true,
-      changeCount: 0,
+      clean: !dirty,
+      changeCount: dirty ? dirtyFiles.length : 0,
+      changeSummary: {
+        modified: 0,
+        added: 0,
+        deleted: 0,
+        renamed: 0,
+        untracked: dirty ? dirtyFiles.length : 0,
+        conflicted: 0
+      },
+      changePreview: dirty ? dirtyFiles : [],
       hasRemote: true,
       primaryLanguage: connected ? 'TypeScript' : 'C++',
       languages: connected ? ['TypeScript', 'CSS'] : ['C++', 'C#'],

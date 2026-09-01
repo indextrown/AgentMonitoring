@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { inspectProject } from '../../electron/main/project-inspector'
+import { inspectProject, parseGitStatus } from '../../electron/main/project-inspector'
 import type { ProjectRecord } from '../../src/shared/types'
 
 const execFileAsync = promisify(execFile)
@@ -15,7 +15,29 @@ afterEach(async () => {
 })
 
 describe('inspectProject', () => {
-  it('detects a dirty Swift and Tuist repository without reading tracked secret contents', async () => {
+  it('classifies porcelain status codes and keeps the renamed destination path', () => {
+    const status = [
+      ' M Sources/App.swift',
+      'A  Sources/New.swift',
+      ' D Sources/Old.swift',
+      'R  Sources/Renamed.swift',
+      'Sources/Previous.swift',
+      '?? fastlane/screenshots/0.png',
+      'UU Project.swift',
+      ''
+    ].join('\0')
+
+    expect(parseGitStatus(status)).toEqual([
+      { kind: 'modified', path: 'Sources/App.swift' },
+      { kind: 'added', path: 'Sources/New.swift' },
+      { kind: 'deleted', path: 'Sources/Old.swift' },
+      { kind: 'renamed', path: 'Sources/Renamed.swift' },
+      { kind: 'untracked', path: 'fastlane/screenshots/0.png' },
+      { kind: 'conflicted', path: 'Project.swift' }
+    ])
+  })
+
+  it('classifies every changed file without returning tracked secret contents', async () => {
     const repository = await mkdtemp(join(tmpdir(), 'agent-monitoring-inspection-'))
     temporaryDirectories.push(repository)
     await execFileAsync('git', ['init', '-b', 'main'], { cwd: repository })
@@ -32,10 +54,11 @@ describe('inspectProject', () => {
       ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'fixture'],
       { cwd: repository }
     )
-    await execFileAsync('git', ['config', 'core.fileMode', 'false'], { cwd: repository })
-    await chmod(join(repository, '.env'), 0o000)
     await execFileAsync('git', ['remote', 'add', 'origin', 'https://example.invalid/fixture.git'], { cwd: repository })
-    await writeFile(join(repository, 'local-change.txt'), 'not committed\n')
+    await writeFile(join(repository, 'Sources', 'App.swift'), 'struct App { let changed = true }\n')
+    await mkdir(join(repository, 'fastlane', 'screenshots'), { recursive: true })
+    await writeFile(join(repository, 'fastlane', 'screenshots', '0.png'), 'fixture-image-0\n')
+    await writeFile(join(repository, 'fastlane', 'screenshots', '1.png'), 'fixture-image-1\n')
 
     const project: ProjectRecord = {
       id: '11111111-1111-4111-8111-111111111111',
@@ -51,7 +74,20 @@ describe('inspectProject', () => {
       projectId: project.id,
       branch: 'main',
       clean: false,
-      changeCount: 2,
+      changeCount: 3,
+      changeSummary: {
+        modified: 1,
+        added: 0,
+        deleted: 0,
+        renamed: 0,
+        untracked: 2,
+        conflicted: 0
+      },
+      changePreview: [
+        { kind: 'modified', path: 'Sources/App.swift' },
+        { kind: 'untracked', path: 'fastlane/screenshots/0.png' },
+        { kind: 'untracked', path: 'fastlane/screenshots/1.png' }
+      ],
       hasRemote: true,
       primaryLanguage: 'Swift',
       tools: ['Tuist'],

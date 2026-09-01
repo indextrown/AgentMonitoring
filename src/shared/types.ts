@@ -48,6 +48,22 @@ export interface ProjectRecord {
   createdAt: string
 }
 
+export type ProjectChangeKind = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted'
+
+export interface ProjectChangeSummary {
+  modified: number
+  added: number
+  deleted: number
+  renamed: number
+  untracked: number
+  conflicted: number
+}
+
+export interface ProjectChangeDetail {
+  kind: ProjectChangeKind
+  path: string
+}
+
 export interface ProjectInspection {
   projectId: string
   branch: string | null
@@ -55,6 +71,8 @@ export interface ProjectInspection {
   lastCommitAt: string | null
   clean: boolean
   changeCount: number
+  changeSummary: ProjectChangeSummary
+  changePreview: ProjectChangeDetail[]
   hasRemote: boolean
   primaryLanguage: string | null
   languages: string[]

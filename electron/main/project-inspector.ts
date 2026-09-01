@@ -1,9 +1,16 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { ProjectInspection, ProjectRecord } from '../../src/shared/types'
+import type {
+  ProjectChangeDetail,
+  ProjectChangeKind,
+  ProjectChangeSummary,
+  ProjectInspection,
+  ProjectRecord
+} from '../../src/shared/types'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_BYTES = 4_000_000
+const CHANGE_PREVIEW_LIMIT = 5
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   swift: 'Swift',
@@ -46,13 +53,13 @@ const MANIFEST_NAMES = new Set([
   'Podfile'
 ])
 
-async function runGit(projectPath: string, args: string[], optional = false): Promise<string> {
+async function runGit(projectPath: string, args: string[], optional = false, trim = true): Promise<string> {
   try {
     const result = await execFileAsync('git', ['-C', projectPath, ...args], {
       encoding: 'utf8',
       maxBuffer: MAX_OUTPUT_BYTES
     })
-    return result.stdout.trim()
+    return trim ? result.stdout.trim() : result.stdout
   } catch (error) {
     if (optional) return ''
     throw new Error(`저장소 정보를 확인할 수 없습니다: ${String(error)}`)
@@ -106,16 +113,52 @@ function suggestTestCommands(tools: string[]): string[] {
   return commands.slice(0, 4)
 }
 
+function changeKind(code: string): ProjectChangeKind {
+  if (code === '??') return 'untracked'
+  if (code.includes('U') || code === 'AA' || code === 'DD') return 'conflicted'
+  if (code.includes('D')) return 'deleted'
+  if (code.includes('R') || code.includes('C')) return 'renamed'
+  if (code.includes('A')) return 'added'
+  return 'modified'
+}
+
+export function parseGitStatus(status: string): ProjectChangeDetail[] {
+  if (!status) return []
+  const records = status.split('\0')
+  const changes: ProjectChangeDetail[] = []
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]
+    if (!record || record.length < 4) continue
+    const code = record.slice(0, 2)
+    changes.push({ kind: changeKind(code), path: record.slice(3) })
+    if (code.includes('R') || code.includes('C')) index += 1
+  }
+  return changes
+}
+
+function summarizeChanges(changes: ProjectChangeDetail[]): ProjectChangeSummary {
+  const summary: ProjectChangeSummary = {
+    modified: 0,
+    added: 0,
+    deleted: 0,
+    renamed: 0,
+    untracked: 0,
+    conflicted: 0
+  }
+  for (const change of changes) summary[change.kind] += 1
+  return summary
+}
+
 export async function inspectProject(project: ProjectRecord): Promise<ProjectInspection> {
   const [branch, status, remotes, head, trackedFiles] = await Promise.all([
     runGit(project.path, ['branch', '--show-current'], true),
-    runGit(project.path, ['status', '--short', '--untracked-files=normal']),
+    runGit(project.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], false, false),
     runGit(project.path, ['remote'], true),
     runGit(project.path, ['log', '-1', '--format=%h%x09%cI'], true),
     runGit(project.path, ['ls-files'])
   ])
   const files = trackedFiles ? trackedFiles.split(/\r?\n/).filter(Boolean) : []
-  const changes = status ? status.split(/\r?\n/).filter(Boolean) : []
+  const changes = parseGitStatus(status)
   const languages = detectLanguages(files)
   const tools = detectTools(files)
   const [headCommit, lastCommitAt] = head ? head.split('\t', 2) : [null, null]
@@ -131,6 +174,8 @@ export async function inspectProject(project: ProjectRecord): Promise<ProjectIns
     lastCommitAt: lastCommitAt || null,
     clean: changes.length === 0,
     changeCount: changes.length,
+    changeSummary: summarizeChanges(changes),
+    changePreview: changes.slice(0, CHANGE_PREVIEW_LIMIT),
     hasRemote: Boolean(remotes),
     primaryLanguage: languages[0] ?? null,
     languages,
