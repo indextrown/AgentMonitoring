@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test'
 
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-02T09:00:00+09:00'))
+})
+
 test('matches the dense monitoring dashboard structure', async ({ page }) => {
   await page.goto('/')
 
@@ -58,4 +62,27 @@ test('starts from a real-project onboarding state without seeded data', async ({
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   await expect(page.getByRole('heading', { name: 'ConnectedRepository' })).toBeVisible()
   await expect(page.getByText('등록된 작업이 없습니다.')).toBeVisible()
+})
+
+test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.locator('.current-footer').getByRole('button', { name: '새 작업' }).click()
+  await page.getByPlaceholder('예: 네비게이션 경로 이탈 감지 구현').fill('승인 적용 확인')
+  await page
+    .getByPlaceholder('구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다.')
+    .fill('승인된 변경을 원본 저장소에 안전하게 적용하는 흐름을 확인한다.')
+  await page.getByRole('button', { name: '작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await drawer.getByRole('button', { name: '실행' }).click()
+  await expect(drawer.getByText('안전한 로컬 적용')).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '원본에 적용' })).toBeVisible()
+
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toContain('fast-forward 방식으로 적용합니다')
+    await dialog.accept()
+  })
+  await drawer.getByRole('button', { name: '원본에 적용' }).click()
+  await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })

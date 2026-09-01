@@ -9,6 +9,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:4179',
     colorScheme: 'dark',
+    timezoneId: 'Asia/Seoul',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure'
   },

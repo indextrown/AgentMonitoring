@@ -142,9 +142,9 @@ function registerIpc(): void {
     await requireRunner().stop(taskId)
   })
 
-  ipcMain.handle('task:approve', (_event, taskId: string) => {
+  ipcMain.handle('task:approve', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
-    requireRunner().approve(taskId)
+    await requireRunner().approve(taskId)
   })
 
   ipcMain.handle('task:discard', async (_event, taskId: string) => {

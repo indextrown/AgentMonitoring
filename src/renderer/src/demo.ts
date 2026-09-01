@@ -208,7 +208,7 @@ export const demoBridge: AgentMonitoringBridge = {
       name: 'ConnectedRepository',
       path: 'demo://connected-repository',
       testCommand: 'pnpm check',
-      isDemo: true,
+      isDemo: false,
       createdAt: now
     }
     state = { ...state, projects: [...state.projects, project], selectedProject: project }
@@ -264,7 +264,7 @@ export const demoBridge: AgentMonitoringBridge = {
   },
   approveTask: async (taskId) => {
     const task = updateTask(taskId, 'completed')
-    emit(task, 'task_completed', 'human', `${task.title} 변경 승인`)
+    emit(task, 'task_completed', 'human', `${task.title} 변경을 원본 브랜치에 적용`)
   },
   discardTask: async (taskId) => {
     const task = updateTask(taskId, 'discarded')

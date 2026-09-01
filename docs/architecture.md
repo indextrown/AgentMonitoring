@@ -42,7 +42,7 @@ awaiting_approval/failed/stopped → discarded
 | Implementer | workspace-write | 제품 코드 | 목표 구현과 테스트 실패 수정 |
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
 | Reviewer | read-only | 없음 | diff, 회귀, 보안, 테스트 공백 보고 |
-| Human | UI 승인 | 상태 전이 | 최종 승인·중단·폐기 |
+| Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
 
 ## Git 격리
 
@@ -53,7 +53,9 @@ branch: agentmonitor/<task-slug>-<task-id-prefix>
 path:   <Electron userData>/worktrees/<project-id>/<task-id>
 ```
 
-Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용한다. 원본 checkout은 수정하지 않는다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다.
+Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗한지 확인하고, worktree 변경을 작업 브랜치에 커밋한 뒤 현재 로컬 브랜치에 `git merge --ff-only`로 반영한다. 원본이 dirty하거나 브랜치가 분기되었으면 상태를 `awaiting_approval`로 유지하고 적용을 중단한다.
+
+성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. 작업 브랜치는 승인 후에도 로컬 감사 기록으로 남기며 원격 push는 수행하지 않는다.
 
 ## 데이터 모델
 
@@ -87,6 +89,8 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용한다. 원본 che
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.
 - 로그인은 app-server의 `account/login/start`로 시작하고 `account/login/completed` 알림으로 완료를 확정한다.
 - 작업용 `codex exec`에도 같은 전용 `CODEX_HOME`과 ChatGPT 전용 인증 정책을 적용한다.
+- 승인 적용은 깨끗한 원본 checkout과 fast-forward 가능 조건을 모두 만족할 때만 수행한다.
+- 승인 실패 시 강제 merge, reset, stash 또는 사용자 파일 덮어쓰기를 시도하지 않는다.
 
 ## 의도적으로 남긴 제한
 
@@ -94,5 +98,6 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용한다. 원본 che
 - Reviewer 보고를 구조화된 finding으로 자동 분해하지 않는다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
+- 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.
 
 이 제한은 로컬 개인용 MVP에서 허용한다. 팀 사용이나 자동 merge를 추가하기 전에 복구 관리자, approval policy, 테스트 잠금, 서명된 감사 로그를 먼저 설계해야 한다.
