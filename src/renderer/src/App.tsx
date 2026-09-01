@@ -52,6 +52,7 @@ import type {
   EventKind,
   EventRecord,
   NoteRecord,
+  ProjectChangeKind,
   ProjectRecord,
   ProjectInspection,
   TaskChanges,
@@ -76,6 +77,33 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   stopped: '중단',
   discarded: '폐기'
 }
+
+const PROJECT_CHANGE_LABELS: Record<ProjectChangeKind, string> = {
+  modified: '수정된 파일',
+  added: '추가된 파일',
+  deleted: '삭제된 파일',
+  renamed: '이름 변경',
+  untracked: 'Git 미추적 새 파일',
+  conflicted: '충돌 파일'
+}
+
+const PROJECT_CHANGE_PATH_LABELS: Record<ProjectChangeKind, string> = {
+  modified: '수정',
+  added: '추가',
+  deleted: '삭제',
+  renamed: '이름 변경',
+  untracked: '미추적',
+  conflicted: '충돌'
+}
+
+const PROJECT_CHANGE_ORDER: ProjectChangeKind[] = [
+  'conflicted',
+  'modified',
+  'added',
+  'deleted',
+  'renamed',
+  'untracked'
+]
 
 const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard }> = [
   { page: 'dashboard', label: '대시보드', icon: LayoutDashboard },
@@ -731,7 +759,25 @@ function ProjectStartPage({
       {inspection && !inspection.clean && (
         <div className="readiness-warning" role="status">
           <AlertTriangle size={15} />
-          <p><strong>원본 저장소에 변경 {inspection.changeCount}개가 있습니다.</strong>격리 작업은 만들 수 있지만 `원본에 적용`하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
+          <div>
+            <strong>원본 저장소에 커밋되지 않은 파일이 있습니다.</strong>
+            <div className="change-summary" aria-label={`변경 파일 총 ${inspection.changeCount}개`}>
+              {PROJECT_CHANGE_ORDER.filter((kind) => inspection.changeSummary[kind] > 0).map((kind) => (
+                <span key={kind}>{PROJECT_CHANGE_LABELS[kind]} {inspection.changeSummary[kind]}개</span>
+              ))}
+            </div>
+            <div className="change-preview" aria-label="변경 파일 일부">
+              {inspection.changePreview.map((change) => (
+                <code key={`${change.kind}:${change.path}`} title={change.path}>
+                  <span>{PROJECT_CHANGE_PATH_LABELS[change.kind]}</span>{change.path}
+                </code>
+              ))}
+              {inspection.changeCount > inspection.changePreview.length && (
+                <small>외 {inspection.changeCount - inspection.changePreview.length}개</small>
+              )}
+            </div>
+            <p>격리 작업은 만들 수 있지만 `원본에 적용`하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
+          </div>
         </div>
       )}
 

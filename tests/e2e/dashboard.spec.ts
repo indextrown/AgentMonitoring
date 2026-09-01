@@ -149,6 +149,21 @@ test('starts from a real-project onboarding state without seeded data', async ({
   await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
 })
 
+test('explains dirty repositories with exact file categories and paths', async ({ page }) => {
+  await page.goto('/?workspace=empty&inspection=dirty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  await expect(page.getByText('원본 저장소에 커밋되지 않은 파일이 있습니다.')).toBeVisible()
+  await expect(page.getByText('Git 미추적 새 파일 5개', { exact: true })).toBeVisible()
+  await expect(page.locator('.change-preview code').filter({ hasText: 'fastlane/screenshots/ko/0_APP_IPHONE_65_0.png' })).toBeVisible()
+  await expect(page.getByText('원본 저장소에 변경 1개가 있습니다.')).toHaveCount(0)
+  await expect(page).toHaveScreenshot('project-dirty-readiness.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+})
+
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

@@ -875,8 +875,12 @@ kbd {
   background: #211811;
 }
 
+.readiness-warning > svg {
+  margin-top: 2px;
+}
+
 .readiness-warning p {
-  margin: 0;
+  margin: 8px 0 0;
   color: #896e5a;
   font-size: 8px;
   line-height: 1.55;
@@ -884,9 +888,55 @@ kbd {
 
 .readiness-warning strong {
   display: block;
-  margin-bottom: 2px;
+  margin-bottom: 7px;
   color: #d2a277;
   font-size: 9px;
+}
+
+.change-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.change-summary span {
+  padding: 3px 6px;
+  border: 1px solid #5b402e;
+  border-radius: 999px;
+  color: #c38d61;
+  background: #291d14;
+  font-size: 7px;
+  font-weight: 650;
+}
+
+.change-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 4px 8px;
+  margin-top: 7px;
+}
+
+.change-preview code {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #9b8879;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-preview code span {
+  flex: none;
+  color: #bf8a60;
+}
+
+.change-preview small {
+  align-self: center;
+  color: #806a59;
+  font-size: 7px;
 }
 
 .validation-setup,
