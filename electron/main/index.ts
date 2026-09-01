@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { z } from 'zod'
-import type { CreateTaskInput, EventRecord, UpdateProjectInput } from '../../src/shared/types'
+import type { CodexAuthStatus, CreateTaskInput, EventRecord, UpdateProjectInput } from '../../src/shared/types'
+import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { AgentRunner } from './runner'
 import { AppStore } from './store'
 
@@ -33,9 +34,14 @@ const addNoteSchema = z.object({
 let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
+let codexAuth: CodexAuthManager | null = null
 
 function publish(event: EventRecord): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('runner:event', event)
+}
+
+function publishAuth(status: CodexAuthStatus): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('codex-auth:changed', status)
 }
 
 function requireStore(): AppStore {
@@ -46,6 +52,11 @@ function requireStore(): AppStore {
 function requireRunner(): AgentRunner {
   if (!runner) throw new Error('실행기가 준비되지 않았습니다.')
   return runner
+}
+
+function requireCodexAuth(): CodexAuthManager {
+  if (!codexAuth) throw new Error('Codex 인증 관리자가 준비되지 않았습니다.')
+  return codexAuth
 }
 
 async function createWindow(): Promise<void> {
@@ -78,6 +89,17 @@ async function createWindow(): Promise<void> {
 }
 
 function registerIpc(): void {
+  ipcMain.handle('codex-auth:status', () => requireCodexAuth().status())
+
+  ipcMain.handle('codex-auth:login', () =>
+    requireCodexAuth().login(async (url) => {
+      await shell.openExternal(url)
+    })
+  )
+
+  ipcMain.handle('codex-auth:cancel', () => requireCodexAuth().cancelLogin())
+  ipcMain.handle('codex-auth:logout', () => requireCodexAuth().logout())
+
   ipcMain.handle('dashboard:snapshot', (_event, projectId?: string) => requireStore().getSnapshot(projectId))
 
   ipcMain.handle('project:add', async () => {
@@ -110,6 +132,8 @@ function registerIpc(): void {
 
   ipcMain.handle('task:run', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
     await requireRunner().run(taskId)
   })
 
@@ -141,9 +165,13 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
-  const databasePath = join(app.getPath('userData'), 'agent-monitoring.sqlite')
+  const userDataPath = app.getPath('userData')
+  const databasePath = join(userDataPath, 'agent-monitoring.sqlite')
+  const codexHome = join(userDataPath, 'codex')
+  const codexCommand = await resolveCodexCommand()
   store = new AppStore(databasePath)
-  runner = new AgentRunner(store, join(app.getPath('userData'), 'worktrees'), publish)
+  codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
+  runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()
   await createWindow()
 
@@ -157,6 +185,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  void codexAuth?.dispose()
+  codexAuth = null
   store?.close()
   store = null
 })

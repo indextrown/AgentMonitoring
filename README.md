@@ -11,6 +11,7 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - 작업별 독립 Git worktree와 `agentmonitor/*` 브랜치
 - Test Designer → Critic → Implementer → Test Runner → Reviewer 파이프라인
 - `codex exec --json` 기반 실시간 JSONL 이벤트 수집
+- Codex app-server 기반 앱 내 ChatGPT OAuth 로그인
 - 실패한 테스트의 제한된 자가 수정 루프
 - 작업 중단, 재실행, 변경 승인, worktree 폐기
 - SQLite 기반 로컬 영속화와 앱 재시작 복구
@@ -50,9 +51,11 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - Node.js 24 이상
 - pnpm 11 이상
 - Git
-- 로그인된 Codex CLI
+- Codex CLI
 
-Codex CLI는 실행 경로에서 `codex` 명령을 찾을 수 있어야 한다. 앱은 API 키를 직접 받거나 저장하지 않고 기존 Codex CLI 인증을 사용한다.
+Codex CLI는 실행 경로에서 `codex` 명령을 찾을 수 있어야 한다. 앱을 처음 실행하면 로그인 화면에서 **ChatGPT로 계속**을 누르고 브라우저의 공식 OpenAI 인증을 완료한다. 별도의 API 키는 필요하지 않다.
+
+AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 가져오지 않는다. Electron `userData` 아래에 앱 전용 `CODEX_HOME`을 만들고 공식 Codex app-server의 `account/login/start` 브라우저 흐름을 사용한다. 인증 정보의 저장과 토큰 갱신은 Codex가 담당하며, 데이터베이스에는 토큰을 저장하지 않는다.
 
 ## 설치와 실행
 
@@ -131,7 +134,7 @@ Electron의 `userData` 아래에 다음 데이터가 저장된다.
 - `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모
 - `worktrees/<project-id>/<task-id>`: 작업별 격리 Git worktree
 
-소스 저장소의 파일 내용이나 인증 토큰을 별도 클라우드로 전송하는 백엔드는 없다. Codex가 처리하는 데이터의 정책은 사용 중인 Codex 계정과 조직 설정을 따른다.
+소스 저장소의 파일 내용이나 인증 토큰을 별도 클라우드로 전송하는 백엔드는 없다. Codex 인증은 앱 전용 저장소에 격리되고 SQLite에는 기록되지 않는다. Codex가 처리하는 데이터의 정책은 로그인한 ChatGPT 계정과 조직 설정을 따른다.
 
 ## 현재 범위
 

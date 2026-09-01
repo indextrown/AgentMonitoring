@@ -16,6 +16,8 @@ import {
   GitBranch,
   LayoutDashboard,
   ListTodo,
+  LogIn,
+  LogOut,
   LoaderCircle,
   MessageSquare,
   NotebookPen,
@@ -24,6 +26,7 @@ import {
   Plus,
   Search,
   Settings2,
+  ShieldCheck,
   Square,
   SquareTerminal,
   Trash2,
@@ -42,6 +45,7 @@ import {
 import { buildDailySeries, buildHourlyActivity, isActiveTask } from '../../shared/domain'
 import type {
   AgentMonitoringBridge,
+  CodexAuthStatus,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -116,6 +120,7 @@ function statusTone(status: TaskStatus): string {
 
 export function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
+  const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string>()
   const selectedProjectRef = useRef<string | undefined>(undefined)
   const [page, setPage] = useState<Page>('dashboard')
@@ -139,6 +144,20 @@ export function App(): React.JSX.Element {
     }
   }, [])
 
+  const loadCodexAuth = useCallback(async () => {
+    try {
+      setCodexAuth(await bridge.getCodexAuth())
+    } catch (authError) {
+      setCodexAuth({
+        state: 'error',
+        authMode: null,
+        email: null,
+        planType: null,
+        message: String(authError).replace(/^Error:\s*/, '')
+      })
+    }
+  }, [])
+
   useEffect(() => {
     void load()
     const unsubscribe = bridge.onEvent(() => void load(selectedProjectRef.current))
@@ -148,6 +167,11 @@ export function App(): React.JSX.Element {
       window.clearInterval(interval)
     }
   }, [load])
+
+  useEffect(() => {
+    void loadCodexAuth()
+    return bridge.onCodexAuthChanged(setCodexAuth)
+  }, [loadCodexAuth])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -202,12 +226,47 @@ export function App(): React.JSX.Element {
     }
   }
 
-  if (!snapshot) {
+  const loginCodex = async (): Promise<void> => {
+    setCodexAuth({ state: 'signing_in', authMode: null, email: null, planType: null })
+    try {
+      setCodexAuth(await bridge.loginCodex())
+    } catch (authError) {
+      setCodexAuth({
+        state: 'signed_out',
+        authMode: null,
+        email: null,
+        planType: null,
+        message: String(authError).replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '')
+      })
+    }
+  }
+
+  const logoutCodex = async (): Promise<void> => {
+    if (!window.confirm('AgentMonitoring 전용 Codex 계정에서 로그아웃할까요?')) return
+    try {
+      setCodexAuth(await bridge.logoutCodex())
+    } catch (authError) {
+      setError(String(authError))
+    }
+  }
+
+  if (!snapshot || !codexAuth) {
     return (
       <main className="loading-screen">
         <LoaderCircle className="spin" size={20} />
         <span>AgentMonitoring 준비 중</span>
       </main>
+    )
+  }
+
+  if (codexAuth.state !== 'signed_in') {
+    return (
+      <CodexLoginScreen
+        status={codexAuth}
+        onLogin={() => void loginCodex()}
+        onRetry={() => void loadCodexAuth()}
+        onCancel={() => void bridge.cancelCodexLogin().then(setCodexAuth)}
+      />
     )
   }
 
@@ -234,12 +293,20 @@ export function App(): React.JSX.Element {
             <p className="eyebrow">PROJECT CONTROL PLANE</p>
             <h1>{snapshot.selectedProject.name}</h1>
           </div>
-          <div className="live-indicator">
-            <span className="live-dot" />
-            <span>실시간</span>
-            <span className="last-activity">
-              마지막 활동 {snapshot.events[0] ? timeAgo(snapshot.events[0].createdAt) : '없음'}
-            </span>
+          <div className="workspace-actions">
+            <button className="codex-account" onClick={() => void logoutCodex()} title="AgentMonitoring 전용 Codex 로그아웃">
+              <ShieldCheck size={13} />
+              <span>{codexAuth.email ?? 'ChatGPT 연결됨'}</span>
+              {codexAuth.planType && <small>{codexAuth.planType}</small>}
+              <LogOut size={12} />
+            </button>
+            <div className="live-indicator">
+              <span className="live-dot" />
+              <span>실시간</span>
+              <span className="last-activity">
+                마지막 활동 {snapshot.events[0] ? timeAgo(snapshot.events[0].createdAt) : '없음'}
+              </span>
+            </div>
           </div>
         </header>
 
@@ -326,6 +393,71 @@ export function App(): React.JSX.Element {
         </div>
       )}
     </div>
+  )
+}
+
+function CodexLoginScreen({
+  status,
+  onLogin,
+  onRetry,
+  onCancel
+}: {
+  status: CodexAuthStatus
+  onLogin: () => void
+  onRetry: () => void
+  onCancel: () => void
+}): React.JSX.Element {
+  const signingIn = status.state === 'signing_in'
+  const unavailable = status.state === 'unavailable'
+  return (
+    <main className="auth-shell">
+      <div className="auth-titlebar">
+        <div className="brand-mark"><Activity size={14} /></div>
+        <span>AgentMonitoring</span>
+      </div>
+      <section className="auth-card" aria-live="polite">
+        <div className="auth-icon"><Bot size={25} /></div>
+        <p className="eyebrow">CODEX CONNECTION</p>
+        <h1>{signingIn ? '브라우저에서 로그인을 완료하세요' : 'Codex 계정을 연결하세요'}</h1>
+        <p className="auth-description">
+          {signingIn
+            ? '공식 ChatGPT 로그인 창이 열렸습니다. 승인이 끝나면 이 화면이 자동으로 전환됩니다.'
+            : 'AgentMonitoring이 테스트 설계, 구현, 비평과 자가 수리를 실행할 때 사용할 ChatGPT 계정입니다.'}
+        </p>
+
+        <div className="auth-boundary">
+          <span><Check size={13} /> OpenAI API 키가 필요하지 않습니다.</span>
+          <span><Check size={13} /> 다른 Codex 앱과 분리된 전용 로그인입니다.</span>
+          <span><Check size={13} /> 인증 정보 저장과 갱신은 공식 Codex가 담당합니다.</span>
+        </div>
+
+        {status.message && <div className="auth-message"><AlertTriangle size={14} />{status.message}</div>}
+        {unavailable && (
+          <div className="auth-install">
+            <strong>Codex CLI 설치가 필요합니다.</strong>
+            <code>codex --version</code>
+          </div>
+        )}
+
+        {!signingIn && (
+          <button className="auth-primary" onClick={onLogin}>
+            <LogIn size={15} /> ChatGPT로 계속
+          </button>
+        )}
+        {signingIn && (
+          <>
+            <button className="auth-primary" disabled>
+              <LoaderCircle className="spin" size={15} /> 로그인 승인 대기 중
+            </button>
+            <button className="auth-secondary" onClick={onCancel}>로그인 취소</button>
+          </>
+        )}
+        {!signingIn && status.state !== 'signed_out' && (
+          <button className="auth-secondary" onClick={onRetry}>상태 다시 확인</button>
+        )}
+        <p className="auth-footnote">로그인하면 ChatGPT 구독의 Codex 사용 범위와 조직 정책이 적용됩니다.</p>
+      </section>
+    </main>
   )
 }
 

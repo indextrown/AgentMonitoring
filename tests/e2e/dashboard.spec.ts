@@ -25,3 +25,19 @@ test('opens search and task detail interactions', async ({ page }) => {
   await expect(page.locator('.task-drawer')).toBeVisible()
   await expect(page.getByText('작업 계약')).toBeVisible()
 })
+
+test('gates the workspace behind the dedicated Codex login', async ({ page }) => {
+  await page.goto('/?auth=signed-out')
+
+  await expect(page.getByRole('heading', { name: 'Codex 계정을 연결하세요' })).toBeVisible()
+  await expect(page.getByText('다른 Codex 앱과 분리된 전용 로그인입니다.')).toBeVisible()
+  await expect(page).toHaveScreenshot('codex-login.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+
+  await page.getByRole('button', { name: 'ChatGPT로 계속' }).click()
+  await expect(page.getByRole('heading', { name: '브라우저에서 로그인을 완료하세요' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'ElmwoodOnline' })).toBeVisible()
+})

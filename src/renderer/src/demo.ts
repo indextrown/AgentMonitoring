@@ -1,5 +1,6 @@
 import type {
   AgentMonitoringBridge,
+  CodexAuthStatus,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -127,6 +128,16 @@ function buildSnapshot(): DashboardSnapshot {
 
 let state = buildSnapshot()
 const listeners = new Set<(event: EventRecord) => void>()
+const authListeners = new Set<(status: CodexAuthStatus) => void>()
+let demoAuth: CodexAuthStatus = new URLSearchParams(window.location.search).get('auth') === 'signed-out'
+  ? { state: 'signed_out', authMode: null, email: null, planType: null }
+  : { state: 'signed_in', authMode: 'chatgpt', email: 'demo@agentmonitoring.local', planType: 'plus' }
+
+function updateDemoAuth(status: CodexAuthStatus): CodexAuthStatus {
+  demoAuth = status
+  authListeners.forEach((listener) => listener(status))
+  return status
+}
 
 function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: string): void {
   const event: EventRecord = {
@@ -158,6 +169,19 @@ function updateTask(taskId: string, status: TaskStatus): TaskRecord {
 }
 
 export const demoBridge: AgentMonitoringBridge = {
+  getCodexAuth: async () => demoAuth,
+  loginCodex: async () => {
+    updateDemoAuth({ state: 'signing_in', authMode: null, email: null, planType: null })
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
+    return updateDemoAuth({
+      state: 'signed_in',
+      authMode: 'chatgpt',
+      email: 'demo@agentmonitoring.local',
+      planType: 'plus'
+    })
+  },
+  cancelCodexLogin: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
+  logoutCodex: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
   getSnapshot: async (requestedProjectId?: string) => {
     const selectedProject = state.projects.find((project) => project.id === requestedProjectId) ?? state.projects[0]
     return {
@@ -237,6 +261,10 @@ export const demoBridge: AgentMonitoringBridge = {
     return note
   },
   openPath: async () => undefined,
+  onCodexAuthChanged: (listener) => {
+    authListeners.add(listener)
+    return () => authListeners.delete(listener)
+  },
   onEvent: (listener) => {
     listeners.add(listener)
     return () => listeners.delete(listener)

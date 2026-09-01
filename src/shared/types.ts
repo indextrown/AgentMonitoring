@@ -25,6 +25,16 @@ export type EventKind =
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low'
 
+export type CodexAuthState = 'checking' | 'signed_out' | 'signing_in' | 'signed_in' | 'unavailable' | 'error'
+
+export interface CodexAuthStatus {
+  state: CodexAuthState
+  authMode: string | null
+  email: string | null
+  planType: string | null
+  message?: string
+}
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -102,6 +112,10 @@ export interface UpdateProjectInput {
 }
 
 export interface AgentMonitoringBridge {
+  getCodexAuth: () => Promise<CodexAuthStatus>
+  loginCodex: () => Promise<CodexAuthStatus>
+  cancelCodexLogin: () => Promise<CodexAuthStatus>
+  logoutCodex: () => Promise<CodexAuthStatus>
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
@@ -112,5 +126,6 @@ export interface AgentMonitoringBridge {
   discardTask: (taskId: string) => Promise<void>
   addNote: (projectId: string, title: string, body: string) => Promise<NoteRecord>
   openPath: (path: string) => Promise<void>
+  onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => () => void
   onEvent: (listener: (event: EventRecord) => void) => () => void
 }

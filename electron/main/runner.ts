@@ -5,6 +5,7 @@ import { parseArgsStringToArgv } from 'string-argv'
 import type { EventRecord, TaskRecord } from '../../src/shared/types'
 import { isActiveTask } from '../../src/shared/domain'
 import { AppStore } from './store'
+import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -87,7 +88,8 @@ export class AgentRunner {
     private readonly store: AppStore,
     private readonly worktreesRoot: string,
     private readonly publish: (event: EventRecord) => void,
-    private readonly codexCommand = 'codex'
+    private readonly codexCommand = 'codex',
+    private readonly codexHome?: string
   ) {}
 
   isRunning(taskId: string): boolean {
@@ -296,7 +298,16 @@ export class AgentRunner {
 
     const result = await this.runProcess(
       this.codexCommand,
-      ['exec', '--json', '--sandbox', sandbox, '--cd', cwd, prompt],
+      [
+        ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
+        'exec',
+        '--json',
+        '--sandbox',
+        sandbox,
+        '--cd',
+        cwd,
+        prompt
+      ],
       cwd,
       control,
       (line) => {
@@ -307,7 +318,8 @@ export class AgentRunner {
         } catch {
           if (line.trim()) this.emit(task, 'agent', actor, redact(line))
         }
-      }
+      },
+      this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env
     )
     if (result.code !== 0) {
       throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
@@ -330,12 +342,13 @@ export class AgentRunner {
     args: string[],
     cwd: string,
     control: ActiveRun | null,
-    onLine?: (line: string) => void
+    onLine?: (line: string) => void,
+    environment: NodeJS.ProcessEnv = process.env
   ): Promise<ProcessResult> {
     return new Promise((resolvePromise, reject) => {
       const child = spawn(command, args, {
         cwd,
-        env: process.env,
+        env: environment,
         stdio: ['ignore', 'pipe', 'pipe']
       })
       if (control) control.child = child

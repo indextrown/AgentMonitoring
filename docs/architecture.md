@@ -13,7 +13,8 @@ Electron main
    ├── 작업 상태 머신
    └── AgentRunner
           ├── Git worktree
-          ├── Codex CLI adapter
+          ├── Codex app-server auth adapter
+          ├── Codex CLI execution adapter
           └── 허용 목록 기반 test runner
 ```
 
@@ -83,6 +84,9 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용한다. 원본 che
 - 검증 명령은 shell을 거치지 않고 허용 목록의 실행 파일만 `spawn`한다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
+- 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.
+- 로그인은 app-server의 `account/login/start`로 시작하고 `account/login/completed` 알림으로 완료를 확정한다.
+- 작업용 `codex exec`에도 같은 전용 `CODEX_HOME`과 ChatGPT 전용 인증 정책을 적용한다.
 
 ## 의도적으로 남긴 제한
 

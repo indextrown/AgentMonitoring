@@ -35,7 +35,10 @@ describe('AgentRunner', () => {
 import { writeFileSync } from 'node:fs'
 const prompt = process.argv.at(-1) ?? ''
 console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
-if (prompt.includes('구현 담당자')) writeFileSync('agent-output.txt', 'implemented\\n')
+if (prompt.includes('구현 담당자')) {
+  writeFileSync('agent-output.txt', 'implemented\\n')
+  writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
+}
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `
@@ -46,7 +49,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const project = store.addProject('Fixture', repository)
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
     const published: string[] = []
-    const runner = new AgentRunner(store, worktrees, (event) => published.push(event.actor), fakeCodex)
+    const codexHome = join(directory, 'codex-home')
+    const runner = new AgentRunner(store, worktrees, (event) => published.push(event.actor), fakeCodex, codexHome)
 
     await runner.run(task.id)
 
@@ -54,6 +58,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(completed.status).toBe('awaiting_approval')
     expect(completed.worktreePath).toBeTruthy()
     expect(await readFile(join(completed.worktreePath!, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
+    expect(await readFile(join(completed.worktreePath!, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
     expect(published).toContain('test-designer')
     expect(published).toContain('critic')
     expect(published).toContain('reviewer')
