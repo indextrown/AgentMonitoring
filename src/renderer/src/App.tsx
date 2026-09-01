@@ -58,6 +58,7 @@ import { demoBridge } from './demo'
 type Page = 'dashboard' | 'tasks' | 'findings' | 'notes' | 'projects'
 type Range = 7 | 30 | 'all'
 
+const electronBridgeUnavailable = !window.agentMonitoring && navigator.userAgent.toLowerCase().includes('electron')
 const bridge: AgentMonitoringBridge = window.agentMonitoring ?? demoBridge
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
@@ -136,8 +137,8 @@ export function App(): React.JSX.Element {
     try {
       const next = await bridge.getSnapshot(projectId)
       setSnapshot(next)
-      setSelectedProjectId(next.selectedProject.id)
-      selectedProjectRef.current = next.selectedProject.id
+      setSelectedProjectId(next.selectedProject?.id)
+      selectedProjectRef.current = next.selectedProject?.id
       setSelectedTask((current) => (current ? next.tasks.find((task) => task.id === current.id) ?? null : null))
     } catch (loadError) {
       setError(String(loadError))
@@ -159,6 +160,7 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    if (electronBridgeUnavailable) return undefined
     void load()
     const unsubscribe = bridge.onEvent(() => void load(selectedProjectRef.current))
     const interval = window.setInterval(() => void load(selectedProjectRef.current), 12_000)
@@ -169,6 +171,7 @@ export function App(): React.JSX.Element {
   }, [load])
 
   useEffect(() => {
+    if (electronBridgeUnavailable) return undefined
     void loadCodexAuth()
     return bridge.onCodexAuthChanged(setCodexAuth)
   }, [loadCodexAuth])
@@ -250,6 +253,10 @@ export function App(): React.JSX.Element {
     }
   }
 
+  if (electronBridgeUnavailable) {
+    return <RuntimeErrorScreen />
+  }
+
   if (!snapshot || !codexAuth) {
     return (
       <main className="loading-screen">
@@ -273,12 +280,13 @@ export function App(): React.JSX.Element {
   const unresolved = snapshot.findings.filter((finding) => !finding.resolved)
   const activeTask = snapshot.tasks.find(isActiveTask) ?? null
   const awaitingTask = snapshot.tasks.find((task) => task.status === 'awaiting_approval') ?? null
+  const selectedProject = snapshot.selectedProject
 
   return (
     <div className="app-shell">
       <Sidebar
         snapshot={snapshot}
-        selectedProjectId={selectedProjectId ?? snapshot.selectedProject.id}
+        selectedProjectId={selectedProjectId ?? selectedProject?.id}
         page={page}
         busy={busy}
         onPage={setPage}
@@ -291,7 +299,7 @@ export function App(): React.JSX.Element {
         <header className="workspace-header">
           <div>
             <p className="eyebrow">PROJECT CONTROL PLANE</p>
-            <h1>{snapshot.selectedProject.name}</h1>
+            <h1>{selectedProject?.name ?? '프로젝트 연결'}</h1>
           </div>
           <div className="workspace-actions">
             <button className="codex-account" onClick={() => void logoutCodex()} title="AgentMonitoring 전용 Codex 로그아웃">
@@ -310,7 +318,10 @@ export function App(): React.JSX.Element {
           </div>
         </header>
 
-        {page === 'dashboard' && (
+        {!selectedProject && (
+          <EmptyWorkspace busy={busy} onAddProject={addProject} />
+        )}
+        {selectedProject && page === 'dashboard' && (
           <DashboardPage
             snapshot={snapshot}
             activeTask={activeTask}
@@ -322,7 +333,7 @@ export function App(): React.JSX.Element {
             onNewTask={() => setTaskModal(true)}
           />
         )}
-        {page === 'tasks' && (
+        {selectedProject && page === 'tasks' && (
           <TasksPage
             tasks={snapshot.tasks}
             onNewTask={() => setTaskModal(true)}
@@ -331,19 +342,19 @@ export function App(): React.JSX.Element {
             onAction={taskAction}
           />
         )}
-        {page === 'findings' && <FindingsPage findings={snapshot.findings} />}
-        {page === 'notes' && <NotesPage notes={snapshot.notes} onNew={() => setNoteModal(true)} />}
-        {page === 'projects' && (
-          <ProjectsPage project={snapshot.selectedProject} onSave={async (project) => {
+        {selectedProject && page === 'findings' && <FindingsPage findings={snapshot.findings} />}
+        {selectedProject && page === 'notes' && <NotesPage notes={snapshot.notes} onNew={() => setNoteModal(true)} />}
+        {selectedProject && page === 'projects' && (
+          <ProjectsPage project={selectedProject} onSave={async (project) => {
             await bridge.updateProject(project)
             await load(project.projectId)
-          }} onOpen={() => void bridge.openPath(snapshot.selectedProject.path)} />
+          }} onOpen={() => void bridge.openPath(selectedProject.path)} />
         )}
       </main>
 
-      {taskModal && (
+      {selectedProject && taskModal && (
         <TaskModal
-          project={snapshot.selectedProject}
+          project={selectedProject}
           onClose={() => setTaskModal(false)}
           onCreate={async (input) => {
             const task = await bridge.createTask(input)
@@ -354,9 +365,9 @@ export function App(): React.JSX.Element {
           }}
         />
       )}
-      {noteModal && (
+      {selectedProject && noteModal && (
         <NoteModal
-          projectId={snapshot.selectedProject.id}
+          projectId={selectedProject.id}
           onClose={() => setNoteModal(false)}
           onCreate={async (projectId, title, body) => {
             await bridge.addNote(projectId, title, body)
@@ -365,7 +376,7 @@ export function App(): React.JSX.Element {
           }}
         />
       )}
-      {searchModal && (
+      {selectedProject && searchModal && (
         <SearchModal
           snapshot={snapshot}
           onClose={() => setSearchModal(false)}
@@ -393,6 +404,78 @@ export function App(): React.JSX.Element {
         </div>
       )}
     </div>
+  )
+}
+
+function RuntimeErrorScreen(): React.JSX.Element {
+  return (
+    <main className="auth-shell">
+      <div className="auth-titlebar">
+        <div className="brand-mark"><Activity size={14} /></div>
+        <span>AgentMonitoring</span>
+      </div>
+      <section className="auth-card" role="alert">
+        <div className="auth-icon error"><Octagon size={25} /></div>
+        <p className="eyebrow">RUNTIME CONNECTION</p>
+        <h1>앱 연결을 불러오지 못했습니다</h1>
+        <p className="auth-description">
+          Electron preload가 연결되지 않아 실제 프로젝트와 로컬 데이터에 접근할 수 없습니다.
+          안전을 위해 데모 화면으로 전환하지 않았습니다.
+        </p>
+        <button className="auth-primary" onClick={() => window.location.reload()}>
+          다시 불러오기
+        </button>
+        <p className="auth-footnote">문제가 계속되면 터미널에서 앱을 종료한 뒤 `pnpm dev`로 다시 실행하세요.</p>
+      </section>
+    </main>
+  )
+}
+
+function EmptyWorkspace({
+  busy,
+  onAddProject
+}: {
+  busy: boolean
+  onAddProject: () => void
+}): React.JSX.Element {
+  return (
+    <section className="workspace-empty">
+      <article className="panel onboarding-card">
+        <div className="onboarding-status"><span className="live-dot" /> LOCAL WORKSPACE READY</div>
+        <div className="onboarding-icon"><FolderOpen size={26} /></div>
+        <p className="eyebrow">START WITH REAL CODE</p>
+        <h2>첫 Git 프로젝트를 연결하세요</h2>
+        <p className="onboarding-copy">
+          샘플 데이터 대신 선택한 로컬 저장소에서 바로 시작합니다. 소스는 로컬에 유지되고,
+          AgentMonitoring은 작업마다 격리된 worktree를 만들어 Codex 실행과 테스트 결과를 추적합니다.
+        </p>
+        <button className="onboarding-primary" disabled={busy} onClick={onAddProject}>
+          {busy ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />}
+          실제 Git 프로젝트 추가
+        </button>
+
+        <div className="onboarding-steps">
+          <div>
+            <span>01</span>
+            <GitBranch size={17} />
+            <strong>저장소 연결</strong>
+            <p>로컬 Git 폴더를 선택합니다.</p>
+          </div>
+          <div>
+            <span>02</span>
+            <SquareTerminal size={17} />
+            <strong>검증 명령 설정</strong>
+            <p>프로젝트 테스트 명령을 등록합니다.</p>
+          </div>
+          <div>
+            <span>03</span>
+            <ShieldCheck size={17} />
+            <strong>작업 실행과 승인</strong>
+            <p>격리 실행 결과를 검토하고 승인합니다.</p>
+          </div>
+        </div>
+      </article>
+    </section>
   )
 }
 
@@ -472,7 +555,7 @@ function Sidebar({
   onSearch
 }: {
   snapshot: DashboardSnapshot
-  selectedProjectId: string
+  selectedProjectId?: string
   page: Page
   busy: boolean
   onPage: (page: Page) => void
@@ -488,14 +571,19 @@ function Sidebar({
         <span>AgentMonitoring</span>
       </div>
       <label className="project-select">
-        <select value={selectedProjectId} onChange={(event) => onProject(event.target.value)}>
+        <select
+          value={selectedProjectId ?? ''}
+          disabled={snapshot.projects.length === 0}
+          onChange={(event) => onProject(event.target.value)}
+        >
+          {snapshot.projects.length === 0 && <option value="">프로젝트 없음</option>}
           {snapshot.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select>
-        <span>{activeCount}개 실행 중</span>
+        <span>{snapshot.projects.length === 0 ? 'Git 저장소를 연결하세요' : `${activeCount}개 실행 중`}</span>
         <ChevronDown size={13} />
       </label>
 
-      <button className="search-trigger" onClick={onSearch}>
+      <button className="search-trigger" disabled={snapshot.projects.length === 0} onClick={onSearch}>
         <Search size={14} />
         <span>검색</span>
         <kbd>⌘K</kbd>
@@ -507,7 +595,12 @@ function Sidebar({
           const Icon = item.icon
           const count = item.page === 'tasks' ? snapshot.tasks.length : item.page === 'notes' ? snapshot.notes.length : null
           return (
-            <button key={item.page} className={page === item.page ? 'active' : ''} onClick={() => onPage(item.page)}>
+            <button
+              key={item.page}
+              className={page === item.page ? 'active' : ''}
+              disabled={snapshot.projects.length === 0}
+              onClick={() => onPage(item.page)}
+            >
               <Icon size={14} />
               <span>{item.label}</span>
               {count !== null && <small>{count}</small>}

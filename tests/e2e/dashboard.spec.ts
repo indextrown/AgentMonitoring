@@ -41,3 +41,21 @@ test('gates the workspace behind the dedicated Codex login', async ({ page }) =>
   await expect(page.getByRole('heading', { name: '브라우저에서 로그인을 완료하세요' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'ElmwoodOnline' })).toBeVisible()
 })
+
+test('starts from a real-project onboarding state without seeded data', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+
+  await expect(page.getByRole('heading', { name: '프로젝트 연결' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '첫 Git 프로젝트를 연결하세요' })).toBeVisible()
+  await expect(page.locator('.project-select select')).toHaveValue('')
+  await expect(page.locator('.project-select select')).toBeDisabled()
+  await expect(page).toHaveScreenshot('empty-workspace.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await expect(page.getByRole('heading', { name: 'ConnectedRepository' })).toBeVisible()
+  await expect(page.getByText('등록된 작업이 없습니다.')).toBeVisible()
+})

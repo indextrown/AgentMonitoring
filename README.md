@@ -15,7 +15,7 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - 실패한 테스트의 제한된 자가 수정 루프
 - 작업 중단, 재실행, 변경 승인, worktree 폐기
 - SQLite 기반 로컬 영속화와 앱 재시작 복구
-- 데모 프로젝트와 샘플 활동 데이터
+- 샘플 데이터 없이 실제 Git 프로젝트로 시작하는 첫 실행 안내
 - `⌘K` 통합 검색과 작업 상세 실시간 로그 drawer
 
 ## 실행 흐름
@@ -59,6 +59,17 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 가져오지 않는�
 
 ## 설치와 실행
 
+`pnpm` 명령이 아직 없다면 Corepack을 준비한다.
+
+```bash
+npm install --global corepack@0.34.7
+corepack enable
+corepack install --global pnpm@11.25.0
+hash -r
+```
+
+이후 프로젝트 의존성을 설치하고 Electron 앱을 실행한다.
+
 ```bash
 pnpm install
 pnpm dev
@@ -84,7 +95,9 @@ pnpm package
 7. `승인 대기`에 도달하면 worktree를 열어 diff를 확인한다.
 8. 변경을 승인하거나 worktree를 폐기한다.
 
-데모 프로젝트는 화면 탐색용이므로 에이전트 작업을 실행할 수 없다.
+앱은 첫 실행 시 프로젝트나 활동 데이터를 자동 생성하지 않는다. 기존 버전에 들어 있던 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하며, 사용자가 등록한 실제 프로젝트와 작업 기록은 유지한다.
+
+Electron 없이 UI만 빠르게 확인하려면 `pnpm dev:web`을 실행한다. 이 브라우저 전용 미리보기에서만 데모 데이터와 가상 상호작용을 사용하며, 실제 Git 저장소나 Codex에는 접근하지 않는다.
 
 ## 검증 명령 보안
 

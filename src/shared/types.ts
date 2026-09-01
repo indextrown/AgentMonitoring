@@ -91,7 +91,7 @@ export interface NoteRecord {
 
 export interface DashboardSnapshot {
   projects: ProjectRecord[]
-  selectedProject: ProjectRecord
+  selectedProject: ProjectRecord | null
   tasks: TaskRecord[]
   events: EventRecord[]
   findings: FindingRecord[]
