@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentRunner, parseReviewerFindings } from '../../electron/main/runner'
+import { AgentRunner, parseConfiguredCommand, parseReviewerFindings } from '../../electron/main/runner'
 import { AppStore } from '../../electron/main/store'
 
 const execFileAsync = promisify(execFile)
@@ -65,6 +65,26 @@ describe('AgentRunner', () => {
     expect(parseReviewerFindings('VERDICT: PASS')).toEqual([])
   })
 
+  it('accepts Tuist validation commands and rejects unknown executables', () => {
+    expect(parseConfiguredCommand('tuist test Core')).toEqual({ command: 'tuist', args: ['test', 'Core'] })
+    expect(() => parseConfiguredCommand('bash verify.sh')).toThrow('허용되지 않은 테스트 실행 파일입니다: bash')
+  })
+
+  it('requires a validation command before creating a worktree', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runner-'))
+    temporaryDirectories.push(directory)
+    const repository = join(directory, 'repository')
+    await mkdir(repository)
+    const store = new AppStore(join(directory, 'store.sqlite'))
+    const project = store.addProject('Fixture', repository)
+    const task = store.createTask(project.id, '검증 없는 작업', '검증 명령 없이는 실행하지 않아야 한다.', 2)
+    const runner = new AgentRunner(store, join(directory, 'worktrees'), () => undefined)
+
+    await expect(runner.run(task.id)).rejects.toThrow('검증 명령을 등록한 뒤 작업을 실행하세요.')
+    expect(store.getTask(task.id).status).toBe('queued')
+    store.close()
+  })
+
   it('runs role-separated stages inside a git worktree and stops for approval', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runner-'))
     temporaryDirectories.push(directory)
@@ -73,7 +93,8 @@ describe('AgentRunner', () => {
     await mkdir(repository)
     await execFileAsync('git', ['init', '-b', 'main'], { cwd: repository })
     await writeFile(join(repository, 'README.md'), '# Fixture\n')
-    await execFileAsync('git', ['add', 'README.md'], { cwd: repository })
+    await writeFile(join(repository, 'Makefile'), 'test:\n\t@true\n')
+    await execFileAsync('git', ['add', 'README.md', 'Makefile'], { cwd: repository })
     await execFileAsync('git', ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'], {
       cwd: repository
     })
@@ -98,6 +119,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     const store = new AppStore(join(directory, 'store.sqlite'))
     const project = store.addProject('Fixture', repository)
+    store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
     const published: string[] = []
     const codexHome = join(directory, 'codex-home')

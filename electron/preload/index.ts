@@ -15,6 +15,7 @@ const bridge: AgentMonitoringBridge = {
   getSnapshot: (projectId?: string) => ipcRenderer.invoke('dashboard:snapshot', projectId),
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
+  inspectProject: (projectId: string) => ipcRenderer.invoke('project:inspect', projectId),
   removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),

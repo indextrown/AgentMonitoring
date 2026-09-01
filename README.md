@@ -4,10 +4,13 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 
 ![AgentMonitoring dashboard](./tests/e2e/dashboard.spec.ts-snapshots/dashboard-chromium-desktop-darwin.png)
 
+![AgentMonitoring project readiness](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
+
 ## 주요 기능
 
 - 제공된 레퍼런스와 같은 고밀도 다크 대시보드
 - 프로젝트·작업·버그·메모·활동 이벤트 통합 조회
+- 새 프로젝트의 Git 상태·기술 스택·빌드 도구·검증 준비 상태 검사
 - 작업별 독립 Git worktree와 `agentmonitor/*` 브랜치
 - Test Designer → Critic → Implementer → Test Runner → Reviewer 파이프라인
 - `codex exec --json` 기반 실시간 JSONL 이벤트 수집
@@ -95,13 +98,14 @@ pnpm test:package
 
 1. 왼쪽 사이드바에서 `실제 Git 프로젝트 추가`를 누른다.
 2. Git 저장소 폴더를 선택한다.
-3. `프로젝트 설정`에서 검증 명령을 등록한다.
-4. `새 작업`에서 목표와 완료 조건, 최대 재시도 횟수를 입력한다.
-5. 작업 상세 화면에서 `실행`을 누른다.
-6. 실시간 역할별 로그와 테스트 결과를 확인한다.
-7. `승인 대기`에 도달하면 작업 drawer에서 변경 파일, 증감 통계, patch를 검토한다. 필요하면 worktree를 외부 IDE로 연다.
-8. `원본에 적용`을 누르면 앱이 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward로 반영한다. 원본 checkout이 dirty하거나 브랜치가 분기된 경우에는 적용하지 않는다.
-9. 변경을 원하지 않으면 worktree를 폐기한다.
+3. 프로젝트 준비 화면에서 Git 변경 상태와 감지된 기술·도구를 확인한다.
+4. 추천된 검증 명령을 확인해 적용하거나 `프로젝트 설정`에서 직접 등록한다.
+5. `새 작업`에서 목표와 완료 조건, 최대 재시도 횟수를 입력한다.
+6. 작업 상세 화면에서 `실행`을 누른다.
+7. 실시간 역할별 로그와 테스트 결과를 확인한다.
+8. `승인 대기`에 도달하면 작업 drawer에서 변경 파일, 증감 통계, patch를 검토한다. 필요하면 worktree를 외부 IDE로 연다.
+9. `원본에 적용`을 누르면 앱이 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward로 반영한다. 원본 checkout이 dirty하거나 브랜치가 분기된 경우에는 적용하지 않는다.
+10. 변경을 원하지 않으면 worktree를 폐기한다.
 
 앱은 첫 실행 시 프로젝트나 활동 데이터를 자동 생성하지 않는다. 기존 버전에 들어 있던 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하며, 사용자가 등록한 실제 프로젝트와 작업 기록은 유지한다.
 
@@ -112,11 +116,11 @@ Electron 없이 UI만 빠르게 확인하려면 `pnpm dev:web`을 실행한다. 
 검증 명령은 shell 문자열로 실행하지 않는다. 입력을 실행 파일과 인자로 분리한 뒤 다음 실행 파일만 직접 `spawn`한다.
 
 ```text
-pnpm npm npx yarn bun xcodebuild swift cargo go
+pnpm npm npx yarn bun tuist xcodebuild swift cargo go
 python python3 pytest make cmake gradle
 ```
 
-파이프, redirect, `&&` 같은 shell 문법은 사용할 수 없다. 추가 실행 파일이 필요하면 코드의 허용 목록과 보안 테스트를 함께 수정해야 한다.
+검증 명령이 비어 있으면 작업을 실행하지 않는다. 파이프, redirect, `&&` 같은 shell 문법은 사용할 수 없다. 추가 실행 파일이 필요하면 코드의 허용 목록과 보안 테스트를 함께 수정해야 한다.
 
 ## Codex 실행 정책
 
@@ -141,6 +145,7 @@ pnpm check
 
 - 단위 테스트는 상태 전이와 활동 집계를 검증한다.
 - 저장소 테스트는 SQLite 재시작 복구와 버그·메모·프로젝트 생명주기를 검증한다.
+- 프로젝트 검사 테스트는 실제 임시 Git 저장소에서 언어·도구·dirty 상태 감지를 검증한다.
 - Runner 통합 테스트는 가짜 Codex와 실제 임시 Git worktree로 diff·승인·정리를 검증한다.
 - Playwright는 1600×980 대시보드 시각 회귀와 검색·drawer·관리 동작을 검증한다.
 - 패키지 스모크 테스트는 macOS 번들을 실행해 preload bridge 연결 신호를 확인한다.

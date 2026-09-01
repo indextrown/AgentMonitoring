@@ -13,6 +13,7 @@ const ALLOWED_TEST_COMMANDS = new Set([
   'npx',
   'yarn',
   'bun',
+  'tuist',
   'xcodebuild',
   'swift',
   'cargo',
@@ -67,6 +68,15 @@ export function parseReviewerFindings(report: string): Array<{ severity: Severit
     if (findings.length >= 20) break
   }
   return findings
+}
+
+export function parseConfiguredCommand(commandLine: string): { command: string; args: string[] } {
+  const parts = parseArgsStringToArgv(commandLine)
+  const command = parts.shift()
+  if (!command || !ALLOWED_TEST_COMMANDS.has(command)) {
+    throw new Error(`허용되지 않은 테스트 실행 파일입니다: ${command ?? '(비어 있음)'}`)
+  }
+  return { command, args: parts }
 }
 
 function safeSlug(value: string): string {
@@ -231,6 +241,9 @@ export class AgentRunner {
     if (project.isDemo || project.path.startsWith('demo://')) {
       throw new Error('데모 프로젝트는 실행할 수 없습니다. 실제 Git 프로젝트를 먼저 등록하세요.')
     }
+    if (!project.testCommand.trim()) {
+      throw new Error('프로젝트 설정에서 검증 명령을 등록한 뒤 작업을 실행하세요.')
+    }
     if (!['queued', 'failed', 'stopped', 'awaiting_approval'].includes(task.status)) {
       throw new Error(`현재 상태에서는 실행할 수 없습니다: ${task.status}`)
     }
@@ -272,7 +285,7 @@ export class AgentRunner {
       )
 
       let repairContext = ''
-      let testsPassed = project.testCommand.length === 0
+      let testsPassed = false
       for (let attempt = 1; attempt <= task.maxAttempts; attempt += 1) {
         if (control.stopped) throw new StoppedError()
         if (attempt > 1) {
@@ -296,12 +309,6 @@ export class AgentRunner {
             .filter(Boolean)
             .join('\n\n')
         )
-
-        if (!project.testCommand) {
-          this.emit(task, 'agent', 'orchestrator', '테스트 명령이 없어 Codex 자체 검증 결과를 사용합니다.')
-          testsPassed = true
-          break
-        }
 
         this.store.transitionTask(taskId, 'testing', attempt)
         this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 실행`)
@@ -558,12 +565,8 @@ export class AgentRunner {
   }
 
   private async runConfiguredCommand(commandLine: string, cwd: string, control: ActiveRun): Promise<ProcessResult> {
-    const parts = parseArgsStringToArgv(commandLine)
-    const command = parts.shift()
-    if (!command || !ALLOWED_TEST_COMMANDS.has(command)) {
-      throw new Error(`허용되지 않은 테스트 실행 파일입니다: ${command ?? '(비어 있음)'}`)
-    }
-    return this.runProcess(command, parts, cwd, control)
+    const { command, args } = parseConfiguredCommand(commandLine)
+    return this.runProcess(command, args, cwd, control)
   }
 
   private runProcess(

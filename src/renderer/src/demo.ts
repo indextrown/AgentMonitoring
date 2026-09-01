@@ -211,7 +211,7 @@ export const demoBridge: AgentMonitoringBridge = {
       id: crypto.randomUUID(),
       name: 'ConnectedRepository',
       path: 'demo://connected-repository',
-      testCommand: 'pnpm check',
+      testCommand: '',
       isDemo: false,
       createdAt: now
     }
@@ -231,6 +231,28 @@ export const demoBridge: AgentMonitoringBridge = {
     }
     if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
     return updated
+  },
+  inspectProject: async (requestedProjectId) => {
+    const project = state.projects.find((item) => item.id === requestedProjectId)
+    if (!project) throw new Error('프로젝트를 찾을 수 없습니다.')
+    const connected = !project.isDemo
+    return {
+      projectId: project.id,
+      branch: connected ? 'main' : 'demo/main',
+      headCommit: 'a1b2c3d',
+      lastCommitAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      clean: true,
+      changeCount: 0,
+      hasRemote: true,
+      primaryLanguage: connected ? 'TypeScript' : 'C++',
+      languages: connected ? ['TypeScript', 'CSS'] : ['C++', 'C#'],
+      tools: connected ? ['pnpm'] : ['CMake'],
+      manifests: connected ? ['package.json', 'pnpm-lock.yaml'] : ['CMakeLists.txt'],
+      trackedFileCount: connected ? 84 : 3_842,
+      testFileCount: connected ? 9 : 126,
+      suggestedTestCommands: connected ? ['pnpm test'] : [],
+      inspectedAt: new Date().toISOString()
+    }
   },
   removeProject: async (projectIdToRemove) => {
     const projects = state.projects.filter((project) => project.id !== projectIdToRemove)

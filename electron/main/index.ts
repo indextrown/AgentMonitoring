@@ -6,6 +6,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { z } from 'zod'
 import type { CodexAuthStatus, CreateTaskInput, EventRecord, UpdateProjectInput } from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
+import { inspectProject } from './project-inspector'
 import { AgentRunner } from './runner'
 import { AppStore } from './store'
 
@@ -158,6 +159,11 @@ function registerIpc(): void {
   ipcMain.handle('project:update', (_event, rawInput: UpdateProjectInput) => {
     const input = updateProjectSchema.parse(rawInput)
     return requireStore().updateProject(input)
+  })
+
+  ipcMain.handle('project:inspect', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return inspectProject(requireStore().getProject(validProjectId))
   })
 
   ipcMain.handle('project:remove', async (_event, projectId: string) => {
