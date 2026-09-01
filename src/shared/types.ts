@@ -17,9 +17,13 @@ export type EventKind =
   | 'test_failed'
   | 'finding_created'
   | 'finding_resolved'
+  | 'finding_reopened'
   | 'note_created'
+  | 'note_updated'
+  | 'note_deleted'
   | 'task_completed'
   | 'task_stopped'
+  | 'task_recovered'
   | 'task_discarded'
   | 'project_created'
 
@@ -89,6 +93,22 @@ export interface NoteRecord {
   createdAt: string
 }
 
+export interface TaskChangeFile {
+  path: string
+  status: string
+  additions: number | null
+  deletions: number | null
+}
+
+export interface TaskChanges {
+  taskId: string
+  available: boolean
+  files: TaskChangeFile[]
+  stat: string
+  patch: string
+  truncated: boolean
+}
+
 export interface DashboardSnapshot {
   projects: ProjectRecord[]
   selectedProject: ProjectRecord | null
@@ -119,13 +139,19 @@ export interface AgentMonitoringBridge {
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
+  removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
+  getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<void>
   discardTask: (taskId: string) => Promise<void>
+  setFindingResolved: (findingId: string, resolved: boolean) => Promise<FindingRecord>
   addNote: (projectId: string, title: string, body: string) => Promise<NoteRecord>
+  updateNote: (noteId: string, title: string, body: string) => Promise<NoteRecord>
+  deleteNote: (noteId: string) => Promise<void>
   openPath: (path: string) => Promise<void>
+  openFeedback: () => Promise<void>
   onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => () => void
   onEvent: (listener: (event: EventRecord) => void) => () => void
 }

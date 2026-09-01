@@ -159,13 +159,17 @@ function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: 
   listeners.forEach((listener) => listener(event))
 }
 
-function updateTask(taskId: string, status: TaskStatus): TaskRecord {
+function updateTask(
+  taskId: string,
+  status: TaskStatus,
+  changes: Partial<Pick<TaskRecord, 'branchName' | 'worktreePath'>> = {}
+): TaskRecord {
   let updated: TaskRecord | undefined
   state = {
     ...state,
     tasks: state.tasks.map((task) => {
       if (task.id !== taskId) return task
-      updated = { ...task, status, updatedAt: new Date().toISOString() }
+      updated = { ...task, ...changes, status, updatedAt: new Date().toISOString() }
       return updated
     })
   }
@@ -228,6 +232,18 @@ export const demoBridge: AgentMonitoringBridge = {
     if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
     return updated
   },
+  removeProject: async (projectIdToRemove) => {
+    const projects = state.projects.filter((project) => project.id !== projectIdToRemove)
+    state = {
+      ...state,
+      projects,
+      selectedProject: projects[0] ?? null,
+      tasks: state.tasks.filter((task) => task.projectId !== projectIdToRemove),
+      events: state.events.filter((event) => event.projectId !== projectIdToRemove),
+      findings: state.findings.filter((finding) => finding.projectId !== projectIdToRemove),
+      notes: state.notes.filter((note) => note.projectId !== projectIdToRemove)
+    }
+  },
   createTask: async (input) => {
     const now = new Date().toISOString()
     const task: TaskRecord = {
@@ -248,8 +264,30 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(task, 'task_created', 'human', `${task.title} 작업 등록`)
     return task
   },
+  getTaskChanges: async (taskId) => {
+    const task = state.tasks.find((item) => item.id === taskId)
+    const available = Boolean(task?.worktreePath)
+    return {
+      taskId,
+      available,
+      files: available
+        ? [
+            { path: 'src/navigation/RouteMonitor.ts', status: 'M', additions: 28, deletions: 6 },
+            { path: 'tests/RouteMonitor.test.ts', status: 'A', additions: 74, deletions: 0 }
+          ]
+        : [],
+      stat: available ? '2 files changed, 102 insertions(+), 6 deletions(-)' : '',
+      patch: available
+        ? 'diff --git a/src/navigation/RouteMonitor.ts b/src/navigation/RouteMonitor.ts\n+export function detectRouteDeviation() {\n+  return true\n+}\n'
+        : '',
+      truncated: false
+    }
+  },
   runTask: async (taskId) => {
-    const task = updateTask(taskId, 'running')
+    const task = updateTask(taskId, 'running', {
+      branchName: `agentmonitor/demo-${taskId.slice(0, 6)}`,
+      worktreePath: `demo://worktrees/${taskId}`
+    })
     emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
     emit(task, 'agent', 'test-designer', '테스트 설계 완료')
@@ -263,12 +301,26 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(task, 'task_stopped', 'human', '작업을 중단했습니다.')
   },
   approveTask: async (taskId) => {
-    const task = updateTask(taskId, 'completed')
+    const task = updateTask(taskId, 'completed', { worktreePath: null })
     emit(task, 'task_completed', 'human', `${task.title} 변경을 원본 브랜치에 적용`)
   },
   discardTask: async (taskId) => {
-    const task = updateTask(taskId, 'discarded')
+    const task = updateTask(taskId, 'discarded', { worktreePath: null })
     emit(task, 'task_discarded', 'human', `${task.title} 변경 폐기`)
+  },
+  setFindingResolved: async (findingId, resolved) => {
+    let updated: DashboardSnapshot['findings'][number] | undefined
+    state = {
+      ...state,
+      findings: state.findings.map((finding) => {
+        if (finding.id !== findingId) return finding
+        updated = { ...finding, resolved, resolvedAt: resolved ? new Date().toISOString() : null }
+        return updated
+      })
+    }
+    if (!updated) throw new Error('버그를 찾을 수 없습니다.')
+    emit(null, resolved ? 'finding_resolved' : 'finding_reopened', 'human', `${updated.title} 상태 변경`)
+    return updated
   },
   addNote: async (requestedProjectId, title, body) => {
     const note = {
@@ -282,7 +334,28 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(null, 'note_created', 'human', `${title} 메모 작성`)
     return note
   },
+  updateNote: async (noteId, title, body) => {
+    let updated: DashboardSnapshot['notes'][number] | undefined
+    state = {
+      ...state,
+      notes: state.notes.map((note) => {
+        if (note.id !== noteId) return note
+        updated = { ...note, title, body }
+        return updated
+      })
+    }
+    if (!updated) throw new Error('메모를 찾을 수 없습니다.')
+    emit(null, 'note_updated', 'human', `${title} 메모 수정`)
+    return updated
+  },
+  deleteNote: async (noteId) => {
+    const note = state.notes.find((item) => item.id === noteId)
+    if (!note) throw new Error('메모를 찾을 수 없습니다.')
+    state = { ...state, notes: state.notes.filter((item) => item.id !== noteId) }
+    emit(null, 'note_deleted', 'human', `${note.title} 메모 삭제`)
+  },
   openPath: async () => undefined,
+  openFeedback: async () => undefined,
   onCodexAuthChanged: (listener) => {
     authListeners.add(listener)
     return () => authListeners.delete(listener)

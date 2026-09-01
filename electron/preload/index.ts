@@ -15,14 +15,22 @@ const bridge: AgentMonitoringBridge = {
   getSnapshot: (projectId?: string) => ipcRenderer.invoke('dashboard:snapshot', projectId),
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
+  removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
+  getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),
   runTask: (taskId: string) => ipcRenderer.invoke('task:run', taskId),
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),
   discardTask: (taskId: string) => ipcRenderer.invoke('task:discard', taskId),
+  setFindingResolved: (findingId: string, resolved: boolean) =>
+    ipcRenderer.invoke('finding:set-resolved', { findingId, resolved }),
   addNote: (projectId: string, title: string, body: string) =>
     ipcRenderer.invoke('note:add', { projectId, title, body }),
+  updateNote: (noteId: string, title: string, body: string) =>
+    ipcRenderer.invoke('note:update', { noteId, title, body }),
+  deleteNote: (noteId: string) => ipcRenderer.invoke('note:delete', noteId),
   openPath: (path: string) => ipcRenderer.invoke('shell:open-path', path),
+  openFeedback: () => ipcRenderer.invoke('shell:open-feedback'),
   onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: CodexAuthStatus): void => listener(payload)
     ipcRenderer.on('codex-auth:changed', wrapped)
@@ -36,3 +44,4 @@ const bridge: AgentMonitoringBridge = {
 }
 
 contextBridge.exposeInMainWorld('agentMonitoring', bridge)
+ipcRenderer.send('preload:ready')

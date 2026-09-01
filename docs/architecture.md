@@ -19,6 +19,7 @@ Electron main
 ```
 
 Renderer에는 Node.js 권한이 없다. 파일 선택, 외부 경로 열기, 데이터 변경, 프로세스 실행은 preload가 공개한 제한된 IPC를 통해서만 요청한다.
+Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되도록 CommonJS 진입점으로 빌드하며, 패키지 스모크 테스트가 bridge 연결 신호를 검증한다.
 
 ## 상태 전이
 
@@ -75,7 +76,8 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 재시도 한도 초과: 작업을 `failed`로 전환한다.
 - 사용자 중단: 현재 child process에 `SIGTERM`을 보내고 `stopped`로 전환한다.
-- 앱 종료: SQLite 이벤트와 task 상태는 남는다. 실행 중 프로세스 자동 복구는 후속 범위다.
+- 앱 종료·비정상 재시작: 남아 있는 `running`·`testing` 작업을 `stopped`로 전환하고 복구 이벤트를 기록한다. 기존 worktree는 보존해 사용자가 검토하거나 재실행할 수 있다.
+- Reviewer 보고: 명시적인 `[critical|high|medium|low] 제목` 행을 finding으로 등록하고 다음 검토 전에 같은 작업의 기존 미해결 finding을 해결 처리한다.
 
 ## 보안 경계
 
@@ -94,8 +96,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 
 ## 의도적으로 남긴 제한
 
-- 실행 중 앱이 강제 종료되면 orphan worktree를 수동으로 확인해야 한다.
-- Reviewer 보고를 구조화된 finding으로 자동 분해하지 않는다.
+- 앱 재시작은 프로세스 실행을 이어받지 않고 안전한 `stopped` 상태에서 사람의 재실행 결정을 기다린다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.

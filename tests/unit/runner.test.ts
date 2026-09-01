@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentRunner } from '../../electron/main/runner'
+import { AgentRunner, parseReviewerFindings } from '../../electron/main/runner'
 import { AppStore } from '../../electron/main/store'
 
 const execFileAsync = promisify(execFile)
@@ -55,6 +55,16 @@ async function createApprovalFixture(): Promise<{
 }
 
 describe('AgentRunner', () => {
+  it('parses deduplicated reviewer findings with explicit severities', () => {
+    expect(
+      parseReviewerFindings('[high] 인증 실패 경로 누락\n- [medium] 빈 입력 검증 부족\n[HIGH] 인증 실패 경로 누락')
+    ).toEqual([
+      { severity: 'high', title: '인증 실패 경로 누락' },
+      { severity: 'medium', title: '빈 입력 검증 부족' }
+    ])
+    expect(parseReviewerFindings('VERDICT: PASS')).toEqual([])
+  })
+
   it('runs role-separated stages inside a git worktree and stops for approval', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runner-'))
     temporaryDirectories.push(directory)
@@ -79,7 +89,8 @@ if (prompt.includes('구현 담당자')) {
   writeFileSync('agent-output.txt', 'implemented\\n')
   writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
 }
-console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? '[medium] 빈 입력 회귀 검토 필요' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `
     )
@@ -102,6 +113,16 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(published).toContain('test-designer')
     expect(published).toContain('critic')
     expect(published).toContain('reviewer')
+    expect(store.getSnapshot(project.id).findings).toMatchObject([
+      { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: false }
+    ])
+
+    const changes = await runner.getChanges(task.id)
+    expect(changes.available).toBe(true)
+    expect(changes.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'agent-output.txt', status: '??', additions: 1, deletions: 0 })
+    ]))
+    expect(changes.patch).toContain("diff --git a/agent-output.txt b/agent-output.txt")
 
     await runner.approve(task.id)
     const completed = store.getTask(task.id)
@@ -141,6 +162,22 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(fixture.store.getTask(fixture.taskId).worktreePath).toBe(fixture.worktreePath)
     await expect(readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).rejects.toThrow()
     expect(await readFile(join(fixture.repository, 'main-change.txt'), 'utf8')).toBe('advanced\n')
+    const committedChanges = await fixture.runner.getChanges(fixture.taskId)
+    expect(committedChanges.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'agent-output.txt', status: 'M', additions: 1, deletions: 0 })
+    ]))
+    expect(committedChanges.patch).toContain('agent-output.txt')
+    fixture.store.close()
+  })
+
+  it('removes managed worktrees and monitoring data without deleting the source repository', async () => {
+    const fixture = await createApprovalFixture()
+
+    await fixture.runner.removeProject(fixture.store.getTask(fixture.taskId).projectId)
+
+    await expect(stat(fixture.worktreePath)).rejects.toThrow()
+    expect((await stat(fixture.repository)).isDirectory()).toBe(true)
+    expect(fixture.store.getSnapshot().projects).toEqual([])
     fixture.store.close()
   })
 })

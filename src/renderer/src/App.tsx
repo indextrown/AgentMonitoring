@@ -13,6 +13,7 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  GitCompareArrows,
   GitBranch,
   LayoutDashboard,
   ListTodo,
@@ -22,6 +23,7 @@ import {
   MessageSquare,
   NotebookPen,
   Octagon,
+  Pencil,
   Play,
   Plus,
   Search,
@@ -49,7 +51,9 @@ import type {
   DashboardSnapshot,
   EventKind,
   EventRecord,
+  NoteRecord,
   ProjectRecord,
+  TaskChanges,
   TaskRecord,
   TaskStatus
 } from '../../shared/types'
@@ -128,8 +132,10 @@ export function App(): React.JSX.Element {
   const [range, setRange] = useState<Range>('all')
   const [taskModal, setTaskModal] = useState(false)
   const [noteModal, setNoteModal] = useState(false)
+  const [editingNote, setEditingNote] = useState<NoteRecord | null>(null)
   const [searchModal, setSearchModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
+  const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -186,12 +192,33 @@ export function App(): React.JSX.Element {
         setSearchModal(false)
         setTaskModal(false)
         setNoteModal(false)
+        setEditingNote(null)
         setSelectedTask(null)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!selectedTask?.worktreePath) {
+      setTaskChanges(null)
+      return undefined
+    }
+    setTaskChanges(null)
+    void bridge
+      .getTaskChanges(selectedTask.id)
+      .then((changes) => {
+        if (!cancelled) setTaskChanges(changes)
+      })
+      .catch((changesError) => {
+        if (!cancelled) setError(String(changesError))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedTask?.id, selectedTask?.updatedAt, selectedTask?.worktreePath])
 
   const selectProject = async (projectId: string): Promise<void> => {
     setSelectedProjectId(projectId)
@@ -259,6 +286,45 @@ export function App(): React.JSX.Element {
     }
   }
 
+  const toggleFinding = async (findingId: string, resolved: boolean): Promise<void> => {
+    try {
+      await bridge.setFindingResolved(findingId, resolved)
+      await load(selectedProjectRef.current)
+    } catch (findingError) {
+      setError(String(findingError))
+    }
+  }
+
+  const removeNote = async (note: NoteRecord): Promise<void> => {
+    if (!window.confirm(`“${note.title}” 메모를 삭제할까요?`)) return
+    try {
+      await bridge.deleteNote(note.id)
+      await load(note.projectId)
+    } catch (noteError) {
+      setError(String(noteError))
+    }
+  }
+
+  const removeProject = async (project: ProjectRecord): Promise<void> => {
+    if (
+      !window.confirm(
+        `“${project.name}” 연결과 AgentMonitoring 기록을 삭제할까요? 관리 중인 격리 작업공간은 정리되지만 원본 저장소는 삭제하지 않습니다.`
+      )
+    ) return
+    try {
+      setBusy(true)
+      await bridge.removeProject(project.id)
+      selectedProjectRef.current = undefined
+      setSelectedProjectId(undefined)
+      setPage('dashboard')
+      await load()
+    } catch (projectError) {
+      setError(String(projectError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (electronBridgeUnavailable) {
     return <RuntimeErrorScreen />
   }
@@ -299,6 +365,7 @@ export function App(): React.JSX.Element {
         onProject={selectProject}
         onAddProject={addProject}
         onSearch={() => setSearchModal(true)}
+        onFeedback={() => void bridge.openFeedback().catch((feedbackError) => setError(String(feedbackError)))}
       />
 
       <main className="main-content">
@@ -335,6 +402,7 @@ export function App(): React.JSX.Element {
             unresolvedCount={unresolved.length}
             range={range}
             onRange={setRange}
+            onPage={setPage}
             onOpenTask={setSelectedTask}
             onNewTask={() => setTaskModal(true)}
           />
@@ -348,13 +416,28 @@ export function App(): React.JSX.Element {
             onAction={taskAction}
           />
         )}
-        {selectedProject && page === 'findings' && <FindingsPage findings={snapshot.findings} />}
-        {selectedProject && page === 'notes' && <NotesPage notes={snapshot.notes} onNew={() => setNoteModal(true)} />}
+        {selectedProject && page === 'findings' && (
+          <FindingsPage findings={snapshot.findings} onToggle={(id, resolved) => void toggleFinding(id, resolved)} />
+        )}
+        {selectedProject && page === 'notes' && (
+          <NotesPage
+            notes={snapshot.notes}
+            onNew={() => {
+              setEditingNote(null)
+              setNoteModal(true)
+            }}
+            onEdit={(note) => {
+              setEditingNote(note)
+              setNoteModal(true)
+            }}
+            onDelete={(note) => void removeNote(note)}
+          />
+        )}
         {selectedProject && page === 'projects' && (
           <ProjectsPage project={selectedProject} onSave={async (project) => {
             await bridge.updateProject(project)
             await load(project.projectId)
-          }} onOpen={() => void bridge.openPath(selectedProject.path)} />
+          }} onOpen={() => void bridge.openPath(selectedProject.path)} onRemove={() => void removeProject(selectedProject)} />
         )}
       </main>
 
@@ -374,10 +457,16 @@ export function App(): React.JSX.Element {
       {selectedProject && noteModal && (
         <NoteModal
           projectId={selectedProject.id}
-          onClose={() => setNoteModal(false)}
-          onCreate={async (projectId, title, body) => {
-            await bridge.addNote(projectId, title, body)
+          note={editingNote}
+          onClose={() => {
             setNoteModal(false)
+            setEditingNote(null)
+          }}
+          onSave={async (projectId, title, body) => {
+            if (editingNote) await bridge.updateNote(editingNote.id, title, body)
+            else await bridge.addNote(projectId, title, body)
+            setNoteModal(false)
+            setEditingNote(null)
             await load(projectId)
           }}
         />
@@ -390,11 +479,16 @@ export function App(): React.JSX.Element {
             setSelectedTask(task)
             setSearchModal(false)
           }}
+          onPage={(nextPage) => {
+            setPage(nextPage)
+            setSearchModal(false)
+          }}
         />
       )}
       {selectedTask && (
         <TaskDrawer
           task={selectedTask}
+          changes={taskChanges}
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
@@ -558,7 +652,8 @@ function Sidebar({
   onPage,
   onProject,
   onAddProject,
-  onSearch
+  onSearch,
+  onFeedback
 }: {
   snapshot: DashboardSnapshot
   selectedProjectId?: string
@@ -568,6 +663,7 @@ function Sidebar({
   onProject: (id: string) => void
   onAddProject: () => void
   onSearch: () => void
+  onFeedback: () => void
 }): React.JSX.Element {
   const activeCount = snapshot.tasks.filter(isActiveTask).length
   return (
@@ -634,7 +730,7 @@ function Sidebar({
         실제 Git 프로젝트 추가
       </button>
 
-      <button className="feedback-button">
+      <button className="feedback-button" onClick={onFeedback}>
         <MessageSquare size={14} />
         앱 피드백
       </button>
@@ -649,6 +745,7 @@ function DashboardPage({
   unresolvedCount,
   range,
   onRange,
+  onPage,
   onOpenTask,
   onNewTask
 }: {
@@ -658,6 +755,7 @@ function DashboardPage({
   unresolvedCount: number
   range: Range
   onRange: (range: Range) => void
+  onPage: (page: Page) => void
   onOpenTask: (task: TaskRecord) => void
   onNewTask: () => void
 }): React.JSX.Element {
@@ -666,6 +764,9 @@ function DashboardPage({
   const seriesDays = range === 'all' ? 16 : range
   const daily = buildDailySeries(snapshot.tasks, snapshot.findings, seriesDays)
   const latest24 = snapshot.events.filter((event) => Date.now() - new Date(event.createdAt).getTime() < 86_400_000)
+  const rangedEvents = range === 'all'
+    ? snapshot.events
+    : snapshot.events.filter((event) => Date.now() - new Date(event.createdAt).getTime() < range * 86_400_000)
   const maxHour = Math.max(1, ...hourly)
 
   return (
@@ -749,7 +850,7 @@ function DashboardPage({
       </div>
 
       <div className="chart-grid">
-        <ChartCard title="작업" subtitle="시작 대비 완료 누적 추이" action="작업 전체">
+        <ChartCard title="작업" subtitle="시작 대비 완료 누적 추이" action="작업 전체" onAction={() => onPage('tasks')}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={daily} margin={{ top: 12, right: 12, left: -20, bottom: 0 }}>
               <CartesianGrid stroke="#272c31" vertical={false} />
@@ -762,7 +863,7 @@ function DashboardPage({
           </ResponsiveContainer>
           <div className="chart-legend"><span className="blue">시작 <b>{snapshot.tasks.length}</b></span><span className="green">완료 <b>{snapshot.tasks.filter((task) => task.status === 'completed').length}</b></span><span>진행 중 <b>{snapshot.tasks.filter(isActiveTask).length}</b></span></div>
         </ChartCard>
-        <ChartCard title="버그" subtitle="등록 대비 해결 누적 추이" action="버그 보드">
+        <ChartCard title="버그" subtitle="등록 대비 해결 누적 추이" action="버그 보드" onAction={() => onPage('findings')}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={daily} margin={{ top: 12, right: 12, left: -20, bottom: 0 }}>
               <CartesianGrid stroke="#272c31" vertical={false} />
@@ -777,32 +878,34 @@ function DashboardPage({
         </ChartCard>
       </div>
 
-      <ActivityFeed events={snapshot.events.slice(0, 15)} />
+      <ActivityFeed events={rangedEvents} />
     </section>
   )
 }
 
-function ChartCard({ title, subtitle, action, children }: { title: string; subtitle: string; action: string; children: React.ReactNode }): React.JSX.Element {
+function ChartCard({ title, subtitle, action, onAction, children }: { title: string; subtitle: string; action: string; onAction: () => void; children: React.ReactNode }): React.JSX.Element {
   return (
     <article className="panel chart-card">
-      <header><div><strong>{title}</strong><span>{subtitle}</span></div><button>{action}</button></header>
+      <header><div><strong>{title}</strong><span>{subtitle}</span></div><button onClick={onAction}>{action}</button></header>
       <div className="chart-body">{children}</div>
     </article>
   )
 }
 
 function ActivityFeed({ events }: { events: EventRecord[] }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const visibleEvents = expanded ? events : events.slice(0, 15)
   return (
     <article className="panel activity-card">
       <header className="activity-header">
         <strong>활동</strong>
         <div className="activity-key"><span className="blue">작업</span><span className="green">완료</span><span className="pink">메모</span><span className="orange">버그</span><span className="violet">해결</span></div>
         <span>이벤트 {events.length}개 · 최근 기록</span>
-        <button>모두 펼치기</button>
+        <button onClick={() => setExpanded((current) => !current)}>{expanded ? '접기' : '모두 펼치기'}</button>
       </header>
       <div className="activity-day"><ChevronDown size={13} /><strong>오늘</strong><span>{new Intl.DateTimeFormat('ko-KR', { dateStyle: 'long' }).format(new Date())}</span></div>
       <div className="activity-list">
-        {events.map((event) => {
+        {visibleEvents.map((event) => {
           const Icon = eventIcon(event.kind)
           return (
             <div className="activity-row" key={event.id}>
@@ -843,7 +946,13 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
   )
 }
 
-function FindingsPage({ findings }: { findings: DashboardSnapshot['findings'] }): React.JSX.Element {
+function FindingsPage({
+  findings,
+  onToggle
+}: {
+  findings: DashboardSnapshot['findings']
+  onToggle: (findingId: string, resolved: boolean) => void
+}): React.JSX.Element {
   return (
     <section className="workspace-page">
       <PageHeading title="버그" description="테스트 실행과 Reviewer가 근거와 함께 등록한 결함이다." />
@@ -852,7 +961,12 @@ function FindingsPage({ findings }: { findings: DashboardSnapshot['findings'] })
           <article className="panel finding-card" key={finding.id}>
             <div><span className={`severity-dot ${finding.severity}`} /><strong>{finding.title}</strong></div>
             <p>{finding.taskId ? `WORK-${finding.taskId.slice(0, 8).toUpperCase()}` : '프로젝트 전체'} · {shortDate(finding.createdAt)}</p>
-            <span className={`status-pill ${finding.resolved ? 'green' : 'red'}`}>{finding.resolved ? '해결됨' : '미해결'}</span>
+            <button
+              className={`status-pill finding-toggle ${finding.resolved ? 'green' : 'red'}`}
+              onClick={() => onToggle(finding.id, !finding.resolved)}
+            >
+              {finding.resolved ? '다시 열기' : '해결 처리'}
+            </button>
           </article>
         ))}
         {findings.length === 0 && <EmptyState icon={Bug} title="등록된 버그가 없습니다." />}
@@ -861,18 +975,52 @@ function FindingsPage({ findings }: { findings: DashboardSnapshot['findings'] })
   )
 }
 
-function NotesPage({ notes, onNew }: { notes: DashboardSnapshot['notes']; onNew: () => void }): React.JSX.Element {
+function NotesPage({
+  notes,
+  onNew,
+  onEdit,
+  onDelete
+}: {
+  notes: DashboardSnapshot['notes']
+  onNew: () => void
+  onEdit: (note: NoteRecord) => void
+  onDelete: (note: NoteRecord) => void
+}): React.JSX.Element {
   return (
     <section className="workspace-page">
       <PageHeading title="메모" description="사람의 결정과 에이전트 보고를 프로젝트 문맥으로 남긴다." action="새 메모" onAction={onNew} />
       <div className="notes-grid">
-        {notes.map((note) => <article className="panel note-card" key={note.id}><NotebookPen size={14} /><div><strong>{note.title}</strong><p>{note.body}</p><time>{timeAgo(note.createdAt)}</time></div></article>)}
+        {notes.map((note) => (
+          <article className="panel note-card" key={note.id}>
+            <NotebookPen size={14} />
+            <div>
+              <strong>{note.title}</strong>
+              <p>{note.body}</p>
+              <time>{timeAgo(note.createdAt)}</time>
+            </div>
+            <div className="note-actions">
+              <button aria-label={`${note.title} 수정`} onClick={() => onEdit(note)}><Pencil size={12} /></button>
+              <button aria-label={`${note.title} 삭제`} onClick={() => onDelete(note)}><Trash2 size={12} /></button>
+            </div>
+          </article>
+        ))}
+        {notes.length === 0 && <EmptyState icon={NotebookPen} title="등록된 메모가 없습니다." />}
       </div>
     </section>
   )
 }
 
-function ProjectsPage({ project, onSave, onOpen }: { project: ProjectRecord; onSave: (input: { projectId: string; name: string; testCommand: string }) => Promise<void>; onOpen: () => void }): React.JSX.Element {
+function ProjectsPage({
+  project,
+  onSave,
+  onOpen,
+  onRemove
+}: {
+  project: ProjectRecord
+  onSave: (input: { projectId: string; name: string; testCommand: string }) => Promise<void>
+  onOpen: () => void
+  onRemove: () => void
+}): React.JSX.Element {
   const [name, setName] = useState(project.name)
   const [testCommand, setTestCommand] = useState(project.testCommand)
   useEffect(() => { setName(project.name); setTestCommand(project.testCommand) }, [project])
@@ -887,6 +1035,13 @@ function ProjectsPage({ project, onSave, onOpen }: { project: ProjectRecord; onS
         <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
         <button className="primary-button" type="submit">설정 저장</button>
       </form>
+      <section className="panel danger-zone">
+        <div>
+          <strong>프로젝트 연결 삭제</strong>
+          <p>AgentMonitoring 기록과 관리 중인 worktree만 정리합니다. 원본 Git 저장소는 보존됩니다.</p>
+        </div>
+        <button className="danger-button" type="button" onClick={onRemove}><Trash2 size={13} />연결 삭제</button>
+      </section>
     </section>
   )
 }
@@ -933,43 +1088,124 @@ function TaskModal({ project, onClose, onCreate }: { project: ProjectRecord; onC
   )
 }
 
-function NoteModal({ projectId, onClose, onCreate }: { projectId: string; onClose: () => void; onCreate: (projectId: string, title: string, body: string) => Promise<void> }): React.JSX.Element {
-  const [title, setTitle] = useState('')
-  const [body, setBody] = useState('')
+function NoteModal({
+  projectId,
+  note,
+  onClose,
+  onSave
+}: {
+  projectId: string
+  note: NoteRecord | null
+  onClose: () => void
+  onSave: (projectId: string, title: string, body: string) => Promise<void>
+}): React.JSX.Element {
+  const [title, setTitle] = useState(note?.title ?? '')
+  const [body, setBody] = useState(note?.body ?? '')
+  const [submitting, setSubmitting] = useState(false)
+  const submit = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    setSubmitting(true)
+    try {
+      await onSave(projectId, title, body)
+    } finally {
+      setSubmitting(false)
+    }
+  }
   return (
-    <Modal title="새 메모" onClose={onClose}>
-      <form className="modal-form" onSubmit={(event) => { event.preventDefault(); void onCreate(projectId, title, body) }}>
+    <Modal title={note ? '메모 수정' : '새 메모'} onClose={onClose}>
+      <form className="modal-form" onSubmit={(event) => void submit(event)}>
         <label><span>제목</span><input autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
         <label><span>내용</span><textarea required rows={7} value={body} onChange={(event) => setBody(event.target.value)} /></label>
-        <button className="primary-button" type="submit"><Plus size={14} />메모 저장</button>
+        <button className="primary-button" disabled={submitting} type="submit">
+          {submitting ? <LoaderCircle className="spin" size={14} /> : note ? <Pencil size={14} /> : <Plus size={14} />}
+          {note ? '수정 저장' : '메모 저장'}
+        </button>
       </form>
     </Modal>
   )
 }
 
-function SearchModal({ snapshot, onClose, onTask }: { snapshot: DashboardSnapshot; onClose: () => void; onTask: (task: TaskRecord) => void }): React.JSX.Element {
+function SearchModal({
+  snapshot,
+  onClose,
+  onTask,
+  onPage
+}: {
+  snapshot: DashboardSnapshot
+  onClose: () => void
+  onTask: (task: TaskRecord) => void
+  onPage: (page: Page) => void
+}): React.JSX.Element {
   const [query, setQuery] = useState('')
   const results = useMemo(() => {
     const normalized = query.trim().toLowerCase()
-    if (!normalized) return snapshot.tasks.slice(0, 6)
-    return snapshot.tasks.filter((task) => `${task.title} ${task.prompt}`.toLowerCase().includes(normalized)).slice(0, 8)
-  }, [query, snapshot.tasks])
+    const matches = (value: string): boolean => !normalized || value.toLowerCase().includes(normalized)
+    return {
+      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.status}`)).slice(0, 6),
+      notes: snapshot.notes.filter((note) => matches(`${note.title} ${note.body}`)).slice(0, 5),
+      events: snapshot.events.filter((event) => matches(`${event.actor} ${event.message} ${event.kind}`)).slice(0, 5)
+    }
+  }, [query, snapshot.events, snapshot.notes, snapshot.tasks])
+  const resultCount = results.tasks.length + results.notes.length + results.events.length
   return (
     <div className="search-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <section className="search-modal">
         <div className="search-input"><Search size={17} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="작업, 메모, 이벤트 검색" /><kbd>ESC</kbd></div>
-        <div className="search-results"><p>작업</p>{results.map((task) => <button key={task.id} onClick={() => onTask(task)}><ListTodo size={14} /><span><strong>{task.title}</strong><small>{STATUS_LABELS[task.status]} · {timeAgo(task.updatedAt)}</small></span><Command size={12} /></button>)}{results.length === 0 && <span className="no-result">검색 결과가 없습니다.</span>}</div>
+        <div className="search-results">
+          {results.tasks.length > 0 && <><p>작업</p>{results.tasks.map((task) => <button key={task.id} onClick={() => onTask(task)}><ListTodo size={14} /><span><strong>{task.title}</strong><small>{STATUS_LABELS[task.status]} · {timeAgo(task.updatedAt)}</small></span><Command size={12} /></button>)}</>}
+          {results.notes.length > 0 && <><p>메모</p>{results.notes.map((note) => <button key={note.id} onClick={() => onPage('notes')}><NotebookPen size={14} /><span><strong>{note.title}</strong><small>{note.body}</small></span><Command size={12} /></button>)}</>}
+          {results.events.length > 0 && <><p>이벤트</p>{results.events.map((event) => {
+            const Icon = eventIcon(event.kind)
+            const task = event.taskId ? snapshot.tasks.find((item) => item.id === event.taskId) : undefined
+            return <button key={event.id} onClick={() => task ? onTask(task) : onPage('dashboard')}><Icon size={14} /><span><strong>{event.message}</strong><small>{event.actor} · {timeAgo(event.createdAt)}</small></span><Command size={12} /></button>
+          })}</>}
+          {resultCount === 0 && <span className="no-result">검색 결과가 없습니다.</span>}
+        </div>
       </section>
     </div>
   )
 }
 
-function TaskDrawer({ task, events, onClose, onRun, onAction, onOpenPath }: { task: TaskRecord; events: EventRecord[]; onClose: () => void; onRun: (task: TaskRecord) => void; onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void; onOpenPath: () => void }): React.JSX.Element {
+function TaskDrawer({
+  task,
+  events,
+  changes,
+  onClose,
+  onRun,
+  onAction,
+  onOpenPath
+}: {
+  task: TaskRecord
+  events: EventRecord[]
+  changes: TaskChanges | null
+  onClose: () => void
+  onRun: (task: TaskRecord) => void
+  onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
+  onOpenPath: () => void
+}): React.JSX.Element {
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {task.worktreePath && (
+          <section className="task-changes">
+            <div className="drawer-section-title"><strong>변경 내역</strong><span>{changes ? `${changes.files.length}개 파일` : '불러오는 중'}</span></div>
+            {!changes && <p className="empty-copy"><LoaderCircle className="spin" size={12} /> Git diff를 확인하고 있습니다.</p>}
+            {changes && !changes.available && <p className="empty-copy">변경 내역을 읽을 수 없습니다.</p>}
+            {changes?.available && changes.files.length === 0 && <p className="empty-copy">아직 변경된 파일이 없습니다.</p>}
+            {changes?.files.map((file) => (
+              <div className="change-file" key={file.path}>
+                <span>{file.status}</span>
+                <code>{file.path}</code>
+                <small className="additions">+{file.additions ?? '—'}</small>
+                <small className="deletions">−{file.deletions ?? '—'}</small>
+              </div>
+            ))}
+            {changes?.stat && <p className="change-stat"><GitCompareArrows size={12} />{changes.stat}</p>}
+            {changes?.patch && <details className="diff-details"><summary>패치 미리보기{changes.truncated ? ' · 일부만 표시' : ''}</summary><pre>{changes.patch}</pre></details>}
+          </section>
+        )}
         <section className="drawer-events"><div className="drawer-section-title"><strong>실시간 로그</strong><span>{events.length}개</span></div>{events.length === 0 && <p className="empty-copy">아직 실행 로그가 없습니다.</p>}{events.map((event) => { const Icon = eventIcon(event.kind); return <div key={event.id}><span><Icon size={12} /></span><p><strong>{event.actor}</strong>{event.message}</p><time>{timeAgo(event.createdAt)}</time></div> })}</section>
         {task.status === 'awaiting_approval' && (
           <div className="approval-notice">

@@ -31,10 +31,38 @@ const addNoteSchema = z.object({
   body: z.string().trim().min(1).max(20_000)
 })
 
+const updateNoteSchema = z.object({
+  noteId: z.string().uuid(),
+  title: z.string().trim().min(1).max(120),
+  body: z.string().trim().min(1).max(20_000)
+})
+
+const findingStateSchema = z.object({
+  findingId: z.string().uuid(),
+  resolved: z.boolean()
+})
+
 let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
 let codexAuth: CodexAuthManager | null = null
+const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
+
+if (smokeTest && process.env.AGENT_MONITORING_SMOKE_USER_DATA) {
+  app.setPath('userData', process.env.AGENT_MONITORING_SMOKE_USER_DATA)
+}
+
+const hasSingleInstanceLock = smokeTest || app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) app.quit()
+
+if (hasSingleInstanceLock && !smokeTest) {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
 
 function publish(event: EventRecord): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('runner:event', event)
@@ -70,7 +98,7 @@ async function createWindow(): Promise<void> {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: { x: 15, y: 14 },
     webPreferences: {
-      preload: join(currentDirectory, '../preload/index.mjs'),
+      preload: join(currentDirectory, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -89,6 +117,13 @@ async function createWindow(): Promise<void> {
 }
 
 function registerIpc(): void {
+  if (smokeTest) {
+    ipcMain.once('preload:ready', () => {
+      console.log('PRELOAD_BRIDGE_READY')
+      setImmediate(() => app.exit(0))
+    })
+  }
+
   ipcMain.handle('codex-auth:status', () => requireCodexAuth().status())
 
   ipcMain.handle('codex-auth:login', () =>
@@ -125,9 +160,19 @@ function registerIpc(): void {
     return requireStore().updateProject(input)
   })
 
+  ipcMain.handle('project:remove', async (_event, projectId: string) => {
+    z.string().uuid().parse(projectId)
+    await requireRunner().removeProject(projectId)
+  })
+
   ipcMain.handle('task:create', (_event, rawInput: CreateTaskInput) => {
     const input = createTaskSchema.parse(rawInput)
     return requireStore().createTask(input.projectId, input.title, input.prompt, input.maxAttempts)
+  })
+
+  ipcMain.handle('task:changes', (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    return requireRunner().getChanges(taskId)
   })
 
   ipcMain.handle('task:run', async (_event, taskId: string) => {
@@ -152,9 +197,24 @@ function registerIpc(): void {
     await requireRunner().discard(taskId)
   })
 
+  ipcMain.handle('finding:set-resolved', (_event, rawInput: unknown) => {
+    const input = findingStateSchema.parse(rawInput)
+    return requireStore().setFindingResolved(input.findingId, input.resolved)
+  })
+
   ipcMain.handle('note:add', (_event, rawInput: unknown) => {
     const input = addNoteSchema.parse(rawInput)
     return requireStore().addNote(input.projectId, input.title, input.body)
+  })
+
+  ipcMain.handle('note:update', (_event, rawInput: unknown) => {
+    const input = updateNoteSchema.parse(rawInput)
+    return requireStore().updateNote(input.noteId, input.title, input.body)
+  })
+
+  ipcMain.handle('note:delete', (_event, noteId: string) => {
+    z.string().uuid().parse(noteId)
+    requireStore().deleteNote(noteId)
   })
 
   ipcMain.handle('shell:open-path', async (_event, path: string) => {
@@ -162,14 +222,19 @@ function registerIpc(): void {
     const error = await shell.openPath(path)
     if (error) throw new Error(error)
   })
+
+  ipcMain.handle('shell:open-feedback', () =>
+    shell.openExternal('https://github.com/indextrown/AgentMonitoring/issues/new')
+  )
 }
 
-app.whenReady().then(async () => {
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const userDataPath = app.getPath('userData')
   const databasePath = join(userDataPath, 'agent-monitoring.sqlite')
   const codexHome = join(userDataPath, 'codex')
   const codexCommand = await resolveCodexCommand()
   store = new AppStore(databasePath)
+  store.recoverInterruptedTasks()
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
   runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()

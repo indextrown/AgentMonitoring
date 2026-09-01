@@ -14,9 +14,13 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - Codex app-server 기반 앱 내 ChatGPT OAuth 로그인
 - 실패한 테스트의 제한된 자가 수정 루프
 - 작업 중단, 재실행, 안전한 변경 승인·로컬 적용, worktree 폐기
-- SQLite 기반 로컬 영속화와 앱 재시작 복구
+- 앱 재시작 시 중단된 실행을 `stopped`로 복구하고 기존 worktree에서 재실행
+- 승인 전 변경 파일·증감 통계·Git patch를 보는 내장 diff 검토
+- Reviewer 보고의 severity 기반 버그 등록과 해결·다시 열기
+- 메모 생성·수정·삭제, 프로젝트 연결과 관리 worktree 정리
+- SQLite 기반 로컬 영속화
 - 샘플 데이터 없이 실제 Git 프로젝트로 시작하는 첫 실행 안내
-- `⌘K` 통합 검색과 작업 상세 실시간 로그 drawer
+- 작업·메모·이벤트를 찾는 `⌘K` 통합 검색과 작업 상세 실시간 로그 drawer
 
 ## 실행 흐름
 
@@ -82,7 +86,10 @@ pnpm dev
 ```bash
 pnpm build
 pnpm package
+pnpm test:package
 ```
+
+`test:package`는 macOS 앱을 실제로 시작해 sandboxed preload bridge가 연결되는지 확인한다. preload는 Electron 패키지 실행 방식에 맞춰 CommonJS로 별도 빌드한다.
 
 ## 사용 방법
 
@@ -92,7 +99,7 @@ pnpm package
 4. `새 작업`에서 목표와 완료 조건, 최대 재시도 횟수를 입력한다.
 5. 작업 상세 화면에서 `실행`을 누른다.
 6. 실시간 역할별 로그와 테스트 결과를 확인한다.
-7. `승인 대기`에 도달하면 worktree를 열어 diff를 확인한다.
+7. `승인 대기`에 도달하면 작업 drawer에서 변경 파일, 증감 통계, patch를 검토한다. 필요하면 worktree를 외부 IDE로 연다.
 8. `원본에 적용`을 누르면 앱이 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward로 반영한다. 원본 checkout이 dirty하거나 브랜치가 분기된 경우에는 적용하지 않는다.
 9. 변경을 원하지 않으면 worktree를 폐기한다.
 
@@ -128,13 +135,15 @@ python python3 pytest make cmake gradle
 pnpm typecheck
 pnpm test
 pnpm test:e2e
+pnpm test:package
 pnpm check
 ```
 
 - 단위 테스트는 상태 전이와 활동 집계를 검증한다.
-- 저장소 테스트는 SQLite 재시작 후 데이터 복구를 검증한다.
-- Runner 통합 테스트는 가짜 Codex와 실제 임시 Git worktree를 사용한다.
-- Playwright는 1600×980 대시보드 시각 회귀와 검색·drawer 동작을 검증한다.
+- 저장소 테스트는 SQLite 재시작 복구와 버그·메모·프로젝트 생명주기를 검증한다.
+- Runner 통합 테스트는 가짜 Codex와 실제 임시 Git worktree로 diff·승인·정리를 검증한다.
+- Playwright는 1600×980 대시보드 시각 회귀와 검색·drawer·관리 동작을 검증한다.
+- 패키지 스모크 테스트는 macOS 번들을 실행해 preload bridge 연결 신호를 확인한다.
 
 시각 기준 이미지를 의도적으로 갱신할 때만 다음 명령을 사용한다.
 
