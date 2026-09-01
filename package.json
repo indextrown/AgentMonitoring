@@ -1,0 +1,56 @@
+{
+  "name": "agent-monitoring",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first control plane for monitored AI coding runs",
+  "author": "indextrown",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.renderer.config.ts --host 127.0.0.1",
+    "build": "pnpm typecheck && electron-vite build",
+    "build:web": "vite build --config vite.renderer.config.ts",
+    "package": "pnpm build && electron-builder --dir",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check": "pnpm typecheck && pnpm test && pnpm build:web",
+    "postinstall": "node node_modules/electron/install.js"
+  },
+  "dependencies": {
+    "lucide-react": "^1.38.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1",
+    "string-argv": "^0.3.2",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.1.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  },
+  "build": {
+    "appId": "com.indextrown.agentmonitoring",
+    "productName": "AgentMonitoring",
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "target": "dir"
+    }
+  }
+}
