@@ -126,10 +126,13 @@ function buildSnapshot(): DashboardSnapshot {
   return { projects, selectedProject: projects[0], tasks, events, findings, notes }
 }
 
-let state = buildSnapshot()
+const searchParams = new URLSearchParams(window.location.search)
+let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
+  ? { projects: [], selectedProject: null, tasks: [], events: [], findings: [], notes: [] }
+  : buildSnapshot()
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
-let demoAuth: CodexAuthStatus = new URLSearchParams(window.location.search).get('auth') === 'signed-out'
+let demoAuth: CodexAuthStatus = searchParams.get('auth') === 'signed-out'
   ? { state: 'signed_out', authMode: null, email: null, planType: null }
   : { state: 'signed_in', authMode: 'chatgpt', email: 'demo@agentmonitoring.local', planType: 'plus' }
 
@@ -140,9 +143,11 @@ function updateDemoAuth(status: CodexAuthStatus): CodexAuthStatus {
 }
 
 function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: string): void {
+  const currentProjectId = task?.projectId ?? state.selectedProject?.id
+  if (!currentProjectId) return
   const event: EventRecord = {
     id: Math.max(0, ...state.events.map((item) => item.id)) + 1,
-    projectId: task?.projectId ?? state.selectedProject.id,
+    projectId: currentProjectId,
     taskId: task?.id ?? null,
     kind,
     actor,
@@ -184,6 +189,9 @@ export const demoBridge: AgentMonitoringBridge = {
   logoutCodex: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
   getSnapshot: async (requestedProjectId?: string) => {
     const selectedProject = state.projects.find((project) => project.id === requestedProjectId) ?? state.projects[0]
+    if (!selectedProject) {
+      return { ...state, selectedProject: null, tasks: [], events: [], findings: [], notes: [] }
+    }
     return {
       ...state,
       selectedProject,
@@ -193,9 +201,22 @@ export const demoBridge: AgentMonitoringBridge = {
       notes: state.notes.filter((note) => note.projectId === selectedProject.id)
     }
   },
-  addProject: async () => null,
+  addProject: async () => {
+    const now = new Date().toISOString()
+    const project: ProjectRecord = {
+      id: crypto.randomUUID(),
+      name: 'ConnectedRepository',
+      path: 'demo://connected-repository',
+      testCommand: 'pnpm check',
+      isDemo: true,
+      createdAt: now
+    }
+    state = { ...state, projects: [...state.projects, project], selectedProject: project }
+    emit(null, 'project_created', 'human', `${project.name} 프로젝트 등록`)
+    return project
+  },
   updateProject: async (input) => {
-    let updated = state.projects[0]
+    let updated: ProjectRecord | undefined
     state = {
       ...state,
       projects: state.projects.map((project) => {
@@ -204,6 +225,7 @@ export const demoBridge: AgentMonitoringBridge = {
         return updated
       })
     }
+    if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
     return updated
   },
   createTask: async (input) => {

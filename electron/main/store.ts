@@ -141,7 +141,7 @@ export class AppStore {
     this.database = new DatabaseSync(databasePath)
     this.database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
     this.migrate()
-    this.seedDemoData()
+    this.removeLegacyDemoData()
   }
 
   close(): void {
@@ -213,146 +213,8 @@ export class AppStore {
     `)
   }
 
-  private seedDemoData(): void {
-    const count = Number((this.database.prepare('SELECT COUNT(*) AS count FROM projects').get() as Row).count)
-    if (count > 0) return
-
-    const projectId = randomUUID()
-    const secondaryProjectId = randomUUID()
-    const now = new Date()
-    const iso = now.toISOString()
-
-    this.database.exec('BEGIN')
-    try {
-      this.database
-        .prepare('INSERT INTO projects (id, name, path, test_command, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(projectId, 'ElmwoodOnline', `demo://${projectId}`, '', 1, iso)
-      this.database
-        .prepare('INSERT INTO projects (id, name, path, test_command, is_demo, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(secondaryProjectId, 'AgentMonitoring', `demo://${secondaryProjectId}`, '', 1, iso)
-
-      const taskStatement = this.database.prepare(`
-        INSERT INTO tasks (
-          id, project_id, title, prompt, status, provider, max_attempts, attempt,
-          branch_name, worktree_path, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'codex', 3, 1, NULL, NULL, ?, ?)
-      `)
-      const eventStatement = this.database.prepare(`
-        INSERT INTO events (project_id, task_id, kind, actor, message, severity, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `)
-
-      const titles = [
-        '프로필 등록 시스템 구축',
-        '네트워크 재접속 안정화',
-        '맵 데이터 캐시 정리',
-        '항로 검색 결과 검증',
-        'UI 상태 복원 테스트',
-        '로그 수집 파이프라인 개선'
-      ]
-      for (let index = 0; index < 32; index += 1) {
-        const taskId = randomUUID()
-        const created = new Date(now)
-        created.setDate(now.getDate() - Math.floor((31 - index) / 2))
-        created.setHours(9 + (index % 8), (index * 7) % 60, 0, 0)
-        const updated = new Date(created.getTime() + (38 + (index % 5) * 12) * 60 * 1000)
-        const title = `${titles[index % titles.length]}${index === 31 ? ' — 1단계 C# 파일 변환부터' : ''}`
-        taskStatement.run(
-          taskId,
-          projectId,
-          title,
-          `${title} 작업을 구현하고 검증한다.`,
-          'completed',
-          created.toISOString(),
-          updated.toISOString()
-        )
-        eventStatement.run(
-          projectId,
-          taskId,
-          'task_started',
-          'codex',
-          `${title} 작업 시작`,
-          null,
-          created.toISOString()
-        )
-        eventStatement.run(
-          projectId,
-          taskId,
-          'task_completed',
-          'codex',
-          `${title} 완료 · 테스트와 검토를 통과했습니다.`,
-          null,
-          updated.toISOString()
-        )
-      }
-
-      const findingStatement = this.database.prepare(`
-        INSERT INTO findings (
-          id, project_id, task_id, title, severity, resolved, created_at, resolved_at
-        ) VALUES (?, ?, NULL, ?, ?, 1, ?, ?)
-      `)
-      const severities: Severity[] = ['critical', 'high', 'medium', 'low', 'medium', 'low']
-      for (let index = 0; index < 6; index += 1) {
-        const created = new Date(now)
-        created.setDate(now.getDate() - (12 - index * 2))
-        const resolved = new Date(created.getTime() + 24 * 60 * 60 * 1000)
-        findingStatement.run(
-          randomUUID(),
-          projectId,
-          `회귀 시나리오 ${index + 1} 실패`,
-          severities[index],
-          created.toISOString(),
-          resolved.toISOString()
-        )
-        eventStatement.run(
-          projectId,
-          null,
-          'finding_created',
-          'critic',
-          `회귀 시나리오 ${index + 1} 실패 발견`,
-          severities[index],
-          created.toISOString()
-        )
-        eventStatement.run(
-          projectId,
-          null,
-          'finding_resolved',
-          'codex',
-          `회귀 시나리오 ${index + 1} 해결`,
-          severities[index],
-          resolved.toISOString()
-        )
-      }
-
-      const noteStatement = this.database.prepare(
-        'INSERT INTO notes (id, project_id, title, body, created_at) VALUES (?, ?, ?, ?, ?)'
-      )
-      for (let index = 0; index < 14; index += 1) {
-        const created = new Date(now.getTime() - index * 3 * 60 * 60 * 1000)
-        noteStatement.run(
-          randomUUID(),
-          projectId,
-          `프로젝트 결정 ${14 - index}`,
-          '작업 과정에서 확인한 기준과 후속 검토 항목을 기록했습니다.',
-          created.toISOString()
-        )
-        if (index < 4) {
-          eventStatement.run(
-            projectId,
-            null,
-            'note_created',
-            'codex',
-            `프로젝트 결정 ${14 - index} 메모 작성`,
-            null,
-            created.toISOString()
-          )
-        }
-      }
-      this.database.exec('COMMIT')
-    } catch (error) {
-      this.database.exec('ROLLBACK')
-      throw error
-    }
+  private removeLegacyDemoData(): void {
+    this.database.prepare('DELETE FROM projects WHERE is_demo = 1').run()
   }
 
   listProjects(): ProjectRecord[] {
@@ -513,7 +375,16 @@ export class AppStore {
 
   getSnapshot(projectId?: string): DashboardSnapshot {
     const projects = this.listProjects()
-    if (projects.length === 0) throw new Error('등록된 프로젝트가 없습니다.')
+    if (projects.length === 0) {
+      return {
+        projects,
+        selectedProject: null,
+        tasks: [],
+        events: [],
+        findings: [],
+        notes: []
+      }
+    }
     const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0]
     const tasks = (
       this.database
