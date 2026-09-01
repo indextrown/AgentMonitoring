@@ -13,7 +13,7 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - `codex exec --json` 기반 실시간 JSONL 이벤트 수집
 - Codex app-server 기반 앱 내 ChatGPT OAuth 로그인
 - 실패한 테스트의 제한된 자가 수정 루프
-- 작업 중단, 재실행, 변경 승인, worktree 폐기
+- 작업 중단, 재실행, 안전한 변경 승인·로컬 적용, worktree 폐기
 - SQLite 기반 로컬 영속화와 앱 재시작 복구
 - 샘플 데이터 없이 실제 Git 프로젝트로 시작하는 첫 실행 안내
 - `⌘K` 통합 검색과 작업 상세 실시간 로그 drawer
@@ -93,7 +93,8 @@ pnpm package
 5. 작업 상세 화면에서 `실행`을 누른다.
 6. 실시간 역할별 로그와 테스트 결과를 확인한다.
 7. `승인 대기`에 도달하면 worktree를 열어 diff를 확인한다.
-8. 변경을 승인하거나 worktree를 폐기한다.
+8. `원본에 적용`을 누르면 앱이 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward로 반영한다. 원본 checkout이 dirty하거나 브랜치가 분기된 경우에는 적용하지 않는다.
+9. 변경을 원하지 않으면 worktree를 폐기한다.
 
 앱은 첫 실행 시 프로젝트나 활동 데이터를 자동 생성하지 않는다. 기존 버전에 들어 있던 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하며, 사용자가 등록한 실제 프로젝트와 작업 기록은 유지한다.
 
@@ -116,7 +117,8 @@ python python3 pytest make cmake gradle
 - 비평·Reviewer 역할: `read-only`
 - 출력: newline-delimited JSON
 - 작업 위치: 앱이 만든 Git worktree
-- 금지: sandbox 우회, 자동 commit, push, merge, 배포
+- Codex 역할 금지: sandbox 우회, commit, push, merge, 배포
+- 사람 승인 단계: 앱이 작업 브랜치를 커밋한 뒤 현재 로컬 브랜치에 fast-forward로만 적용
 
 구체적인 CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 기준으로 한다.
 
@@ -154,7 +156,8 @@ Electron의 `userData` 아래에 다음 데이터가 저장된다.
 이번 버전은 단일 사용자·단일 장비·Codex 한 공급자에 집중한다. 다음 기능은 포함하지 않는다.
 
 - 내장 코드 편집기
-- 자동 commit·merge·push·배포
+- 사람 승인 없는 자동 commit·merge
+- 원격 push·PR 생성·배포
 - 원격 팀 협업
 - 여러 공급자나 계정 순환
 - 병렬 작업 스케줄러

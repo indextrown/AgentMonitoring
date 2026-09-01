@@ -243,9 +243,73 @@ export class AgentRunner {
     control.child?.kill('SIGTERM')
   }
 
-  approve(taskId: string): void {
-    const task = this.store.transitionTask(taskId, 'completed')
-    this.emit(task, 'task_completed', 'human', `${task.title} 변경 승인`)
+  async approve(taskId: string): Promise<void> {
+    const task = this.store.getTask(taskId)
+    if (task.status !== 'awaiting_approval') throw new Error('승인 대기 중인 작업만 원본에 적용할 수 있습니다.')
+    if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
+    if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
+
+    const project = this.store.getProject(task.projectId)
+    const projectRoot = resolve(project.path)
+    const worktreePath = resolve(task.worktreePath)
+    const targetBranch = await this.requireGit(
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      projectRoot,
+      '원본 저장소가 브랜치를 checkout한 상태인지 확인할 수 없습니다.'
+    )
+    await this.assertCleanCheckout(projectRoot)
+
+    const worktreeBranch = await this.requireGit(
+      ['branch', '--show-current'],
+      worktreePath,
+      '작업 브랜치를 확인할 수 없습니다.'
+    )
+    if (worktreeBranch.output.trim() !== task.branchName) {
+      throw new Error('격리 작업공간의 현재 브랜치가 등록된 작업 브랜치와 다릅니다.')
+    }
+
+    const worktreeStatus = await this.requireGit(
+      ['status', '--porcelain', '--untracked-files=normal'],
+      worktreePath,
+      '작업 변경 상태를 확인할 수 없습니다.'
+    )
+    if (worktreeStatus.output.trim()) {
+      await this.requireGit(['add', '--all'], worktreePath, '작업 변경을 stage할 수 없습니다.')
+      await this.requireGit(
+        [
+          '-c',
+          'user.name=AgentMonitoring',
+          '-c',
+          'user.email=agentmonitoring@localhost',
+          'commit',
+          '-m',
+          `agent: ${task.title}`.slice(0, 120)
+        ],
+        worktreePath,
+        '작업 브랜치 커밋에 실패했습니다.'
+      )
+      this.emit(task, 'agent', 'git', `작업 변경 커밋 · ${task.branchName}`)
+    }
+
+    await this.assertCleanCheckout(projectRoot)
+    const mergeResult = await this.runProcess('git', ['merge', '--ff-only', task.branchName], projectRoot, null)
+    if (mergeResult.code !== 0) {
+      throw new Error(
+        `원본 ${targetBranch.output.trim()} 브랜치가 작업 시작 이후 변경되어 fast-forward 적용할 수 없습니다. ` +
+          '원본 브랜치와 작업 브랜치를 직접 정리한 뒤 다시 승인하세요.'
+      )
+    }
+
+    const completed = this.store.transitionTask(taskId, 'completed')
+    this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원본 ${targetBranch.output.trim()} 브랜치에 적용`)
+
+    const cleanupResult = await this.runProcess('git', ['worktree', 'remove', worktreePath], projectRoot, null)
+    if (cleanupResult.code === 0) {
+      this.store.clearTaskWorktree(taskId)
+      this.emit(completed, 'agent', 'git', '승인된 격리 작업공간 정리 완료')
+    } else {
+      this.emit(completed, 'agent', 'git', `격리 작업공간 정리 실패 · ${cleanupResult.output.slice(-1_000)}`, 'low')
+    }
   }
 
   async discard(taskId: string): Promise<void> {
@@ -393,6 +457,26 @@ export class AgentRunner {
         resolvePromise({ code: code ?? 1, output, finalMessage })
       })
     })
+  }
+
+  private async requireGit(args: string[], cwd: string, failureMessage: string): Promise<ProcessResult> {
+    const result = await this.runProcess('git', args, cwd, null)
+    if (result.code !== 0) {
+      const detail = result.output.trim()
+      throw new Error(detail ? `${failureMessage}\n${detail.slice(-2_000)}` : failureMessage)
+    }
+    return result
+  }
+
+  private async assertCleanCheckout(projectRoot: string): Promise<void> {
+    const status = await this.requireGit(
+      ['status', '--porcelain', '--untracked-files=normal'],
+      projectRoot,
+      '원본 저장소 상태를 확인할 수 없습니다.'
+    )
+    if (status.output.trim()) {
+      throw new Error('원본 저장소에 커밋되지 않은 변경이 있습니다. 변경을 정리한 뒤 다시 승인하세요.')
+    }
   }
 
   private emit(

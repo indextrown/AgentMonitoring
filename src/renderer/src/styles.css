@@ -1995,6 +1995,32 @@ kbd {
   background: #0e1215;
 }
 
+.approval-notice {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  margin: 0 20px 14px;
+  padding: 10px 11px;
+  border: 1px solid #2b4236;
+  border-radius: 6px;
+  color: #76b493;
+  background: #101a15;
+}
+
+.approval-notice p {
+  margin: 0;
+  color: #718078;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.approval-notice strong {
+  display: block;
+  margin-bottom: 2px;
+  color: #9bc6ad;
+  font-size: 9px;
+}
+
 .error-toast {
   position: fixed;
   z-index: 200;

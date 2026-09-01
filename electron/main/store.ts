@@ -313,6 +313,14 @@ export class AppStore {
     return this.getTask(taskId)
   }
 
+  clearTaskWorktree(taskId: string): TaskRecord {
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET worktree_path = NULL, updated_at = ? WHERE id = ?')
+      .run(now, taskId)
+    return this.getTask(taskId)
+  }
+
   addEvent(
     projectId: string,
     taskId: string | null,

@@ -220,6 +220,12 @@ export function App(): React.JSX.Element {
   const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard'): Promise<void> => {
     try {
       if (action === 'discard' && !window.confirm('격리 작업공간과 변경을 폐기할까요?')) return
+      if (
+        action === 'approve' &&
+        !window.confirm(
+          '승인하면 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다. 계속할까요?'
+        )
+      ) return
       if (action === 'stop') await bridge.stopTask(task.id)
       if (action === 'approve') await bridge.approveTask(task.id)
       if (action === 'discard') await bridge.discardTask(task.id)
@@ -828,7 +834,7 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <div className="row-actions">
               {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
-              {task.status === 'awaiting_approval' && <button title="승인" onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {task.status === 'awaiting_approval' && <button title="원본에 적용" onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
             </div>
           </div>
         ))}
@@ -965,11 +971,17 @@ function TaskDrawer({ task, events, onClose, onRun, onAction, onOpenPath }: { ta
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
         <section className="drawer-events"><div className="drawer-section-title"><strong>실시간 로그</strong><span>{events.length}개</span></div>{events.length === 0 && <p className="empty-copy">아직 실행 로그가 없습니다.</p>}{events.map((event) => { const Icon = eventIcon(event.kind); return <div key={event.id}><span><Icon size={12} /></span><p><strong>{event.actor}</strong>{event.message}</p><time>{timeAgo(event.createdAt)}</time></div> })}</section>
+        {task.status === 'awaiting_approval' && (
+          <div className="approval-notice">
+            <ShieldCheck size={14} />
+            <p><strong>안전한 로컬 적용</strong>원본 checkout이 깨끗하고 fast-forward 가능한 경우에만 변경을 적용합니다.</p>
+          </div>
+        )}
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {task.status === 'awaiting_approval' && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><Check size={14} />변경 승인</button></>}
+          {task.status === 'awaiting_approval' && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />원본에 적용</button></>}
         </footer>
       </aside>
     </div>
