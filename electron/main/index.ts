@@ -8,6 +8,7 @@ import type { CodexAuthStatus, CreateTaskInput, EventRecord, UpdateProjectInput 
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
 import { AgentRunner } from './runner'
+import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
 
 const execFileAsync = promisify(execFile)
@@ -47,6 +48,7 @@ let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
 let codexAuth: CodexAuthManager | null = null
+let shutdownStarted = false
 const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
 
 if (smokeTest && process.env.AGENT_MONITORING_SMOKE_USER_DATA) {
@@ -86,6 +88,20 @@ function requireRunner(): AgentRunner {
 function requireCodexAuth(): CodexAuthManager {
   if (!codexAuth) throw new Error('Codex 인증 관리자가 준비되지 않았습니다.')
   return codexAuth
+}
+
+async function shutdownApplication(): Promise<void> {
+  const activeRunner = runner
+  const activeCodexAuth = codexAuth
+  const activeStore = store
+  runner = null
+  codexAuth = null
+
+  try {
+    await shutdownResources({ runner: activeRunner, codexAuth: activeCodexAuth, store: activeStore })
+  } finally {
+    if (store === activeStore) store = null
+  }
 }
 
 async function createWindow(): Promise<void> {
@@ -255,9 +271,11 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
-  void codexAuth?.dispose()
-  codexAuth = null
-  store?.close()
-  store = null
+app.on('before-quit', (event) => {
+  if (shutdownStarted || (!runner && !codexAuth && !store)) return
+  event.preventDefault()
+  shutdownStarted = true
+  void shutdownApplication()
+    .catch((error) => console.error('AgentMonitoring 종료 정리 실패', error))
+    .finally(() => app.quit())
 })

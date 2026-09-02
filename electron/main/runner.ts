@@ -31,6 +31,9 @@ const ANSI_PATTERN = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
 interface ActiveRun {
   child: ChildProcess | null
   stopped: boolean
+  termination: Promise<void> | null
+  done: Promise<void>
+  resolveDone: () => void
 }
 
 interface ProcessResult {
@@ -39,9 +42,37 @@ interface ProcessResult {
   finalMessage: string
 }
 
+interface ProcessDeadline {
+  timeoutMs: number
+  label: string
+}
+
+export interface RunnerPolicy {
+  codexStageTimeoutMs: number
+  testCommandTimeoutMs: number
+  terminationGraceMs: number
+}
+
+export const DEFAULT_RUNNER_POLICY: RunnerPolicy = {
+  codexStageTimeoutMs: 30 * 60_000,
+  testCommandTimeoutMs: 45 * 60_000,
+  terminationGraceMs: 3_000
+}
+
 class StoppedError extends Error {
   constructor() {
     super('사용자가 작업을 중단했습니다.')
+  }
+}
+
+class ProcessTimeoutError extends Error {
+  constructor(
+    readonly label: string,
+    readonly timeoutMs: number
+  ) {
+    const seconds = Math.max(1, Math.ceil(timeoutMs / 1_000))
+    const duration = seconds >= 60 ? `${Math.ceil(seconds / 60)}분` : `${seconds}초`
+    super(`${label} 제한 시간 초과 (${duration})`)
   }
 }
 
@@ -110,14 +141,18 @@ function eventMessage(payload: Record<string, unknown>): string | null {
 
 export class AgentRunner {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly policy: RunnerPolicy
 
   constructor(
     private readonly store: AppStore,
     private readonly worktreesRoot: string,
     private readonly publish: (event: EventRecord) => void,
     private readonly codexCommand = 'codex',
-    private readonly codexHome?: string
-  ) {}
+    private readonly codexHome?: string,
+    policy: Partial<RunnerPolicy> = {}
+  ) {
+    this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
+  }
 
   isRunning(taskId: string): boolean {
     return this.activeRuns.has(taskId)
@@ -248,7 +283,11 @@ export class AgentRunner {
       throw new Error(`현재 상태에서는 실행할 수 없습니다: ${task.status}`)
     }
 
-    const control: ActiveRun = { child: null, stopped: false }
+    let resolveDone = (): void => undefined
+    const done = new Promise<void>((resolvePromise) => {
+      resolveDone = resolvePromise
+    })
+    const control: ActiveRun = { child: null, stopped: false, termination: null, done, resolveDone }
     this.activeRuns.set(taskId, control)
 
     try {
@@ -358,6 +397,7 @@ export class AgentRunner {
         this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
       }
 
+      if (control.stopped) throw new StoppedError()
       this.store.transitionTask(taskId, 'awaiting_approval')
       this.emit(task, 'agent', 'orchestrator', '모든 자동 단계가 끝났습니다. 사람의 최종 승인을 기다립니다.')
     } catch (error) {
@@ -365,6 +405,10 @@ export class AgentRunner {
       if (error instanceof StoppedError || control.stopped) {
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
         this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
+      } else if (error instanceof ProcessTimeoutError) {
+        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+        this.emit(current, 'task_timed_out', 'orchestrator', `시간 초과 · ${error.message}`, 'high')
+        this.store.addFinding(current.projectId, current.id, `${current.title} · ${error.label} 시간 초과`, 'high')
       } else {
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
         this.emit(current, 'agent', 'orchestrator', `실행 실패 · ${redact(String(error))}`, 'high')
@@ -373,6 +417,7 @@ export class AgentRunner {
       throw error
     } finally {
       this.activeRuns.delete(taskId)
+      control.resolveDone()
     }
   }
 
@@ -380,7 +425,15 @@ export class AgentRunner {
     const control = this.activeRuns.get(taskId)
     if (!control) throw new Error('실행 중인 작업이 아닙니다.')
     control.stopped = true
-    control.child?.kill('SIGTERM')
+    await this.terminateControl(control)
+    await control.done
+  }
+
+  async dispose(): Promise<void> {
+    const controls = [...this.activeRuns.values()]
+    for (const control of controls) control.stopped = true
+    await Promise.all(controls.map((control) => this.terminateControl(control)))
+    await Promise.all(controls.map((control) => control.done))
   }
 
   async approve(taskId: string): Promise<void> {
@@ -555,7 +608,8 @@ export class AgentRunner {
           if (line.trim()) this.emit(task, 'agent', actor, redact(line))
         }
       },
-      this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env
+      this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env,
+      { timeoutMs: this.policy.codexStageTimeoutMs, label: `${actor} 단계` }
     )
     if (result.code !== 0) {
       throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
@@ -566,7 +620,10 @@ export class AgentRunner {
 
   private async runConfiguredCommand(commandLine: string, cwd: string, control: ActiveRun): Promise<ProcessResult> {
     const { command, args } = parseConfiguredCommand(commandLine)
-    return this.runProcess(command, args, cwd, control)
+    return this.runProcess(command, args, cwd, control, undefined, process.env, {
+      timeoutMs: this.policy.testCommandTimeoutMs,
+      label: `검증 명령 (${commandLine})`
+    })
   }
 
   private runProcess(
@@ -575,12 +632,14 @@ export class AgentRunner {
     cwd: string,
     control: ActiveRun | null,
     onLine?: (line: string) => void,
-    environment: NodeJS.ProcessEnv = process.env
+    environment: NodeJS.ProcessEnv = process.env,
+    deadline?: ProcessDeadline
   ): Promise<ProcessResult> {
     return new Promise((resolvePromise, reject) => {
       const child = spawn(command, args, {
         cwd,
         env: environment,
+        detached: Boolean(control && process.platform !== 'win32'),
         stdio: ['ignore', 'pipe', 'pipe']
       })
       if (control) control.child = child
@@ -588,6 +647,18 @@ export class AgentRunner {
       let output = ''
       let finalMessage = ''
       let stdoutBuffer = ''
+      let timedOut = false
+      let finished = false
+      let timeout: NodeJS.Timeout | null = null
+
+      const clearDeadline = (): void => {
+        if (timeout) clearTimeout(timeout)
+        timeout = null
+      }
+
+      const clearControlChild = (): void => {
+        if (control?.child === child) control.child = null
+      }
 
       const consumeLine = (rawLine: string): void => {
         const line = redact(rawLine)
@@ -614,16 +685,93 @@ export class AgentRunner {
         const text = redact(chunk.toString('utf8'))
         output = `${output}${text}`.slice(-80_000)
       })
-      child.on('error', reject)
+      child.on('error', (error) => {
+        if (finished) return
+        finished = true
+        clearDeadline()
+        clearControlChild()
+        reject(error)
+      })
       child.on('close', (code) => {
+        if (finished) return
+        finished = true
+        clearDeadline()
         if (stdoutBuffer) consumeLine(stdoutBuffer)
-        if (control) control.child = null
+        clearControlChild()
         if (control?.stopped) {
           reject(new StoppedError())
           return
         }
+        if (timedOut && deadline) {
+          reject(new ProcessTimeoutError(deadline.label, deadline.timeoutMs))
+          return
+        }
         resolvePromise({ code: code ?? 1, output, finalMessage })
       })
+
+      if (deadline && deadline.timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          if (finished) return
+          timedOut = true
+          if (control) void this.terminateControl(control)
+          else void this.terminateChild(child)
+        }, deadline.timeoutMs)
+      }
+    })
+  }
+
+  private terminateControl(control: ActiveRun): Promise<void> {
+    if (control.termination) return control.termination
+    const child = control.child
+    if (!child) return Promise.resolve()
+    const termination = this.terminateChild(child).finally(() => {
+      if (control.termination === termination) control.termination = null
+    })
+    control.termination = termination
+    return termination
+  }
+
+  private async terminateChild(child: ChildProcess): Promise<void> {
+    if (!this.isChildRunning(child)) return
+    this.signalProcess(child, 'SIGTERM')
+    if (await this.waitForExit(child, this.policy.terminationGraceMs)) return
+    this.signalProcess(child, 'SIGKILL')
+    await this.waitForExit(child, this.policy.terminationGraceMs)
+  }
+
+  private signalProcess(child: ChildProcess, signal: NodeJS.Signals): void {
+    if (!this.isChildRunning(child)) return
+    if (process.platform !== 'win32' && child.pid) {
+      try {
+        process.kill(-child.pid, signal)
+        return
+      } catch {
+        // Fall back to the direct child when a process group is unavailable.
+      }
+    }
+    try {
+      child.kill(signal)
+    } catch {
+      // The child may have exited between the state check and signal delivery.
+    }
+  }
+
+  private isChildRunning(child: ChildProcess): boolean {
+    return child.exitCode === null && child.signalCode === null
+  }
+
+  private waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (!this.isChildRunning(child)) return Promise.resolve(true)
+    return new Promise((resolvePromise) => {
+      const onExit = (): void => {
+        clearTimeout(timer)
+        resolvePromise(true)
+      }
+      const timer = setTimeout(() => {
+        child.off('exit', onExit)
+        resolvePromise(!this.isChildRunning(child))
+      }, Math.max(1, timeoutMs))
+      child.once('exit', onExit)
     })
   }
 

@@ -1,44 +1,181 @@
 # AgentMonitoring
 
-AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실행하고, 테스트 설계부터 구현·검증·비평·사람 승인까지 한 화면에서 관리하는 macOS 데스크톱 앱이다.
+AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 안전하게 실행하고 관찰하는 macOS 데스크톱 앱이에요. 테스트 설계부터 구현, 검증, 코드 리뷰, 사람의 최종 승인까지 한 화면에서 관리할 수 있어요.
 
-![AgentMonitoring dashboard](./tests/e2e/dashboard.spec.ts-snapshots/dashboard-chromium-desktop-darwin.png)
+AI가 코드를 작성하는 동안 사용자는 작업 목표와 테스트 결과, 변경 내용, 승인 여부에 집중할 수 있어요.
 
-![AgentMonitoring project readiness](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
+![AgentMonitoring 대시보드](./tests/e2e/dashboard.spec.ts-snapshots/dashboard-chromium-desktop-darwin.png)
 
-## 주요 기능
+- [빠르게 시작하기](#빠르게-시작하기)
+- [첫 작업 실행하기](#첫-작업-실행하기)
+- [에이전트 파이프라인 이해하기](#에이전트-파이프라인-이해하기)
+- [실행 안전장치 확인하기](#실행-안전장치-확인하기)
+- [개발하고 검증하기](#개발하고-검증하기)
 
-- 제공된 레퍼런스와 같은 고밀도 다크 대시보드
-- 프로젝트·작업·버그·메모·활동 이벤트 통합 조회
-- 새 프로젝트의 Git 상태·기술 스택·빌드 도구·검증 준비 상태 검사
-- 작업별 독립 Git worktree와 `agentmonitor/*` 브랜치
-- Test Designer → Critic → Implementer → Test Runner → Reviewer 파이프라인
-- `codex exec --json` 기반 실시간 JSONL 이벤트 수집
-- Codex app-server 기반 앱 내 ChatGPT OAuth 로그인
-- 실패한 테스트의 제한된 자가 수정 루프
-- 작업 중단, 재실행, 안전한 변경 승인·로컬 적용, worktree 폐기
-- 앱 재시작 시 중단된 실행을 `stopped`로 복구하고 기존 worktree에서 재실행
-- 승인 전 변경 파일·증감 통계·Git patch를 보는 내장 diff 검토
-- Reviewer 보고의 severity 기반 버그 등록과 해결·다시 열기
-- 메모 생성·수정·삭제, 프로젝트 연결과 관리 worktree 정리
-- SQLite 기반 로컬 영속화
-- 샘플 데이터 없이 실제 Git 프로젝트로 시작하는 첫 실행 안내
-- 작업·메모·이벤트를 찾는 `⌘K` 통합 검색과 작업 상세 실시간 로그 drawer
+## AgentMonitoring으로 할 수 있는 일
 
-## 실행 흐름
+| 영역 | 할 수 있는 일 |
+| --- | --- |
+| 프로젝트 준비 | 실제 Git 저장소를 등록하고 변경 상태, 기술 스택, 빌드 도구, 검증 명령을 확인해요. |
+| 에이전트 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 순서대로 실행해요. 실패한 테스트는 정해진 횟수 안에서 스스로 수정해요. |
+| 실시간 관찰 | Codex JSONL 이벤트, 역할별 로그, 테스트 결과를 대시보드에서 확인해요. `⌘K`로 작업, 메모, 이벤트를 검색할 수 있어요. |
+| 변경 검토 | 승인 전에 변경 파일, 줄 증감, Git patch, Reviewer finding을 확인해요. 작업 폴더를 외부 IDE로 열 수도 있어요. |
+| 안전한 적용 | 작업마다 별도 Git worktree와 `agentmonitor/*` 브랜치를 만들어요. 사람이 승인한 변경만 현재 로컬 브랜치에 fast-forward로 적용해요. |
+| 로컬 관리 | 프로젝트, 작업, 버그, 메모, 활동 기록을 SQLite에 저장해요. 앱을 다시 실행해도 기존 작업 폴더와 기록을 이어서 사용할 수 있어요. |
+
+## 빠르게 시작하기
+
+### 준비할 것
+
+- macOS
+- Node.js 24 이상
+- Git
+- Codex CLI
+
+터미널에서 `codex` 명령을 실행할 수 있어야 해요. API 키는 필요하지 않아요. 앱을 처음 실행한 뒤 ChatGPT 계정으로 로그인하면 돼요.
+
+### 1. pnpm 준비하기
+
+`pnpm` 명령을 찾을 수 없다면 Corepack과 pnpm 11을 설치하세요.
+
+```bash
+npm install --global corepack@0.34.7
+corepack enable
+corepack install --global pnpm@11.25.0
+hash -r
+pnpm --version
+```
+
+`pnpm --version`이 `11`로 시작하면 준비가 끝난 거예요.
+
+### 2. 앱 실행하기
+
+저장소 루트에서 의존성을 설치하고 Electron 앱을 실행하세요.
+
+```bash
+pnpm install
+pnpm dev
+```
+
+`pnpm install` 과정에서는 Electron 실행 파일을 내려받아요. 실행을 허용한 패키지는 공급망 보호를 위해 `pnpm-workspace.yaml`에 명시해 두었어요.
+
+### 3. ChatGPT로 로그인하기
+
+앱이 열리면 **ChatGPT로 계속**을 누르세요. 브라우저에서 OpenAI 인증을 마치면 앱으로 돌아와 실제 프로젝트를 등록할 수 있어요.
+
+AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하지 않아요. Electron `userData` 아래에 앱 전용 `CODEX_HOME`을 만들고, Codex app-server의 브라우저 로그인 흐름을 사용해요. Codex가 인증 정보와 토큰 갱신을 관리하며, AgentMonitoring의 SQLite에는 토큰을 저장하지 않아요.
+
+## 첫 작업 실행하기
+
+1. 왼쪽 사이드바에서 **실제 Git 프로젝트 추가**를 누르세요.
+2. 작업할 Git 저장소 폴더를 선택하세요.
+3. 프로젝트 준비 화면에서 Git 변경 상태와 감지된 기술, 빌드 도구를 확인하세요.
+4. 추천 검증 명령을 적용하거나 **프로젝트 설정**에서 직접 입력하세요.
+5. **새 작업**을 누르고 목표, 완료 조건, 최대 재시도 횟수를 입력하세요.
+6. 작업 상세 화면에서 **실행**을 누르세요.
+7. 역할별 로그와 테스트 결과를 확인하세요.
+8. 작업이 **승인 대기** 상태가 되면 변경 파일, 줄 증감, Git patch를 검토하세요.
+9. 변경이 적절하면 **원본에 적용**을 누르세요. 변경을 사용하지 않으려면 worktree를 폐기하세요.
+
+![프로젝트 준비 상태](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
+
+**원본에 적용**을 누르면 앱이 작업 브랜치의 변경을 커밋한 뒤 현재 로컬 브랜치에 fast-forward로 반영해요. 원본 저장소에 커밋하지 않은 변경이 있거나 브랜치가 서로 갈라졌다면 적용하지 않아요.
+
+앱은 첫 실행 때 샘플 프로젝트나 활동 기록을 만들지 않아요. 이전 버전의 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하고, 사용자가 만든 실제 프로젝트와 작업 기록은 유지해요.
+
+## 실제 앱과 브라우저 미리보기 구분하기
+
+| 명령 | 용도 | 실제 Git·Codex 연결 |
+| --- | --- | --- |
+| `pnpm dev` | Electron 데스크톱 앱을 실행해요. | 연결함 |
+| `pnpm dev:web` | Electron 없이 UI를 빠르게 확인해요. | 연결하지 않음 |
+
+`pnpm dev:web`은 브라우저 전용 데모예요. 화면 확인을 위한 샘플 데이터와 가상 상호작용만 제공하며, 실제 Git 저장소나 Codex에는 접근하지 않아요. 프로젝트를 등록하고 에이전트를 실행하려면 `pnpm dev`를 사용하세요.
+
+## 에이전트 파이프라인 이해하기
 
 ```text
-작업 계약 등록
-  → 테스트 설계자가 테스트 추가·보완
+작업 목표와 완료 조건 등록
+  → Test Designer가 테스트 추가·보완
   → 읽기 전용 Critic이 테스트 공백 평가
   → Implementer가 기능 구현
   → 프로젝트 검증 명령 실행
-      ├─ 실패: 원인 전달 후 제한된 자가 수정
-      └─ 성공: 읽기 전용 Reviewer 검토
+      ├─ 실패: 원인을 전달하고 정해진 횟수 안에서 다시 구현
+      └─ 성공: 읽기 전용 Reviewer가 최종 변경 검토
   → 사람의 최종 승인 대기
 ```
 
-오케스트레이터는 LLM이 아니라 코드로 작성된 상태 머신이다. AI는 역할별 결과를 만들지만, 허용 상태 전이·재시도 횟수·sandbox·최종 승인은 앱이 통제한다.
+| 역할 | 책임 | 코드 수정 |
+| --- | --- | --- |
+| Test Designer | 성공, 실패, 경계 조건을 검증할 테스트를 만들어요. | 테스트만 수정 |
+| Critic | 테스트가 요구사항과 실패 경로를 충분히 검증하는지 평가해요. | 수정하지 않음 |
+| Implementer | 테스트와 프로젝트 규칙을 지키며 기능을 구현해요. | 수정함 |
+| Test Runner | 프로젝트에 등록된 검증 명령을 실행해요. | 수정하지 않음 |
+| Reviewer | 최종 diff와 테스트 결과를 검토하고 심각도별 finding을 남겨요. | 수정하지 않음 |
+
+오케스트레이터는 대규모 언어 모델(LLM)이 아니라 코드로 작성한 상태 머신이에요. AI는 역할별 결과를 만들지만, 허용 상태 전이, 재시도 횟수, sandbox, 최종 승인 여부는 앱이 통제해요. 자세한 경계와 상태 전이는 [아키텍처 문서](./docs/architecture.md)에서 확인할 수 있어요.
+
+## 실행 안전장치 확인하기
+
+### 작업을 원본 저장소와 격리해요
+
+모든 에이전트는 앱이 만든 Git worktree에서 작업해요. 구현 역할은 `workspace-write`, Critic과 Reviewer는 `read-only` sandbox에서 실행해요. 에이전트는 sandbox 우회, commit, push, merge, 배포를 수행하지 않아요.
+
+### 검증 명령을 제한해요
+
+검증 명령은 shell 문자열로 실행하지 않아요. 입력을 실행 파일과 인자로 나눈 뒤 허용 목록에 있는 실행 파일만 직접 실행해요.
+
+```text
+pnpm npm npx yarn bun tuist xcodebuild swift cargo go
+python python3 pytest make cmake gradle
+```
+
+검증 명령이 비어 있으면 작업을 시작하지 않아요. 파이프, redirect, `&&` 같은 shell 문법도 사용할 수 없어요. 실행 파일을 추가하려면 코드의 허용 목록과 보안 테스트를 함께 수정해야 해요.
+
+### 멈추지 않는 프로세스를 종료해요
+
+| 대상 | 제한 시간 |
+| --- | --- |
+| Codex 역할별 실행 | 30분 |
+| 프로젝트 검증 명령 | 45분 |
+
+사용자가 작업을 중단하거나 제한 시간을 넘기면 프로세스 그룹에 `SIGTERM`을 보내요. 3초 안에 종료되지 않으면 `SIGKILL`로 종료해요.
+
+사용자가 중단한 작업은 `stopped`로 남아 다시 실행할 수 있어요. 제한 시간을 넘긴 작업은 `failed`로 전환하고 `task_timed_out` 이벤트와 high finding을 남겨요. 앱을 종료할 때는 실행 중인 Runner를 먼저 정리한 다음 Codex 인증 세션과 SQLite를 닫아요.
+
+### 사람이 마지막 변경을 승인해요
+
+앱은 승인 전에 변경 파일과 Git patch를 보여줘요. 사용자가 **원본에 적용**을 눌러야만 작업 브랜치를 커밋하고 현재 로컬 브랜치에 fast-forward로 적용해요. 자동 commit, 원격 push, PR 생성, 배포는 하지 않아요.
+
+Codex CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 기준으로 해요.
+
+## 개발하고 검증하기
+
+### 자주 쓰는 명령
+
+| 명령 | 확인하는 것 |
+| --- | --- |
+| `pnpm typecheck` | TypeScript 타입 오류 |
+| `pnpm test` | 상태 전이, 저장소, 프로젝트 검사, Runner 단위·통합 동작 |
+| `pnpm test:e2e` | 대시보드 시각 회귀와 주요 사용자 흐름 |
+| `pnpm test:package` | macOS 패키지와 preload bridge 연결 |
+| `pnpm check` | 타입 검사, 단위 테스트, 웹 프로덕션 빌드 |
+
+시각 기준 이미지를 의도적으로 바꿀 때만 스냅샷을 갱신하세요.
+
+```bash
+pnpm exec playwright test --update-snapshots
+```
+
+### 프로덕션 번들 만들기
+
+```bash
+pnpm build
+pnpm package
+pnpm test:package
+```
+
+`pnpm test:package`는 macOS 앱을 실제로 시작하고 sandboxed preload bridge가 연결되는지 확인해요. preload는 Electron 패키지 실행 방식에 맞춰 CommonJS로 따로 빌드해요.
 
 ## 기술 구성
 
@@ -50,133 +187,27 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 | 검증 | Vitest, Playwright |
 | 에이전트 | Codex CLI 비대화형 JSONL 실행 |
 
-자세한 경계와 상태 전이는 [아키텍처 문서](./docs/architecture.md)에 정리되어 있다.
+## 로컬 데이터와 개인정보
 
-## 요구 사항
-
-- macOS
-- Node.js 24 이상
-- pnpm 11 이상
-- Git
-- Codex CLI
-
-Codex CLI는 실행 경로에서 `codex` 명령을 찾을 수 있어야 한다. 앱을 처음 실행하면 로그인 화면에서 **ChatGPT로 계속**을 누르고 브라우저의 공식 OpenAI 인증을 완료한다. 별도의 API 키는 필요하지 않다.
-
-AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 가져오지 않는다. Electron `userData` 아래에 앱 전용 `CODEX_HOME`을 만들고 공식 Codex app-server의 `account/login/start` 브라우저 흐름을 사용한다. 인증 정보의 저장과 토큰 갱신은 Codex가 담당하며, 데이터베이스에는 토큰을 저장하지 않는다.
-
-## 설치와 실행
-
-`pnpm` 명령이 아직 없다면 Corepack을 준비한다.
-
-```bash
-npm install --global corepack@0.34.7
-corepack enable
-corepack install --global pnpm@11.25.0
-hash -r
-```
-
-이후 프로젝트 의존성을 설치하고 Electron 앱을 실행한다.
-
-```bash
-pnpm install
-pnpm dev
-```
-
-`pnpm install`의 프로젝트 `postinstall`은 Electron 실행 파일을 내려받는다. 공급망 보호를 위해 pnpm build script 허용 목록은 `pnpm-workspace.yaml`에 명시되어 있다.
-
-프로덕션 번들을 만들려면 다음 명령을 사용한다.
-
-```bash
-pnpm build
-pnpm package
-pnpm test:package
-```
-
-`test:package`는 macOS 앱을 실제로 시작해 sandboxed preload bridge가 연결되는지 확인한다. preload는 Electron 패키지 실행 방식에 맞춰 CommonJS로 별도 빌드한다.
-
-## 사용 방법
-
-1. 왼쪽 사이드바에서 `실제 Git 프로젝트 추가`를 누른다.
-2. Git 저장소 폴더를 선택한다.
-3. 프로젝트 준비 화면에서 Git 변경 상태와 감지된 기술·도구를 확인한다.
-4. 추천된 검증 명령을 확인해 적용하거나 `프로젝트 설정`에서 직접 등록한다.
-5. `새 작업`에서 목표와 완료 조건, 최대 재시도 횟수를 입력한다.
-6. 작업 상세 화면에서 `실행`을 누른다.
-7. 실시간 역할별 로그와 테스트 결과를 확인한다.
-8. `승인 대기`에 도달하면 작업 drawer에서 변경 파일, 증감 통계, patch를 검토한다. 필요하면 worktree를 외부 IDE로 연다.
-9. `원본에 적용`을 누르면 앱이 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward로 반영한다. 원본 checkout이 dirty하거나 브랜치가 분기된 경우에는 적용하지 않는다.
-10. 변경을 원하지 않으면 worktree를 폐기한다.
-
-앱은 첫 실행 시 프로젝트나 활동 데이터를 자동 생성하지 않는다. 기존 버전에 들어 있던 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하며, 사용자가 등록한 실제 프로젝트와 작업 기록은 유지한다.
-
-Electron 없이 UI만 빠르게 확인하려면 `pnpm dev:web`을 실행한다. 이 브라우저 전용 미리보기에서만 데모 데이터와 가상 상호작용을 사용하며, 실제 Git 저장소나 Codex에는 접근하지 않는다.
-
-## 검증 명령 보안
-
-검증 명령은 shell 문자열로 실행하지 않는다. 입력을 실행 파일과 인자로 분리한 뒤 다음 실행 파일만 직접 `spawn`한다.
-
-```text
-pnpm npm npx yarn bun tuist xcodebuild swift cargo go
-python python3 pytest make cmake gradle
-```
-
-검증 명령이 비어 있으면 작업을 실행하지 않는다. 파이프, redirect, `&&` 같은 shell 문법은 사용할 수 없다. 추가 실행 파일이 필요하면 코드의 허용 목록과 보안 테스트를 함께 수정해야 한다.
-
-## Codex 실행 정책
-
-- 구현 역할: `workspace-write`
-- 비평·Reviewer 역할: `read-only`
-- 출력: newline-delimited JSON
-- 작업 위치: 앱이 만든 Git worktree
-- Codex 역할 금지: sandbox 우회, commit, push, merge, 배포
-- 사람 승인 단계: 앱이 작업 브랜치를 커밋한 뒤 현재 로컬 브랜치에 fast-forward로만 적용
-
-구체적인 CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 기준으로 한다.
-
-## 테스트
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm test:e2e
-pnpm test:package
-pnpm check
-```
-
-- 단위 테스트는 상태 전이와 활동 집계를 검증한다.
-- 저장소 테스트는 SQLite 재시작 복구와 버그·메모·프로젝트 생명주기를 검증한다.
-- 프로젝트 검사 테스트는 실제 임시 Git 저장소에서 언어·도구·dirty 상태 감지를 검증한다.
-- Runner 통합 테스트는 가짜 Codex와 실제 임시 Git worktree로 diff·승인·정리를 검증한다.
-- Playwright는 1600×980 대시보드 시각 회귀와 검색·drawer·관리 동작을 검증한다.
-- 패키지 스모크 테스트는 macOS 번들을 실행해 preload bridge 연결 신호를 확인한다.
-
-시각 기준 이미지를 의도적으로 갱신할 때만 다음 명령을 사용한다.
-
-```bash
-pnpm exec playwright test --update-snapshots
-```
-
-## 로컬 데이터
-
-Electron의 `userData` 아래에 다음 데이터가 저장된다.
+Electron의 `userData` 아래에 다음 데이터를 저장해요.
 
 - `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모
-- `worktrees/<project-id>/<task-id>`: 작업별 격리 Git worktree
+- `worktrees/<project-id>/<task-id>`: 작업별 Git worktree
 
-소스 저장소의 파일 내용이나 인증 토큰을 별도 클라우드로 전송하는 백엔드는 없다. Codex 인증은 앱 전용 저장소에 격리되고 SQLite에는 기록되지 않는다. Codex가 처리하는 데이터의 정책은 로그인한 ChatGPT 계정과 조직 설정을 따른다.
+AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
 
-## 현재 범위
+## 현재 지원 범위
 
-이번 버전은 단일 사용자·단일 장비·Codex 한 공급자에 집중한다. 다음 기능은 포함하지 않는다.
+현재 버전은 단일 사용자, 단일 장비, 하나의 Codex 공급자에 집중해요. 다음 기능은 아직 지원하지 않아요.
 
 - 내장 코드 편집기
 - 사람 승인 없는 자동 commit·merge
 - 원격 push·PR 생성·배포
 - 원격 팀 협업
-- 여러 공급자나 계정 순환
+- 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
-- 앱 전용 자동 업데이트와 코드 서명
+- 앱 자동 업데이트와 코드 서명
 
 ## 저장소 정책
 
-이 저장소는 private 사용을 전제로 한다. 실행 로그, SQLite 파일, worktree, 빌드 결과, 환경 파일은 Git에서 제외된다. 실제 서비스 비밀값이나 고객 데이터를 fixture로 커밋하지 않는다.
+이 저장소는 private 사용을 전제로 해요. 실행 로그, SQLite 파일, worktree, 빌드 결과, 환경 파일은 Git에서 제외해요. 실제 서비스 비밀값이나 고객 데이터는 fixture로 커밋하지 않아요.

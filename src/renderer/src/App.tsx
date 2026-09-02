@@ -138,6 +138,7 @@ function eventIcon(kind: EventKind): typeof Activity {
   if (kind.includes('finding')) return Bug
   if (kind.includes('note')) return NotebookPen
   if (kind.includes('test')) return kind === 'test_failed' ? AlertTriangle : CheckCircle2
+  if (kind === 'task_timed_out') return AlertTriangle
   if (kind.includes('completed')) return CheckCircle2
   if (kind.includes('started')) return Play
   return Bot

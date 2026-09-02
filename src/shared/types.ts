@@ -23,6 +23,7 @@ export type EventKind =
   | 'note_deleted'
   | 'task_completed'
   | 'task_stopped'
+  | 'task_timed_out'
   | 'task_recovered'
   | 'task_discarded'
   | 'project_created'
