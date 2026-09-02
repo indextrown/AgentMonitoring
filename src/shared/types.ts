@@ -65,6 +65,25 @@ export interface ProjectChangeDetail {
   path: string
 }
 
+export type ProjectCapabilityKey = 'code' | 'build' | 'run' | 'observe' | 'act' | 'verify'
+
+export type ProjectCapabilityStatus = 'ready' | 'declared' | 'missing'
+
+export interface ProjectCapability {
+  key: ProjectCapabilityKey
+  status: ProjectCapabilityStatus
+  detail: string
+}
+
+export type ProjectCapabilityManifestState = 'missing' | 'valid' | 'invalid'
+
+export interface ProjectCapabilityManifestInspection {
+  path: string
+  state: ProjectCapabilityManifestState
+  adapterKind: 'ios-simulator' | null
+  message: string
+}
+
 export interface ProjectInspection {
   projectId: string
   branch: string | null
@@ -82,6 +101,8 @@ export interface ProjectInspection {
   trackedFileCount: number
   testFileCount: number
   suggestedTestCommands: string[]
+  capabilityManifest: ProjectCapabilityManifestInspection
+  capabilities: ProjectCapability[]
   inspectedAt: string
 }
 

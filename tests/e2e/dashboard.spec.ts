@@ -36,6 +36,9 @@ test('shows repository readiness when selecting a project without tasks', async 
 
   await expect(page.getByRole('heading', { name: 'AgentMonitoring', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: '작업 전에 준비할 항목이 있습니다' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
+  await expect(page.getByText('현재 1개 사용 가능')).toBeVisible()
+  await expect(page.getByText('코드 작업 모드', { exact: true })).toBeVisible()
   await expect(page.getByText('검증 명령을 먼저 연결하세요')).toBeVisible()
   await expect(page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' })).toHaveClass(/selected/)
 
@@ -146,6 +149,7 @@ test('starts from a real-project onboarding state without seeded data', async ({
   page.once('dialog', (dialog) => dialog.accept())
   await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
   await expect(page.getByText('설정 완료')).toBeVisible()
+  await expect(page.locator('.capability-item').filter({ hasText: 'Verify' }).getByText('지금 사용 가능')).toBeVisible()
   await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
 })
 
@@ -162,6 +166,16 @@ test('explains dirty repositories with exact file categories and paths', async (
     fullPage: true,
     maxDiffPixelRatio: 0.01
   })
+})
+
+test('distinguishes declared iOS capabilities from features available now', async ({ page }) => {
+  await page.goto('/?workspace=empty&contract=ios')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  await expect(page.getByText('계약 확인됨')).toBeVisible()
+  await expect(page.getByText('현재 1개 사용 가능 · 5개는 프로젝트 선언 후 연결 대기')).toBeVisible()
+  await expect(page.locator('.capability-item.declared')).toHaveCount(5)
+  await expect(page.getByText('이 계약은 접근 범위만 선언합니다. 앱 빌드·실행·관찰 연결은 다음 단계에서 추가합니다.')).toBeVisible()
 })
 
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {

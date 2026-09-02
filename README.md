@@ -24,6 +24,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | --- | --- |
 | ChatGPT 로그인 | Codex app-server로 로그인하고 앱 전용 인증 상태를 관리해요. OpenAI API 키는 필요하지 않아요. |
 | 로컬 프로젝트 연결 | 실제 Git 저장소를 등록하고 브랜치, 변경 파일, 언어, 빌드 도구, 테스트 파일을 검사해요. |
+| AI 접근성 진단 | 프로젝트가 Code, Build, Run, Observe, Act, Verify 중 어느 영역을 제공하도록 구성됐는지 확인해요. |
 | 작업 등록 | 구현 목표, 완료 조건, 최대 자가 수정 횟수를 작업별로 저장해요. |
 | 다중 역할 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 정해진 순서로 실행해요. |
 | 테스트와 자가 수정 | 프로젝트 검증 명령을 실행하고, 실패 원인을 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
@@ -42,6 +43,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | 사용자와 장비 | 단일 사용자, 단일 Mac |
 | AI 작업자 | Codex만 지원 |
 | 대상 코드 | 사용자가 연결한 로컬 Git 저장소 |
+| 앱 실행·관찰 | 선언형 계약 진단만 지원하며 Simulator 실행과 화면 조작은 아직 지원하지 않음 |
 | 변경 반영 | 사람 승인 후 현재 로컬 브랜치에만 적용 |
 | 데이터 저장 | 로컬 SQLite와 Git worktree |
 
@@ -114,6 +116,42 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 **원본에 적용**을 누르면 앱이 작업 브랜치의 변경을 커밋한 뒤 현재 로컬 브랜치에 fast-forward로 반영해요. 원본 저장소에 커밋하지 않은 변경이 있거나 브랜치가 서로 갈라졌다면 적용하지 않아요.
 
 앱은 첫 실행 때 샘플 프로젝트나 활동 기록을 만들지 않아요. 이전 버전의 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하고, 사용자가 만든 실제 프로젝트와 작업 기록은 유지해요.
+
+## AI 접근 범위 선언하기
+
+프로젝트 준비 화면은 AI 접근 범위를 여섯 단계로 나눠 보여줘요.
+
+| 영역 | 의미 | 현재 상태 판단 |
+| --- | --- | --- |
+| Code | Git이 추적하는 코드를 읽고 수정해요. | 프로젝트를 연결하면 사용 가능 |
+| Build | Swift 앱을 빌드해요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
+| Run | 앱을 Simulator에서 실행해요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
+| Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
+| Act | UI를 조작하거나 Debug fixture를 적용해요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
+| Verify | 등록한 명령으로 테스트를 실행해요. | 검증 명령을 저장하면 사용 가능 |
+
+앱 실행 자동화를 준비하는 Swift 프로젝트는 저장소 루트에 `.agentmonitor/project.json`을 둘 수 있어요.
+
+```json
+{
+  "version": 1,
+  "adapter": {
+    "kind": "ios-simulator",
+    "container": "PopPang.xcworkspace",
+    "scheme": "PopPang",
+    "configuration": "Debug"
+  },
+  "capabilities": {
+    "build": true,
+    "run": true,
+    "observe": ["screen", "accessibility", "state"],
+    "act": ["ui", "fixture"],
+    "verify": ["test-command", "runtime-scenario"]
+  }
+}
+```
+
+이 파일에는 셸 명령을 넣을 수 없어요. 지원하는 adapter와 정해진 capability 값만 선언할 수 있고, 크기도 64KB로 제한해요. 파일이 없더라도 기존 코드 작업과 검증 명령은 그대로 사용할 수 있어요. 현재 구현은 계약을 검사하고 화면에 표시하는 단계이며, Swift 빌드·Simulator 실행·화면 관찰·UI 조작은 아직 수행하지 않아요.
 
 ## 실제 앱과 브라우저 미리보기 구분하기
 
@@ -238,6 +276,9 @@ AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우�
 - 원격 팀 협업
 - 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
+- Swift 앱 빌드와 iPad Simulator 실행 자동화
+- Simulator 화면·접근성 구조·Debug 상태 수집과 UI 조작
+- runtime 시나리오 기반 자가 수정 루프
 - 앱 자동 업데이트와 코드 서명
 
 ## 저장소 정책

@@ -24,7 +24,19 @@ Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되�
 
 ## 프로젝트 준비 상태
 
-작업 이력이 없는 프로젝트를 선택하면 Renderer가 제한된 `project:inspect` IPC를 호출한다. `ProjectInspector`는 Git 명령으로 현재 브랜치, commit, remote, clean/dirty 상태와 tracked 파일 목록을 읽는다. 변경 상태는 폴더 단위로 축약하지 않고 파일별로 수집해 수정·추가·삭제·이름 변경·미추적·충돌로 분류하며, Renderer에는 종류별 개수와 최대 5개의 경로를 제공한다. 파일 확장자와 알려진 manifest 이름만으로 언어·도구·검증 명령 후보를 계산하며 소스나 설정 파일 내용을 앱으로 가져오지 않는다.
+작업 이력이 없는 프로젝트를 선택하면 Renderer가 제한된 `project:inspect` IPC를 호출한다. `ProjectInspector`는 Git 명령으로 현재 브랜치, commit, remote, clean/dirty 상태와 tracked 파일 목록을 읽는다. 변경 상태는 폴더 단위로 축약하지 않고 파일별로 수집해 수정·추가·삭제·이름 변경·미추적·충돌로 분류하며, Renderer에는 종류별 개수와 최대 5개의 경로를 제공한다. 파일 확장자와 알려진 manifest 이름만으로 언어·도구·검증 명령 후보를 계산한다.
+
+프로젝트 루트에 `.agentmonitor/project.json`이 있으면 `ProjectCapabilityInspector`가 최대 64KB의 해당 파일만 추가로 읽는다. Zod의 strict schema로 version, iOS Simulator adapter, Xcode container·scheme, 선언된 capability를 검증하며 임의 명령이나 알 수 없는 필드는 허용하지 않는다. manifest 자체가 심볼릭 링크이거나 저장소 외부 Xcode container 경로를 가리키면 유효하지 않은 계약으로 처리한다. 오류는 프로젝트 검사 전체를 실패시키지 않고 Renderer에 진단 상태로 전달한다.
+
+Renderer는 다음 상태를 구분한다.
+
+| 상태 | 의미 |
+| --- | --- |
+| `ready` | 현재 AgentMonitoring이 바로 사용할 수 있다. Code와 저장된 검증 명령이 여기에 해당한다. |
+| `declared` | 프로젝트 계약에는 있지만 실행 adapter가 아직 연결되지 않았다. |
+| `missing` | 프로젝트에서 선언하거나 설정하지 않았다. |
+
+현재 capability manifest는 진단용 계약이다. `build`, `run`, `observe`, `act`, runtime `verify`를 선언해도 이번 단계에서는 Xcode나 Simulator 프로세스를 시작하지 않는다. 후속 runtime adapter가 같은 계약을 소비하도록 설계한다. manifest가 없으면 기존 코드 작업 모드로 동작한다.
 
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
 
@@ -98,7 +110,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - IPC 입력은 Zod schema로 검증한다.
 - Codex sandbox 우회 옵션을 사용하지 않는다.
 - 검증 명령은 shell을 거치지 않고 허용 목록의 실행 파일만 `spawn`한다.
-- 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`만 사용하며 `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용을 검사 응답으로 가져오지 않는다.
+- 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`와 고정 경로의 선언형 `.agentmonitor/project.json`만 사용한다. `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용은 검사 응답으로 가져오지 않는다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.
@@ -111,6 +123,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 
 - 앱 재시작은 프로세스 실행을 이어받지 않고 안전한 `stopped` 상태에서 사람의 재실행 결정을 기다린다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
+- Swift 앱을 빌드·실행하거나 Simulator 화면·접근성 구조·Debug 상태를 관찰하고 조작하는 runtime adapter는 아직 없다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.
 

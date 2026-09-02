@@ -7,6 +7,7 @@ import type {
   ProjectInspection,
   ProjectRecord
 } from '../../src/shared/types'
+import { inspectProjectCapabilities } from './project-capabilities'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_BYTES = 4_000_000
@@ -166,6 +167,7 @@ export async function inspectProject(project: ProjectRecord): Promise<ProjectIns
     .filter((file) => MANIFEST_NAMES.has(baseName(file)))
     .sort((left, right) => left.localeCompare(right))
     .slice(0, 12)
+  const capabilityResult = await inspectProjectCapabilities(project, files.length)
 
   return {
     projectId: project.id,
@@ -184,6 +186,8 @@ export async function inspectProject(project: ProjectRecord): Promise<ProjectIns
     trackedFileCount: files.length,
     testFileCount: files.filter((file) => /(^|\/)(tests?|__tests__)(\/|$)|(?:test|tests)\.[^.]+$/i.test(file)).length,
     suggestedTestCommands: suggestTestCommands(tools),
+    capabilityManifest: capabilityResult.manifest,
+    capabilities: capabilityResult.capabilities,
     inspectedAt: new Date().toISOString()
   }
 }
