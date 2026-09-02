@@ -17,6 +17,7 @@ AgentMonitoring은 로컬 Git 프로젝트에서 Codex 작업자를 격리 실�
 - Codex app-server 기반 앱 내 ChatGPT OAuth 로그인
 - 실패한 테스트의 제한된 자가 수정 루프
 - 작업 중단, 재실행, 안전한 변경 승인·로컬 적용, worktree 폐기
+- Codex·검증 명령 제한 시간과 프로세스 그룹 단위 강제 종료
 - 앱 재시작 시 중단된 실행을 `stopped`로 복구하고 기존 worktree에서 재실행
 - 승인 전 변경 파일·증감 통계·Git patch를 보는 내장 diff 검토
 - Reviewer 보고의 severity 기반 버그 등록과 해결·다시 열기
@@ -126,10 +127,15 @@ python python3 pytest make cmake gradle
 
 - 구현 역할: `workspace-write`
 - 비평·Reviewer 역할: `read-only`
+- Codex 역할별 제한 시간: 30분
+- 프로젝트 검증 명령 제한 시간: 45분
+- 중단·시간 초과: 프로세스 그룹에 `SIGTERM`, 3초 후 `SIGKILL`
 - 출력: newline-delimited JSON
 - 작업 위치: 앱이 만든 Git worktree
 - Codex 역할 금지: sandbox 우회, commit, push, merge, 배포
 - 사람 승인 단계: 앱이 작업 브랜치를 커밋한 뒤 현재 로컬 브랜치에 fast-forward로만 적용
+
+사용자가 누른 중단은 작업을 `stopped`로 남겨 재실행할 수 있다. 제한 시간 초과는 `failed`와 `task_timed_out` 이벤트로 기록하고 high finding을 만든다. 앱을 종료할 때는 실행 중인 Runner를 먼저 중단한 다음 Codex 인증 세션과 SQLite를 닫는다.
 
 구체적인 CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 기준으로 한다.
 

@@ -9,10 +9,67 @@ import { AppStore } from '../../electron/main/store'
 
 const execFileAsync = promisify(execFile)
 const temporaryDirectories: string[] = []
+const activeRunners: AgentRunner[] = []
 
 afterEach(async () => {
+  await Promise.all(activeRunners.splice(0).map((runner) => runner.dispose()))
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds))
+}
+
+async function waitForFile(path: string, timeoutMs = 3_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, 'utf8')
+    } catch {
+      await delay(20)
+    }
+  }
+  throw new Error(`fixture 파일 생성 시간을 초과했습니다: ${path}`)
+}
+
+async function createExecutionFixture(options: {
+  codexSource: (directory: string) => string
+  makefile?: string
+  policy?: ConstructorParameters<typeof AgentRunner>[5]
+}): Promise<{
+  directory: string
+  repository: string
+  store: AppStore
+  runner: AgentRunner
+  taskId: string
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runtime-'))
+  temporaryDirectories.push(directory)
+  const repository = join(directory, 'repository')
+  const worktrees = join(directory, 'worktrees')
+  await mkdir(repository)
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: repository })
+  await writeFile(join(repository, 'README.md'), '# Runtime fixture\n')
+  await writeFile(join(repository, 'Makefile'), options.makefile ?? 'test:\n\t@true\n')
+  await execFileAsync('git', ['add', 'README.md', 'Makefile'], { cwd: repository })
+  await execFileAsync(
+    'git',
+    ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'],
+    { cwd: repository }
+  )
+
+  const fakeCodex = join(directory, 'fake-codex.mjs')
+  await writeFile(fakeCodex, options.codexSource(directory))
+  await chmod(fakeCodex, 0o755)
+
+  const store = new AppStore(join(directory, 'store.sqlite'))
+  const project = store.addProject('Runtime fixture', repository)
+  store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
+  const task = store.createTask(project.id, '실행 수명주기', '중단과 시간 초과를 안전하게 처리한다.', 1)
+  const runner = new AgentRunner(store, worktrees, () => undefined, fakeCodex, undefined, options.policy)
+  activeRunners.push(runner)
+  return { directory, repository, store, runner, taskId: task.id }
+}
 
 async function createApprovalFixture(): Promise<{
   repository: string
@@ -83,6 +140,118 @@ describe('AgentRunner', () => {
     await expect(runner.run(task.id)).rejects.toThrow('검증 명령을 등록한 뒤 작업을 실행하세요.')
     expect(store.getTask(task.id).status).toBe('queued')
     store.close()
+  })
+
+  it('times out a Codex process group and records a distinct failure', async () => {
+    let pidPath = ''
+    let heartbeatPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        pidPath = join(directory, 'codex-pids.json')
+        heartbeatPath = join(directory, 'grandchild-heartbeat.txt')
+        const childSource = [
+          "const { appendFileSync } = require('node:fs')",
+          `const heartbeat = ${JSON.stringify(heartbeatPath)}`,
+          "process.on('SIGTERM', () => undefined)",
+          "setInterval(() => appendFileSync(heartbeat, 'x'), 20)"
+        ].join(';')
+        return `#!/usr/bin/env node
+import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+const child = spawn(process.execPath, ['-e', ${JSON.stringify(childSource)}], { stdio: 'ignore' })
+writeFileSync(${JSON.stringify(pidPath)}, JSON.stringify({ parent: process.pid, child: child.pid }))
+process.on('SIGTERM', () => undefined)
+setInterval(() => undefined, 1_000)
+`
+      },
+      policy: { codexStageTimeoutMs: 2_000, testCommandTimeoutMs: 2_000, terminationGraceMs: 50 }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('test-designer 단계 제한 시간 초과 (2초)')
+
+    const pids = JSON.parse(await waitForFile(pidPath)) as { parent: number; child: number }
+    const heartbeatBefore = await waitForFile(heartbeatPath)
+    await delay(120)
+    const heartbeatAfter = await readFile(heartbeatPath, 'utf8')
+    expect(heartbeatAfter).toBe(heartbeatBefore)
+    expect(() => process.kill(pids.parent, 0)).toThrow()
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('failed')
+    expect(fixture.store.getSnapshot().events.some((event) => event.kind === 'task_timed_out')).toBe(true)
+    expect(fixture.store.getSnapshot().findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: expect.stringContaining('test-designer 단계 시간 초과') })])
+    )
+    fixture.store.close()
+  })
+
+  it('times out a hanging project validation command', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      makefile: "test:\n\t@trap '' TERM; while :; do sleep 1; done\n",
+      policy: { codexStageTimeoutMs: 2_000, testCommandTimeoutMs: 300, terminationGraceMs: 50 }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow(
+      '검증 명령 (make test) 제한 시간 초과 (1초)'
+    )
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('failed')
+    expect(fixture.store.getSnapshot().findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: expect.stringContaining('검증 명령 (make test) 시간 초과') })])
+    )
+    fixture.store.close()
+  })
+
+  it('keeps a user-initiated stop distinct from a timeout', async () => {
+    let startedPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        startedPath = join(directory, 'codex-started.txt')
+        return `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(startedPath)}, String(process.pid))
+setInterval(() => undefined, 1_000)
+`
+      },
+      policy: { codexStageTimeoutMs: 5_000, testCommandTimeoutMs: 2_000, terminationGraceMs: 50 }
+    })
+
+    const runPromise = fixture.runner.run(fixture.taskId)
+    const stopped = expect(runPromise).rejects.toThrow('사용자가 작업을 중단했습니다.')
+    await waitForFile(startedPath)
+    await fixture.runner.stop(fixture.taskId)
+    await stopped
+
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('stopped')
+    expect(fixture.store.getSnapshot().events.some((event) => event.kind === 'task_stopped')).toBe(true)
+    expect(fixture.store.getSnapshot().findings.some((finding) => finding.title.includes('시간 초과'))).toBe(false)
+    fixture.store.close()
+  })
+
+  it('waits for active runs to stop when the runner is disposed', async () => {
+    let startedPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        startedPath = join(directory, 'dispose-started.txt')
+        return `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(startedPath)}, String(process.pid))
+setInterval(() => undefined, 1_000)
+`
+      },
+      policy: { codexStageTimeoutMs: 5_000, testCommandTimeoutMs: 2_000, terminationGraceMs: 50 }
+    })
+
+    const runPromise = fixture.runner.run(fixture.taskId)
+    const stopped = expect(runPromise).rejects.toThrow('사용자가 작업을 중단했습니다.')
+    await waitForFile(startedPath)
+    await fixture.runner.dispose()
+    await stopped
+
+    expect(fixture.runner.isRunning(fixture.taskId)).toBe(false)
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('stopped')
+    fixture.store.close()
   })
 
   it('runs role-separated stages inside a git worktree and stops for approval', async () => {

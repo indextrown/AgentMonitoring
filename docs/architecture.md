@@ -80,10 +80,14 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 ## 실패 정책
 
 - Codex 프로세스 비정상 종료: 작업을 `failed`로 전환하고 high finding을 등록한다.
+- Codex 단계 제한 시간 초과: 역할별 30분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
+- 검증 명령 제한 시간 초과: 45분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
 - 재시도 한도 초과: 작업을 `failed`로 전환한다.
 - 사용자 중단: 현재 child process에 `SIGTERM`을 보내고 `stopped`로 전환한다.
+- 프로세스 종료: macOS와 Linux에서는 격리된 프로세스 그룹에 `SIGTERM`을 보내고 3초 뒤에도 살아 있으면 `SIGKILL`한다.
+- 앱 종료: `AgentRunner.dispose()`로 active run의 상태 전이와 이벤트 기록을 마친 다음 Codex 인증 세션과 SQLite를 닫는다.
 - 앱 종료·비정상 재시작: 남아 있는 `running`·`testing` 작업을 `stopped`로 전환하고 복구 이벤트를 기록한다. 기존 worktree는 보존해 사용자가 검토하거나 재실행할 수 있다.
 - Reviewer 보고: 명시적인 `[critical|high|medium|low] 제목` 행을 finding으로 등록하고 다음 검토 전에 같은 작업의 기존 미해결 finding을 해결 처리한다.
 
