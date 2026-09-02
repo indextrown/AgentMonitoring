@@ -1,14 +1,53 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   launchIosSimulatorRuntime,
+  parseAccessibilityObserverOutput,
   parseAvailableSimulatorDevices,
   type RuntimeCommandRequest
 } from '../../electron/main/ios-simulator-runtime'
 
 const temporaryDirectories: string[] = []
+
+function accessibilityObserverOutput(bundleIdentifier = 'com.example.PopPang'): string {
+  const payload = {
+    schemaVersion: 1,
+    bundleIdentifier,
+    capturedAt: '2026-09-03T00:00:00Z',
+    nodeCount: 2,
+    truncated: false,
+    root: {
+      elementType: 'Application',
+      identifier: '',
+      label: 'PopPang',
+      title: '',
+      enabled: true,
+      selected: false,
+      frame: { x: 0, y: 0, width: 440, height: 956 },
+      children: [
+        {
+          elementType: 'Button',
+          identifier: 'start-navigation',
+          label: '항해 시작',
+          title: '',
+          enabled: true,
+          selected: false,
+          frame: { x: 20, y: 800, width: 400, height: 48 },
+          children: []
+        }
+      ]
+    }
+  }
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64')
+  return [
+    'AGENTMONITOR_ACCESSIBILITY_BEGIN',
+    encoded,
+    'AGENTMONITOR_ACCESSIBILITY_END',
+    ''
+  ].join('\n')
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
@@ -89,6 +128,10 @@ describe('iOS Simulator runtime adapter', () => {
           ])
         }
       }
+      if (request.args.some((argument) => argument.startsWith('-only-testing:'))) {
+        const stdout = accessibilityObserverOutput()
+        return { code: 0, output: stdout, stdout }
+      }
       if (request.args.includes('launch')) {
         return { code: 0, output: 'com.example.PopPang: 4242\n', stdout: 'com.example.PopPang: 4242\n' }
       }
@@ -111,6 +154,7 @@ describe('iOS Simulator runtime adapter', () => {
         deviceFamily: 'iphone'
       },
       captureScreen: true,
+      captureAccessibility: true,
       execute,
       wait: async () => undefined,
       onProgress: (status, _message, update) => {
@@ -127,14 +171,32 @@ describe('iOS Simulator runtime adapter', () => {
       screenEvidence: {
         mimeType: 'image/png',
         sizeBytes: 11
+      },
+      accessibilityEvidence: {
+        mimeType: 'application/json',
+        nodeCount: 2,
+        truncated: false
       }
     })
     expect(result.screenEvidence?.path).toMatch(/runtime-sessions\/.+\/evidence\/screen-.+\.png$/)
-    expect(progress).toEqual(['preparing', 'booting', 'building', 'installing', 'launching', 'observing'])
+    expect(progress).toEqual([
+      'preparing',
+      'booting',
+      'building',
+      'installing',
+      'launching',
+      'observing',
+      'observing'
+    ])
     expect(progressUpdates).toEqual([
       {},
       { deviceId: 'IPHONE-UDID', deviceName: 'iPhone 16 Pro' },
       {},
+      {
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
+        bundleIdentifier: 'com.example.PopPang'
+      },
       {
         deviceId: 'IPHONE-UDID',
         deviceName: 'iPhone 16 Pro',
@@ -160,8 +222,21 @@ describe('iOS Simulator runtime adapter', () => {
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'simctl', 'install', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
-      ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID']
+      ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID'],
+      ['/usr/bin/xcrun', 'xcodebuild', '-project', expect.stringContaining('AgentMonitoringAccessibility.xcodeproj')]
     ])
+    expect(result.accessibilityEvidence?.content).toContain('start-navigation')
+    expect(
+      await readFile(
+        join(
+          runtimeRoot,
+          taskId,
+          'accessibility-observer',
+          'AgentMonitoringAccessibility.xctestplan'
+        ),
+        'utf8'
+      )
+    ).toContain('com.example.PopPang')
   })
 
   it('reports a clear error when no iPad Simulator is available', async () => {
@@ -183,6 +258,7 @@ describe('iOS Simulator runtime adapter', () => {
           deviceFamily: 'ipad'
         },
         captureScreen: false,
+        captureAccessibility: false,
         execute: async () => ({
           code: 0,
           output: '',
@@ -221,6 +297,7 @@ describe('iOS Simulator runtime adapter', () => {
           deviceFamily: 'ipad'
         },
         captureScreen: false,
+        captureAccessibility: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -252,6 +329,7 @@ describe('iOS Simulator runtime adapter', () => {
           deviceFamily: 'ipad'
         },
         captureScreen: false,
+        captureAccessibility: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -304,5 +382,23 @@ describe('iOS Simulator runtime adapter', () => {
     expect(parseAvailableSimulatorDevices(source, 'ipad').map((device) => device.udid)).toEqual([
       'TABLET'
     ])
+  })
+
+  it('rejects accessibility trees from a different bundle identifier', () => {
+    expect(() =>
+      parseAccessibilityObserverOutput(
+        accessibilityObserverOutput('com.example.Other'),
+        'com.example.PopPang'
+      )
+    ).toThrow('bundle identifier가 실행한 앱과 다릅니다')
+  })
+
+  it('rejects malformed accessibility observer output', () => {
+    expect(() =>
+      parseAccessibilityObserverOutput(
+        'AGENTMONITOR_ACCESSIBILITY_BEGIN\nnot-base64!\nAGENTMONITOR_ACCESSIBILITY_END',
+        'com.example.PopPang'
+      )
+    ).toThrow('올바른 base64가 아닙니다')
   })
 })

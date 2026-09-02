@@ -42,6 +42,7 @@ async function createExecutionFixture(options: {
   policy?: ConstructorParameters<typeof AgentRunner>[5]
   withRuntimeManifest?: boolean
   withScreenObservation?: boolean
+  withAccessibilityObservation?: boolean
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -75,7 +76,10 @@ async function createExecutionFixture(options: {
         capabilities: {
           build: true,
           run: true,
-          observe: options.withScreenObservation ? ['screen'] : [],
+          observe: [
+            ...(options.withScreenObservation ? ['screen'] : []),
+            ...(options.withAccessibilityObservation ? ['accessibility'] : [])
+          ],
           act: [],
           verify: ['test-command']
         }
@@ -365,14 +369,16 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     store.close()
   })
 
-  it('launches and persists an iPad runtime only when the project contract enables it', async () => {
+  it('launches an iPad runtime and gives screen and accessibility evidence to the reviewer', async () => {
     const launchedWorktrees: string[] = []
     const stoppedBundles: string[] = []
     let screenEvidencePath = ''
+    let accessibilityEvidencePath = ''
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
         launchedWorktrees.push(input.worktreePath)
         expect(input.captureScreen).toBe(true)
+        expect(input.captureAccessibility).toBe(true)
         expect(input.contract.deviceFamily).toBe('ipad')
         input.onProgress('booting', 'iPad 부팅')
         input.onProgress('building', 'Swift 앱 빌드')
@@ -380,6 +386,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         await mkdir(evidenceDirectory, { recursive: true })
         screenEvidencePath = join(evidenceDirectory, 'screen-fixture.png')
         await writeFile(screenEvidencePath, 'fixture-png')
+        accessibilityEvidencePath = join(evidenceDirectory, 'accessibility-fixture.json')
+        const accessibilityContent = '{"schemaVersion":1,"root":{"label":"항해 시작"}}\n'
+        await writeFile(accessibilityEvidencePath, accessibilityContent)
         return {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',
@@ -391,6 +400,15 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
             mimeType: 'image/png',
             sizeBytes: 11,
             capturedAt: new Date().toISOString()
+          },
+          accessibilityEvidence: {
+            path: accessibilityEvidencePath,
+            mimeType: 'application/json',
+            sizeBytes: Buffer.byteLength(accessibilityContent),
+            capturedAt: new Date().toISOString(),
+            nodeCount: 2,
+            truncated: false,
+            content: accessibilityContent
           }
         }
       },
@@ -407,6 +425,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 `,
       withRuntimeManifest: true,
       withScreenObservation: true,
+      withAccessibilityObservation: true,
       runtimeAdapter
     })
 
@@ -422,21 +441,30 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       processId: 4242
     })
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_ready')).toBe(true)
-    expect(fixture.store.getSnapshot(task.projectId).runtimeEvidence).toMatchObject([
-      {
-        taskId: task.id,
-        kind: 'screen',
-        path: screenEvidencePath,
-        mimeType: 'image/png',
-        sizeBytes: 11
-      }
-    ])
+    expect(fixture.store.getSnapshot(task.projectId).runtimeEvidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'screen',
+          path: screenEvidencePath,
+          mimeType: 'image/png',
+          sizeBytes: 11
+        }),
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'accessibility',
+          path: accessibilityEvidencePath,
+          mimeType: 'application/json'
+        })
+      ])
+    )
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_observed')).toBe(true)
     const codexCalls = (await readFile(join(fixture.directory, 'codex-argv.jsonl'), 'utf8'))
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line) as string[])
     expect(codexCalls.at(-1)).toEqual(expect.arrayContaining(['--image', screenEvidencePath]))
+    expect(codexCalls.at(-1)?.join('\n')).toContain('항해 시작')
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App'])
@@ -449,6 +477,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
         expect(input.captureScreen).toBe(false)
+        expect(input.captureAccessibility).toBe(false)
         input.onProgress('launching', 'fixture 앱 실행 중', {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',

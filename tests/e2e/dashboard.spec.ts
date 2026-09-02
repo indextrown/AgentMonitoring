@@ -43,6 +43,9 @@ test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await expect(runtime.getByText('com.example.ElmwoodOnline', { exact: true })).toBeVisible()
   await expect(runtime.getByText('PID 43120', { exact: true })).toBeVisible()
   await expect(runtime.getByRole('button', { name: /Simulator 화면 증거/ })).toContainText('1.2 MB')
+  await expect(runtime.getByRole('button', { name: /Simulator 접근성 트리/ })).toContainText(
+    '41.8 KB'
+  )
 })
 
 test('shows repository readiness when selecting a project without tasks', async ({ page }) => {
@@ -191,7 +194,7 @@ test('distinguishes supported iOS runtime capabilities from planned access', asy
   await expect(page.getByText('현재 4개 사용 가능 · 2개는 프로젝트 선언 후 연결 대기')).toBeVisible()
   await expect(page.locator('.capability-item.ready')).toHaveCount(4)
   await expect(page.locator('.capability-item.declared')).toHaveCount(2)
-  await expect(page.getByText('Build·Run과 화면 캡처는 작업별 Swift runtime에서 사용합니다. 접근성·상태 관찰과 조작은 다음 단계에서 연결합니다.')).toBeVisible()
+  await expect(page.getByText('Build·Run, 화면 캡처, 접근성 트리 수집은 작업별 Swift runtime에서 사용합니다. 상태 관찰과 조작은 다음 단계에서 연결합니다.')).toBeVisible()
 })
 
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {

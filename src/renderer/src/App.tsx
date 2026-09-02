@@ -9,6 +9,7 @@ import {
   Circle,
   Clock3,
   Command,
+  FileJson,
   FileText,
   Folder,
   FolderOpen,
@@ -835,7 +836,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run과 화면 캡처는 작업별 Swift runtime에서 사용합니다. 접근성·상태 관찰과 조작은 다음 단계에서 연결합니다.</small>
+              <small>Build·Run, 화면 캡처, 접근성 트리 수집은 작업별 Swift runtime에서 사용합니다. 상태 관찰과 조작은 다음 단계에서 연결합니다.</small>
             )}
           </footer>
         </article>
@@ -1541,16 +1542,19 @@ function TaskDrawer({
             <p>{runtime.message}</p>
             {evidence.length > 0 && (
               <div className="runtime-evidence-list">
-                {evidence.slice(0, 3).map((item) => (
-                  <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
-                    <ImageIcon size={14} />
-                    <span>
-                      <strong>Simulator 화면 증거</strong>
-                      <small>PNG · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
-                    </span>
-                    <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
-                  </button>
-                ))}
+                {evidence.slice(0, 3).map((item) => {
+                  const EvidenceIcon = item.kind === 'accessibility' ? FileJson : ImageIcon
+                  return (
+                    <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
+                      <EvidenceIcon size={14} />
+                      <span>
+                        <strong>{item.kind === 'accessibility' ? 'Simulator 접근성 트리' : 'Simulator 화면 증거'}</strong>
+                        <small>{item.kind === 'accessibility' ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
+                      </span>
+                      <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
+                    </button>
+                  )
+                })}
                 {evidence.length > 3 && <small>최근 3개 표시 · 전체 {evidence.length}개 저장</small>}
               </div>
             )}

@@ -57,8 +57,11 @@ interface ProcessDeadline {
 
 interface RuntimeRunResult {
   summary: string
-  evidencePaths: string[]
+  reviewContext: string
+  imagePaths: string[]
 }
+
+const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -406,9 +409,12 @@ export class AgentRunner {
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
           runtimeResult
-            ? `Swift runtime 결과:\n${runtimeResult.summary}`
+            ? [
+                `Swift runtime 결과:\n${runtimeResult.summary}`,
+                runtimeResult.reviewContext
+              ].filter(Boolean).join('\n\n')
             : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
-          runtimeResult?.evidencePaths.length
+          runtimeResult?.imagePaths.length
             ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
             : '',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
@@ -416,7 +422,7 @@ export class AgentRunner {
           '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
           '코드는 수정하지 마세요.'
         ].filter(Boolean).join('\n\n'),
-        runtimeResult?.evidencePaths ?? []
+        runtimeResult?.imagePaths ?? []
       )
       for (const finding of parseReviewerFindings(review.finalMessage)) {
         this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
@@ -740,6 +746,7 @@ export class AgentRunner {
         runtimeRoot: this.runtimeRoot,
         contract: manifest.value.adapter,
         captureScreen: manifest.value.capabilities.observe.includes('screen'),
+        captureAccessibility: manifest.value.capabilities.observe.includes('accessibility'),
         execute: (request) => this.executeRuntimeCommand(request, control),
         onProgress: (status, message, update = {}) => {
           this.store.setRuntimeSession(task.id, status, { ...update, message })
@@ -749,7 +756,16 @@ export class AgentRunner {
       if (manifest.value.capabilities.observe.includes('screen') && !result.screenEvidence) {
         throw new IosRuntimeStageError('observing', '화면 관찰 계약이 활성화됐지만 화면 증거가 생성되지 않았습니다.')
       }
-      const evidencePaths: string[] = []
+      if (
+        manifest.value.capabilities.observe.includes('accessibility') &&
+        !result.accessibilityEvidence
+      ) {
+        throw new IosRuntimeStageError(
+          'observing',
+          '접근성 관찰 계약이 활성화됐지만 접근성 트리가 생성되지 않았습니다.'
+        )
+      }
+      const imagePaths: string[] = []
       if (result.screenEvidence) {
         const evidence = this.store.addRuntimeEvidence(task.id, {
           kind: 'screen',
@@ -758,7 +774,7 @@ export class AgentRunner {
           sizeBytes: result.screenEvidence.sizeBytes,
           createdAt: result.screenEvidence.capturedAt
         })
-        evidencePaths.push(evidence.path)
+        imagePaths.push(evidence.path)
         this.emit(
           task,
           'runtime_observed',
@@ -766,9 +782,37 @@ export class AgentRunner {
           `Simulator 화면 증거 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
         )
       }
+      let reviewContext = ''
+      if (result.accessibilityEvidence) {
+        const accessibility = result.accessibilityEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          kind: 'accessibility',
+          path: accessibility.path,
+          mimeType: accessibility.mimeType,
+          sizeBytes: accessibility.sizeBytes,
+          createdAt: accessibility.capturedAt
+        })
+        this.emit(
+          task,
+          'runtime_observed',
+          'runtime',
+          `Simulator 접근성 트리 저장 · ${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes${accessibility.truncated ? ' · 안전 제한으로 일부 생략' : ''}`
+        )
+        const content = accessibility.content.slice(0, MAX_ACCESSIBILITY_REVIEW_CHARS)
+        reviewContext = [
+          `다음 JSON은 실행 중인 앱의 접근성 트리입니다. identifier, label, value, frame, enabled·selected 상태와 계층을 이용해 요구사항과 화면 구조를 검토하세요. (${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소${accessibility.truncated ? ', 수집 시 일부 생략' : ''})`,
+          '```json',
+          content,
+          accessibility.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n')
+      }
       const message = [
         `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`,
-        result.screenEvidence ? '화면 증거 1개 저장' : ''
+        result.screenEvidence ? '화면 증거 1개 저장' : '',
+        result.accessibilityEvidence
+          ? `접근성 요소 ${result.accessibilityEvidence.nodeCount.toLocaleString('ko-KR')}개 저장`
+          : ''
       ].filter(Boolean).join(' · ')
       this.store.setRuntimeSession(task.id, 'running', {
         deviceId: result.deviceId,
@@ -778,7 +822,7 @@ export class AgentRunner {
         message
       })
       this.emit(task, 'runtime_ready', 'runtime', message)
-      return { summary: message, evidencePaths }
+      return { summary: message, reviewContext, imagePaths }
     } catch (error) {
       if (error instanceof StoppedError) throw error
       if (error instanceof ProcessTimeoutError) {

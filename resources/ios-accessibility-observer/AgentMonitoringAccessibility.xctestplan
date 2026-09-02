@@ -1,0 +1,27 @@
+{
+  "configurations": [
+    {
+      "id": "AA000000-0000-4000-8000-000000000001",
+      "name": "Accessibility",
+      "options": {
+        "environmentVariableEntries": [
+          {
+            "key": "AGENTMONITOR_TARGET_BUNDLE_ID",
+            "value": "com.example.AgentMonitoringTarget"
+          }
+        ]
+      }
+    }
+  ],
+  "defaultOptions": {},
+  "testTargets": [
+    {
+      "target": {
+        "containerPath": "container:AgentMonitoringAccessibility.xcodeproj",
+        "identifier": "AA0000000000000000000001",
+        "name": "AgentMonitoringAccessibilityTests"
+      }
+    }
+  ],
+  "version": 1
+}

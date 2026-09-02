@@ -153,6 +153,16 @@ function buildSnapshot(): DashboardSnapshot {
           mimeType: 'image/png' as const,
           sizeBytes: 1_284_192,
           createdAt: atOffset(0, 8, 58)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000102',
+          taskId: tasks[0].id,
+          projectId,
+          kind: 'accessibility' as const,
+          path: 'demo://runtime/evidence/accessibility-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 42_816,
+          createdAt: atOffset(0, 8, 59)
         }
       ]
     : []
@@ -339,7 +349,7 @@ export const demoBridge: AgentMonitoringBridge = {
           ? { key: 'run' as const, status: 'ready' as const, detail: `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능` }
           : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
         hasIosContract
-          ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 사용 가능 · 접근성 · 앱 상태 연결 예정' }
+          ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 · XCTest 접근성 트리 수집 사용 가능 · 앱 상태 연결 예정' }
           : { key: 'observe' as const, status: 'missing' as const, detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
         hasIosContract
           ? { key: 'act' as const, status: 'declared' as const, detail: 'UI · fixture 조작 계약 선언 · 실행 어댑터 연결 예정' }

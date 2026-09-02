@@ -183,9 +183,9 @@ function runtimeEvidenceFromRow(row: Row): RuntimeEvidenceRecord {
     id: String(row.id),
     taskId: String(row.taskId),
     projectId: String(row.projectId),
-    kind: 'screen',
+    kind: String(row.kind) as RuntimeEvidenceRecord['kind'],
     path: String(row.path),
-    mimeType: 'image/png',
+    mimeType: String(row.mimeType) as RuntimeEvidenceRecord['mimeType'],
     sizeBytes: Number(row.sizeBytes),
     createdAt: String(row.createdAt)
   }

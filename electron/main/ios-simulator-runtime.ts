@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, realpath } from 'node:fs/promises'
+import { cp, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { z } from 'zod'
 import type { ProjectCapabilityManifest } from './project-capabilities'
 import type { RuntimeSessionRecord, RuntimeSessionStatus } from '../../src/shared/types'
 
@@ -28,6 +29,8 @@ export interface IosSimulatorLaunchInput {
   runtimeRoot: string
   contract: ProjectCapabilityManifest['adapter']
   captureScreen: boolean
+  captureAccessibility: boolean
+  accessibilityObserverTemplateRoot?: string
   execute: RuntimeCommandExecutor
   wait?: (milliseconds: number) => Promise<void>
   onProgress: (
@@ -44,6 +47,16 @@ export interface RuntimeScreenEvidence {
   capturedAt: string
 }
 
+export interface RuntimeAccessibilityEvidence {
+  path: string
+  mimeType: 'application/json'
+  sizeBytes: number
+  capturedAt: string
+  nodeCount: number
+  truncated: boolean
+  content: string
+}
+
 export interface IosSimulatorLaunchResult {
   deviceId: string
   deviceName: string
@@ -51,6 +64,7 @@ export interface IosSimulatorLaunchResult {
   processId: number | null
   appPath: string
   screenEvidence: RuntimeScreenEvidence | null
+  accessibilityEvidence: RuntimeAccessibilityEvidence | null
 }
 
 export interface IosSimulatorStopInput {
@@ -88,12 +102,78 @@ const RUNTIME_TIMEOUTS = {
   install: 2 * 60_000,
   launch: 60_000,
   observe: 30_000,
+  accessibility: 5 * 60_000,
   stop: 30_000
 } as const
 
 const XCRUN_COMMAND = '/usr/bin/xcrun'
 const SCREEN_SETTLE_MS = 1_000
 const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024
+const MAX_ACCESSIBILITY_JSON_BYTES = 512 * 1024
+const MAX_ACCESSIBILITY_EVIDENCE_BYTES = 1024 * 1024
+const ACCESSIBILITY_BEGIN_MARKER = 'AGENTMONITOR_ACCESSIBILITY_BEGIN'
+const ACCESSIBILITY_END_MARKER = 'AGENTMONITOR_ACCESSIBILITY_END'
+const ACCESSIBILITY_OBSERVER_NAME = 'AgentMonitoringAccessibility'
+const ACCESSIBILITY_OBSERVER_TARGET_ID = 'AA0000000000000000000001'
+
+interface AccessibilityTreeNode {
+  elementType: string
+  identifier: string
+  label: string
+  title: string
+  enabled: boolean
+  selected: boolean
+  frame: { x: number; y: number; width: number; height: number }
+  value?: string
+  placeholderValue?: string
+  truncated?: boolean
+  children: AccessibilityTreeNode[]
+}
+
+export interface AccessibilityTreePayload {
+  schemaVersion: 1
+  bundleIdentifier: string
+  capturedAt: string
+  nodeCount: number
+  truncated: boolean
+  root: AccessibilityTreeNode
+}
+
+const boundedAccessibilityString = z.string().max(2_000)
+const accessibilityTreeNodeSchema: z.ZodType<AccessibilityTreeNode> = z.lazy(() =>
+  z
+    .object({
+      elementType: z.string().min(1).max(128),
+      identifier: boundedAccessibilityString,
+      label: boundedAccessibilityString,
+      title: boundedAccessibilityString,
+      enabled: z.boolean(),
+      selected: z.boolean(),
+      frame: z
+        .object({
+          x: z.number().finite(),
+          y: z.number().finite(),
+          width: z.number().finite(),
+          height: z.number().finite()
+        })
+        .strict(),
+      value: boundedAccessibilityString.optional(),
+      placeholderValue: boundedAccessibilityString.optional(),
+      truncated: z.boolean().optional(),
+      children: z.array(accessibilityTreeNodeSchema).max(5_000)
+    })
+    .strict()
+)
+const accessibilityTreePayloadSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    bundleIdentifier: z.string().min(1).max(512),
+    capturedAt: z.string().datetime({ offset: true }),
+    nodeCount: z.number().int().min(1).max(5_000),
+    truncated: z.boolean(),
+    root: accessibilityTreeNodeSchema
+  })
+  .strict()
 
 export class IosRuntimeStageError extends Error {
   constructor(
@@ -109,6 +189,141 @@ function parseJson(source: string, label: string): unknown {
     return JSON.parse(source)
   } catch {
     throw new IosRuntimeStageError('failed', `${label} JSON을 해석할 수 없습니다.`)
+  }
+}
+
+export function parseAccessibilityObserverOutput(
+  source: string,
+  expectedBundleIdentifier: string
+): AccessibilityTreePayload {
+  const beginIndex = source.lastIndexOf(ACCESSIBILITY_BEGIN_MARKER)
+  const endIndex = source.indexOf(ACCESSIBILITY_END_MARKER, beginIndex)
+  if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex) {
+    throw new IosRuntimeStageError(
+      'observing',
+      'XCTest observer 출력에서 접근성 트리 marker를 찾지 못했습니다.'
+    )
+  }
+  const encodedLines = source
+    .slice(beginIndex + ACCESSIBILITY_BEGIN_MARKER.length, endIndex)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (
+    encodedLines.length === 0 ||
+    encodedLines.some((line) => !/^[A-Za-z0-9+/=]+$/.test(line))
+  ) {
+    throw new IosRuntimeStageError('observing', '접근성 트리 payload가 올바른 base64가 아닙니다.')
+  }
+  const encoded = encodedLines.join('')
+  const decoded = Buffer.from(encoded, 'base64')
+  if (decoded.byteLength === 0 || decoded.byteLength > MAX_ACCESSIBILITY_JSON_BYTES) {
+    throw new IosRuntimeStageError(
+      'observing',
+      `접근성 트리 크기가 허용 범위를 벗어났습니다: ${decoded.byteLength.toLocaleString('ko-KR')} bytes`
+    )
+  }
+
+  let payload: AccessibilityTreePayload
+  try {
+    payload = accessibilityTreePayloadSchema.parse(JSON.parse(decoded.toString('utf8')))
+  } catch {
+    throw new IosRuntimeStageError('observing', '접근성 트리 JSON 계약이 올바르지 않습니다.')
+  }
+  if (payload.bundleIdentifier !== expectedBundleIdentifier) {
+    throw new IosRuntimeStageError(
+      'observing',
+      `접근성 트리의 bundle identifier가 실행한 앱과 다릅니다: ${payload.bundleIdentifier}`
+    )
+  }
+  return payload
+}
+
+function accessibilityTestPlan(bundleIdentifier: string): string {
+  return `${JSON.stringify(
+    {
+      configurations: [
+        {
+          id: 'AA000000-0000-4000-8000-000000000001',
+          name: 'Accessibility',
+          options: {
+            environmentVariableEntries: [
+              {
+                key: 'AGENTMONITOR_TARGET_BUNDLE_ID',
+                value: bundleIdentifier,
+                enabled: true
+              }
+            ]
+          }
+        }
+      ],
+      defaultOptions: {},
+      testTargets: [
+        {
+          target: {
+            containerPath: `container:${ACCESSIBILITY_OBSERVER_NAME}.xcodeproj`,
+            identifier: ACCESSIBILITY_OBSERVER_TARGET_ID,
+            name: `${ACCESSIBILITY_OBSERVER_NAME}Tests`
+          }
+        }
+      ],
+      version: 1
+    },
+    null,
+    2
+  )}\n`
+}
+
+async function findAccessibilityObserverTemplate(
+  requestedRoot?: string
+): Promise<string> {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  const candidates = [
+    requestedRoot,
+    resourcesPath ? resolve(resourcesPath, 'ios-accessibility-observer') : null,
+    resolve(process.cwd(), 'resources', 'ios-accessibility-observer')
+  ].filter((candidate): candidate is string => Boolean(candidate))
+
+  for (const candidate of [...new Set(candidates)]) {
+    const stats = await lstat(candidate).catch(() => null)
+    if (stats?.isDirectory() && !stats.isSymbolicLink()) return realpath(candidate)
+  }
+  throw new IosRuntimeStageError(
+    'observing',
+    '번들된 XCTest 접근성 observer를 찾지 못했습니다. AgentMonitoring을 다시 빌드하세요.'
+  )
+}
+
+async function prepareAccessibilityObserver(
+  sessionRoot: string,
+  bundleIdentifier: string,
+  requestedTemplateRoot?: string
+): Promise<{ projectPath: string; derivedDataPath: string }> {
+  const templateRoot = await findAccessibilityObserverTemplate(requestedTemplateRoot)
+  const observerRoot = resolve(sessionRoot, 'accessibility-observer')
+  if (!observerRoot.startsWith(`${sessionRoot}/`)) {
+    throw new IosRuntimeStageError('observing', '안전하지 않은 접근성 observer 경로입니다.')
+  }
+  await rm(observerRoot, { recursive: true, force: true })
+  await cp(templateRoot, observerRoot, { recursive: true })
+  const resolvedObserverRoot = await requireContainedDirectory(
+    sessionRoot,
+    'accessibility-observer',
+    '접근성 observer'
+  )
+  await writeFile(
+    resolve(resolvedObserverRoot, `${ACCESSIBILITY_OBSERVER_NAME}.xctestplan`),
+    accessibilityTestPlan(bundleIdentifier),
+    'utf8'
+  )
+  await mkdir(resolve(resolvedObserverRoot, 'DerivedData'), { recursive: true })
+  return {
+    projectPath: resolve(resolvedObserverRoot, `${ACCESSIBILITY_OBSERVER_NAME}.xcodeproj`),
+    derivedDataPath: await requireContainedDirectory(
+      resolvedObserverRoot,
+      'DerivedData',
+      '접근성 observer DerivedData'
+    )
   }
 }
 
@@ -454,13 +669,94 @@ export async function launchIosSimulatorRuntime(
     }
   }
 
+  let accessibilityEvidence: RuntimeAccessibilityEvidence | null = null
+  if (input.captureAccessibility) {
+    input.onProgress(
+      'observing',
+      `${device.name}에서 ${product.bundleIdentifier} 앱의 접근성 트리를 수집하고 있습니다.`,
+      { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+    )
+    const observer = await prepareAccessibilityObserver(
+      resolvedSessionRoot,
+      product.bundleIdentifier,
+      input.accessibilityObserverTemplateRoot
+    )
+    const observerResult = await executeRequired(
+      input.execute,
+      {
+        command: XCRUN_COMMAND,
+        args: [
+          'xcodebuild',
+          '-project',
+          observer.projectPath,
+          '-scheme',
+          ACCESSIBILITY_OBSERVER_NAME,
+          '-configuration',
+          'Debug',
+          '-sdk',
+          'iphonesimulator',
+          '-destination',
+          `id=${device.udid}`,
+          '-derivedDataPath',
+          observer.derivedDataPath,
+          `-only-testing:${ACCESSIBILITY_OBSERVER_NAME}Tests/AccessibilitySnapshotTests/testCaptureAccessibilityTree`,
+          'test'
+        ],
+        cwd: worktreePath,
+        label: 'Simulator 접근성 트리 수집',
+        timeoutMs: RUNTIME_TIMEOUTS.accessibility
+      },
+      'observing'
+    )
+    const payload = parseAccessibilityObserverOutput(
+      observerResult.stdout || observerResult.output,
+      product.bundleIdentifier
+    )
+    await mkdir(resolve(resolvedSessionRoot, 'evidence'), { recursive: true })
+    const evidenceRoot = await requireContainedDirectory(
+      resolvedSessionRoot,
+      'evidence',
+      'runtime evidence'
+    )
+    const accessibilityPath = resolve(
+      evidenceRoot,
+      `accessibility-${randomUUID()}.json`
+    )
+    const accessibilityContent = `${JSON.stringify(payload, null, 2)}\n`
+    const accessibilitySizeBytes = Buffer.byteLength(accessibilityContent)
+    if (
+      accessibilitySizeBytes <= 0 ||
+      accessibilitySizeBytes > MAX_ACCESSIBILITY_EVIDENCE_BYTES
+    ) {
+      throw new IosRuntimeStageError(
+        'observing',
+        `접근성 증거 크기가 허용 범위를 벗어났습니다: ${accessibilitySizeBytes.toLocaleString('ko-KR')} bytes`
+      )
+    }
+    await writeFile(accessibilityPath, accessibilityContent, 'utf8')
+    const resolvedAccessibilityPath = await realpath(accessibilityPath)
+    if (!resolvedAccessibilityPath.startsWith(`${evidenceRoot}/`)) {
+      throw new IosRuntimeStageError('observing', '접근성 증거가 작업별 runtime 경로 밖을 가리킵니다.')
+    }
+    accessibilityEvidence = {
+      path: resolvedAccessibilityPath,
+      mimeType: 'application/json',
+      sizeBytes: accessibilitySizeBytes,
+      capturedAt: payload.capturedAt,
+      nodeCount: payload.nodeCount,
+      truncated: payload.truncated,
+      content: accessibilityContent
+    }
+  }
+
   return {
     deviceId: device.udid,
     deviceName: device.name,
     bundleIdentifier: product.bundleIdentifier,
     processId: parseProcessId(launchResult.stdout || launchResult.output),
     appPath,
-    screenEvidence
+    screenEvidence,
+    accessibilityEvidence
   }
 }
 

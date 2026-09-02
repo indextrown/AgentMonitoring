@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -14,8 +14,23 @@ const executable = join(
   'AgentMonitoring'
 )
 const smokeUserData = await mkdtemp(join(tmpdir(), 'agent-monitoring-smoke-'))
+const packagedAccessibilityObserver = join(
+  process.cwd(),
+  'dist',
+  outputDirectory,
+  'AgentMonitoring.app',
+  'Contents',
+  'Resources',
+  'ios-accessibility-observer',
+  'AgentMonitoringAccessibility.xcodeproj',
+  'project.pbxproj'
+)
 
 try {
+  const observerStats = await stat(packagedAccessibilityObserver)
+  if (!observerStats.isFile()) {
+    throw new Error('패키지에 XCTest 접근성 observer가 포함되지 않았습니다.')
+  }
   await new Promise((resolvePromise, reject) => {
     const child = spawn(executable, [], {
       env: {
@@ -51,7 +66,7 @@ try {
       reject(new Error(`패키지 preload bridge 확인에 실패했습니다. 종료 코드: ${code}\n${output}`))
     })
   })
-  console.log('Package smoke test passed: PRELOAD_BRIDGE_READY')
+  console.log('Package smoke test passed: PRELOAD_BRIDGE_READY + ACCESSIBILITY_OBSERVER_READY')
 } finally {
   await rm(smokeUserData, { recursive: true, force: true })
 }

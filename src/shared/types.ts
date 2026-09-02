@@ -155,9 +155,9 @@ export interface RuntimeEvidenceRecord {
   id: string
   taskId: string
   projectId: string
-  kind: 'screen'
+  kind: 'screen' | 'accessibility'
   path: string
-  mimeType: 'image/png'
+  mimeType: 'image/png' | 'application/json'
   sizeBytes: number
   createdAt: string
 }

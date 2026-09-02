@@ -48,6 +48,12 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/ios-accessibility-observer",
+        "to": "ios-accessibility-observer"
+      }
+    ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "identity": null,

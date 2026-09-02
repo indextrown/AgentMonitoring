@@ -188,6 +188,13 @@ export async function inspectProjectCapabilities(
   const observeLabels = { screen: '화면', accessibility: '접근성', state: '앱 상태' } as const
   const actLabels = { ui: 'UI', fixture: 'fixture' } as const
   const verifyLabels = { 'test-command': '검증 명령', 'runtime-scenario': '실행 시나리오' } as const
+  const readyObserveLabels = [
+    capabilities.observe.includes('screen') ? 'Simulator 화면 캡처' : '',
+    capabilities.observe.includes('accessibility') ? 'XCTest 접근성 트리 수집' : ''
+  ].filter(Boolean)
+  const declaredObserveLabels = capabilities.observe
+    .filter((item) => !['screen', 'accessibility'].includes(item))
+    .map((item) => observeLabels[item])
 
   return {
     manifest: {
@@ -204,16 +211,13 @@ export async function inspectProjectCapabilities(
       capabilities.run
         ? readyCapability('run', `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능`)
         : missingCapability('run', 'run이 비활성화되어 있습니다.'),
-      capabilities.observe.includes('screen')
+      readyObserveLabels.length
         ? readyCapability(
             'observe',
             [
-              'Simulator 화면 캡처 사용 가능',
-              capabilities.observe
-                .filter((item) => item !== 'screen')
-                .map((item) => observeLabels[item])
-                .join(' · '),
-              capabilities.observe.some((item) => item !== 'screen') ? '연결 예정' : ''
+              `${readyObserveLabels.join(' · ')} 사용 가능`,
+              declaredObserveLabels.join(' · '),
+              declaredObserveLabels.length ? '연결 예정' : ''
             ].filter(Boolean).join(' · ')
           )
         : capabilities.observe.length

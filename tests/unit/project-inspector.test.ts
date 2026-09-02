@@ -174,6 +174,9 @@ describe('inspectProject', () => {
     expect(inspection.capabilities.find(({ key }) => key === 'run')?.detail).toBe(
       'iPhone Simulator 실행 adapter 사용 가능'
     )
+    expect(inspection.capabilities.find(({ key }) => key === 'observe')?.detail).toBe(
+      'Simulator 화면 캡처 · XCTest 접근성 트리 수집 사용 가능 · 앱 상태 · 연결 예정'
+    )
   })
 
   it('reports invalid capability contracts without failing repository inspection', async () => {
