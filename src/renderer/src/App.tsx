@@ -52,6 +52,8 @@ import type {
   EventKind,
   EventRecord,
   NoteRecord,
+  ProjectCapabilityKey,
+  ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
   ProjectInspection,
@@ -104,6 +106,21 @@ const PROJECT_CHANGE_ORDER: ProjectChangeKind[] = [
   'renamed',
   'untracked'
 ]
+
+const PROJECT_CAPABILITY_LABELS: Record<ProjectCapabilityKey, string> = {
+  code: 'Code',
+  build: 'Build',
+  run: 'Run',
+  observe: 'Observe',
+  act: 'Act',
+  verify: 'Verify'
+}
+
+const PROJECT_CAPABILITY_STATUS_LABELS: Record<ProjectCapabilityStatus, string> = {
+  ready: '지금 사용 가능',
+  declared: '프로젝트 선언 · 연결 예정',
+  missing: '미설정'
+}
 
 const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard }> = [
   { page: 'dashboard', label: '대시보드', icon: LayoutDashboard },
@@ -408,6 +425,7 @@ export function App(): React.JSX.Element {
     try {
       await bridge.updateProject({ projectId: project.id, name: project.name, testCommand: command })
       await load(project.id)
+      await refreshInspection(project.id)
     } catch (commandError) {
       setError(String(commandError))
     }
@@ -540,6 +558,7 @@ export function App(): React.JSX.Element {
           <ProjectsPage project={selectedProject} onSave={async (project) => {
             await bridge.updateProject(project)
             await load(project.projectId)
+            await refreshInspection(project.projectId)
           }} onOpen={() => void bridge.openPath(selectedProject.path)} onRemove={() => void removeProject(selectedProject)} />
         )}
       </main>
@@ -703,6 +722,8 @@ function ProjectStartPage({
 }): React.JSX.Element {
   const hasTestCommand = Boolean(project.testCommand.trim())
   const ready = hasTestCommand && inspection?.clean
+  const readyCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'ready').length ?? 0
+  const declaredCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'declared').length ?? 0
 
   return (
     <section className="project-start-page">
@@ -754,6 +775,44 @@ function ProjectStartPage({
         <article className="panel inspection-empty">
           {loading ? <LoaderCircle className="spin" size={18} /> : <AlertTriangle size={18} />}
           <span>{loading ? 'Git과 프로젝트 구성을 읽는 중입니다.' : '저장소 검사 결과를 불러오지 못했습니다. 다시 검사해 주세요.'}</span>
+        </article>
+      )}
+
+      {inspection && (
+        <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
+          <header className="capability-header">
+            <div>
+              <p className="eyebrow">AI ACCESS CONTRACT</p>
+              <h3>AI가 접근할 수 있는 영역</h3>
+              <p>
+                현재 {readyCapabilityCount}개 사용 가능
+                {declaredCapabilityCount > 0 ? ` · ${declaredCapabilityCount}개는 프로젝트 선언 후 연결 대기` : ''}
+              </p>
+            </div>
+            <span className="manifest-state">
+              {inspection.capabilityManifest.state === 'valid'
+                ? '계약 확인됨'
+                : inspection.capabilityManifest.state === 'invalid'
+                  ? '계약 오류'
+                  : '코드 작업 모드'}
+            </span>
+          </header>
+          <div className="capability-grid">
+            {inspection.capabilities.map((capability) => (
+              <div className={`capability-item ${capability.status}`} key={capability.key}>
+                <span>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</span>
+                <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
+                <small>{capability.detail}</small>
+              </div>
+            ))}
+          </div>
+          <footer className="capability-manifest-note">
+            <code>{inspection.capabilityManifest.path}</code>
+            <span>{inspection.capabilityManifest.message}</span>
+            {inspection.capabilityManifest.state === 'valid' && (
+              <small>이 계약은 접근 범위만 선언합니다. 앱 빌드·실행·관찰 연결은 다음 단계에서 추가합니다.</small>
+            )}
+          </footer>
         </article>
       )}
 

@@ -237,6 +237,8 @@ export const demoBridge: AgentMonitoringBridge = {
     if (!project) throw new Error('프로젝트를 찾을 수 없습니다.')
     const connected = !project.isDemo
     const dirty = connected && searchParams.get('inspection') === 'dirty'
+    const hasTestCommand = Boolean(project.testCommand.trim())
+    const hasIosContract = connected && searchParams.get('contract') === 'ios'
     const dirtyFiles = [0, 1, 2, 3, 4].map((index) => ({
       kind: 'untracked' as const,
       path: `fastlane/screenshots/ko/${index}_APP_IPHONE_65_${index}.png`
@@ -265,6 +267,43 @@ export const demoBridge: AgentMonitoringBridge = {
       trackedFileCount: connected ? 84 : 3_842,
       testFileCount: connected ? 9 : 126,
       suggestedTestCommands: connected ? ['pnpm test'] : [],
+      capabilityManifest: hasIosContract
+        ? {
+            path: '.agentmonitor/project.json',
+            state: 'valid' as const,
+            adapterKind: 'ios-simulator' as const,
+            message: 'PopPang.xcworkspace · PopPang · Debug'
+          }
+        : {
+            path: '.agentmonitor/project.json',
+            state: 'missing' as const,
+            adapterKind: null,
+            message: 'manifest가 없어 기존 코드 작업 모드로 동작합니다.'
+          },
+      capabilities: [
+        {
+          key: 'code' as const,
+          status: 'ready' as const,
+          detail: `Git 추적 파일 ${connected ? 84 : '3,842'}개에 접근 가능`
+        },
+        hasIosContract
+          ? { key: 'build' as const, status: 'declared' as const, detail: 'PopPang Debug 빌드 계약 선언 · 실행 어댑터 연결 예정' }
+          : { key: 'build' as const, status: 'missing' as const, detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
+        hasIosContract
+          ? { key: 'run' as const, status: 'declared' as const, detail: 'iOS Simulator 실행 계약 선언 · 실행 어댑터 연결 예정' }
+          : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
+        hasIosContract
+          ? { key: 'observe' as const, status: 'declared' as const, detail: '화면 · 접근성 · 앱 상태 관찰 계약 선언 · 실행 어댑터 연결 예정' }
+          : { key: 'observe' as const, status: 'missing' as const, detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
+        hasIosContract
+          ? { key: 'act' as const, status: 'declared' as const, detail: 'UI · fixture 조작 계약 선언 · 실행 어댑터 연결 예정' }
+          : { key: 'act' as const, status: 'missing' as const, detail: 'UI·fixture 조작이 선언되지 않았습니다.' },
+        hasTestCommand
+          ? { key: 'verify' as const, status: 'ready' as const, detail: `검증 명령: ${project.testCommand.trim()}` }
+          : hasIosContract
+            ? { key: 'verify' as const, status: 'declared' as const, detail: '검증 명령 · 실행 시나리오 계약 선언 · 실행 어댑터 연결 예정' }
+            : { key: 'verify' as const, status: 'missing' as const, detail: '프로젝트 검증 명령이 설정되지 않았습니다.' }
+      ],
       inspectedAt: new Date().toISOString()
     }
   },

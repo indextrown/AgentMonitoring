@@ -854,6 +854,144 @@ kbd {
   color: #d1a15d;
 }
 
+.capability-panel {
+  padding: 17px 19px 15px;
+}
+
+.capability-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.capability-header h3 {
+  margin: 4px 0 5px;
+  color: #d6dce2;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.capability-header > div > p:last-child {
+  margin: 0;
+  color: #65717c;
+  font-size: 8px;
+}
+
+.manifest-state {
+  flex: none;
+  padding: 5px 8px;
+  border: 1px solid #39434c;
+  border-radius: 999px;
+  color: #87939e;
+  background: #151a1e;
+  font-size: 7px;
+  font-weight: 700;
+}
+
+.manifest-valid .manifest-state {
+  border-color: #315a46;
+  color: #73c49a;
+  background: #122219;
+}
+
+.manifest-invalid .manifest-state {
+  border-color: #623b3d;
+  color: #d98287;
+  background: #291719;
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.capability-item {
+  min-width: 0;
+  min-height: 91px;
+  padding: 10px;
+  border: 1px solid #293139;
+  border-radius: 6px;
+  background: #12171b;
+}
+
+.capability-item > span,
+.capability-item > strong,
+.capability-item > small {
+  display: block;
+}
+
+.capability-item > span {
+  overflow: hidden;
+  color: #5f6972;
+  font-size: 6px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-item > strong {
+  margin-top: 8px;
+  color: #8d98a2;
+  font-size: 11px;
+}
+
+.capability-item > small {
+  margin-top: 6px;
+  color: #58636c;
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.capability-item.ready {
+  border-color: #2c5541;
+  background: #111d17;
+}
+
+.capability-item.ready > span,
+.capability-item.ready > strong {
+  color: #72c297;
+}
+
+.capability-item.declared {
+  border-color: #3c4f63;
+  background: #121a22;
+}
+
+.capability-item.declared > span,
+.capability-item.declared > strong {
+  color: #80a6ca;
+}
+
+.capability-manifest-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 11px;
+  color: #68737d;
+  font-size: 7px;
+}
+
+.capability-manifest-note code {
+  flex: none;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #8996a1;
+  background: #0d1114;
+}
+
+.capability-manifest-note small {
+  margin-left: auto;
+  color: #53606a;
+  text-align: right;
+}
+
+.manifest-invalid .capability-manifest-note > span {
+  color: #c77b80;
+}
+
 .inspection-empty {
   display: flex;
   min-height: 104px;
@@ -2495,6 +2633,10 @@ kbd {
   .readiness-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .capability-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1060px) {
@@ -2516,6 +2658,16 @@ kbd {
   .project-start-actions,
   .first-task-card > div:last-child {
     justify-content: flex-start;
+  }
+
+  .capability-manifest-note {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .capability-manifest-note small {
+    margin-left: 0;
+    text-align: left;
   }
 
   .timeline-card {
