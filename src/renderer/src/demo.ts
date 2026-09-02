@@ -122,13 +122,30 @@ function buildSnapshot(): DashboardSnapshot {
     severity: kinds[index % kinds.length].includes('finding') ? 'medium' : null,
     createdAt: new Date(Date.now() - index * 38 * 60 * 1000).toISOString()
   }))
+  const runtimeSessions = searchParams.get('runtime') === 'running'
+    ? [
+        {
+          taskId: tasks[0].id,
+          projectId,
+          status: 'running' as const,
+          adapterKind: 'ios-simulator' as const,
+          deviceId: '00000000-0000-0000-0000-000000000001',
+          deviceName: 'iPad Pro 13-inch',
+          bundleIdentifier: 'com.example.ElmwoodOnline',
+          processId: 43120,
+          message: 'iPad Pro 13-inch에서 com.example.ElmwoodOnline 실행 완료 · PID 43120',
+          startedAt: atOffset(0, 8, 30),
+          updatedAt: atOffset(0, 8, 58)
+        }
+      ]
+    : []
 
-  return { projects, selectedProject: projects[0], tasks, events, findings, notes }
+  return { projects, selectedProject: projects[0], tasks, events, findings, notes, runtimeSessions }
 }
 
 const searchParams = new URLSearchParams(window.location.search)
 let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
-  ? { projects: [], selectedProject: null, tasks: [], events: [], findings: [], notes: [] }
+  ? { projects: [], selectedProject: null, tasks: [], events: [], findings: [], notes: [], runtimeSessions: [] }
   : buildSnapshot()
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
@@ -202,7 +219,8 @@ export const demoBridge: AgentMonitoringBridge = {
       tasks: state.tasks.filter((task) => task.projectId === selectedProject.id),
       events: state.events.filter((event) => event.projectId === selectedProject.id),
       findings: state.findings.filter((finding) => finding.projectId === selectedProject.id),
-      notes: state.notes.filter((note) => note.projectId === selectedProject.id)
+      notes: state.notes.filter((note) => note.projectId === selectedProject.id),
+      runtimeSessions: state.runtimeSessions.filter((session) => session.projectId === selectedProject.id)
     }
   },
   addProject: async () => {
@@ -287,10 +305,10 @@ export const demoBridge: AgentMonitoringBridge = {
           detail: `Git 추적 파일 ${connected ? 84 : '3,842'}개에 접근 가능`
         },
         hasIosContract
-          ? { key: 'build' as const, status: 'declared' as const, detail: 'PopPang Debug 빌드 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'build' as const, status: 'ready' as const, detail: 'PopPang Debug 빌드 adapter 사용 가능' }
           : { key: 'build' as const, status: 'missing' as const, detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
         hasIosContract
-          ? { key: 'run' as const, status: 'declared' as const, detail: 'iOS Simulator 실행 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'run' as const, status: 'ready' as const, detail: 'iPad Simulator 실행 adapter 사용 가능' }
           : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
         hasIosContract
           ? { key: 'observe' as const, status: 'declared' as const, detail: '화면 · 접근성 · 앱 상태 관찰 계약 선언 · 실행 어댑터 연결 예정' }
@@ -316,7 +334,8 @@ export const demoBridge: AgentMonitoringBridge = {
       tasks: state.tasks.filter((task) => task.projectId !== projectIdToRemove),
       events: state.events.filter((event) => event.projectId !== projectIdToRemove),
       findings: state.findings.filter((finding) => finding.projectId !== projectIdToRemove),
-      notes: state.notes.filter((note) => note.projectId !== projectIdToRemove)
+      notes: state.notes.filter((note) => note.projectId !== projectIdToRemove),
+      runtimeSessions: state.runtimeSessions.filter((session) => session.projectId !== projectIdToRemove)
     }
   },
   createTask: async (input) => {

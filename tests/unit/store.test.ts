@@ -96,4 +96,43 @@ describe('AppStore', () => {
     expect(() => store.getTask(running.id)).toThrow('작업을 찾을 수 없습니다.')
     store.close()
   })
+
+  it('persists task runtime sessions and recovers active sessions as stopped', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Swift project', join(directory, 'swift-project'))
+    const task = store.createTask(project.id, 'Swift 실행', 'iPad Simulator에서 앱을 실행한다.', 2)
+
+    store.setRuntimeSession(task.id, 'preparing', { message: 'runtime 준비 중' })
+    store.setRuntimeSession(task.id, 'running', {
+      deviceId: 'IPAD-UDID',
+      deviceName: 'iPad Pro 13-inch',
+      bundleIdentifier: 'com.example.App',
+      processId: 4242,
+      message: '앱 실행 완료'
+    })
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getSnapshot(project.id).runtimeSessions).toMatchObject([
+      {
+        taskId: task.id,
+        status: 'running',
+        deviceId: 'IPAD-UDID',
+        bundleIdentifier: 'com.example.App',
+        processId: 4242
+      }
+    ])
+
+    const recovered = reopened.recoverInterruptedRuntimeSessions()
+    expect(recovered).toHaveLength(1)
+    expect(reopened.getRuntimeSession(task.id)).toMatchObject({
+      status: 'stopped',
+      processId: null
+    })
+    expect(reopened.getSnapshot(project.id).events.some((event) => event.kind === 'runtime_stopped')).toBe(true)
+    reopened.close()
+  })
 })

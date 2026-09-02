@@ -164,8 +164,8 @@ describe('inspectProject', () => {
     })
     expect(inspection.capabilities.map(({ key, status }) => ({ key, status }))).toEqual([
       { key: 'code', status: 'ready' },
-      { key: 'build', status: 'declared' },
-      { key: 'run', status: 'declared' },
+      { key: 'build', status: 'ready' },
+      { key: 'run', status: 'ready' },
       { key: 'observe', status: 'declared' },
       { key: 'act', status: 'declared' },
       { key: 'verify', status: 'ready' }

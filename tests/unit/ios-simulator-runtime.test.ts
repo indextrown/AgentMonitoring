@@ -1,0 +1,253 @@
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  launchIosSimulatorRuntime,
+  parseAvailableIPadDevices,
+  type RuntimeCommandRequest
+} from '../../electron/main/ios-simulator-runtime'
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
+})
+
+describe('iOS Simulator runtime adapter', () => {
+  it('selects an iPad and builds, installs, and launches the worktree app', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-ios-runtime-'))
+    temporaryDirectories.push(directory)
+    const worktree = join(directory, 'worktree')
+    const runtimeRoot = join(directory, 'runtime-sessions')
+    const taskId = '11111111-1111-4111-8111-111111111111'
+    await mkdir(join(worktree, 'PopPang.xcworkspace'), { recursive: true })
+
+    const commands: RuntimeCommandRequest[] = []
+    const progress: string[] = []
+    const progressUpdates: Array<Record<string, unknown>> = []
+    const execute = async (request: RuntimeCommandRequest) => {
+      commands.push(request)
+      if (request.args.join(' ') === 'simctl list devices available --json') {
+        return {
+          code: 0,
+          output: '',
+          stdout: JSON.stringify({
+            devices: {
+              'com.apple.CoreSimulator.SimRuntime.iOS-26-4': [
+                {
+                  udid: 'IPAD-UDID',
+                  name: 'iPad Pro 13-inch',
+                  state: 'Shutdown',
+                  isAvailable: true
+                },
+                {
+                  udid: 'IPHONE-UDID',
+                  name: 'iPhone 16 Pro',
+                  state: 'Booted',
+                  isAvailable: true
+                }
+              ]
+            }
+          })
+        }
+      }
+      if (request.command === '/usr/bin/xcrun' && request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build') {
+        const derivedDataPath = request.args[request.args.indexOf('-derivedDataPath') + 1]
+        await mkdir(join(derivedDataPath, 'Build', 'Products', 'Debug-iphonesimulator', 'PopPang.app'), {
+          recursive: true
+        })
+        return { code: 0, output: 'BUILD SUCCEEDED', stdout: 'BUILD SUCCEEDED\n' }
+      }
+      if (request.command === '/usr/bin/xcrun' && request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        const derivedDataPath = request.args[request.args.indexOf('-derivedDataPath') + 1]
+        return {
+          code: 0,
+          output: '',
+          stdout: JSON.stringify([
+            {
+              target: 'PopPangTests',
+              buildSettings: {
+                TARGET_BUILD_DIR: join(derivedDataPath, 'Build', 'Products', 'Debug-iphonesimulator'),
+                WRAPPER_NAME: 'PopPangTests.xctest',
+                WRAPPER_EXTENSION: 'xctest',
+                PRODUCT_BUNDLE_IDENTIFIER: 'com.example.PopPangTests',
+                PRODUCT_TYPE: 'com.apple.product-type.bundle.unit-test'
+              }
+            },
+            {
+              target: 'PopPang',
+              buildSettings: {
+                TARGET_BUILD_DIR: join(derivedDataPath, 'Build', 'Products', 'Debug-iphonesimulator'),
+                WRAPPER_NAME: 'PopPang.app',
+                WRAPPER_EXTENSION: 'app',
+                PRODUCT_BUNDLE_IDENTIFIER: 'com.example.PopPang',
+                PRODUCT_TYPE: 'com.apple.product-type.application',
+                SKIP_INSTALL: 'NO'
+              }
+            }
+          ])
+        }
+      }
+      if (request.args.includes('launch')) {
+        return { code: 0, output: 'com.example.PopPang: 4242\n', stdout: 'com.example.PopPang: 4242\n' }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+
+    const result = await launchIosSimulatorRuntime({
+      taskId,
+      worktreePath: worktree,
+      runtimeRoot,
+      contract: {
+        kind: 'ios-simulator',
+        container: 'PopPang.xcworkspace',
+        scheme: 'PopPang',
+        configuration: 'Debug'
+      },
+      execute,
+      onProgress: (status, _message, update) => {
+        progress.push(status)
+        progressUpdates.push(update ?? {})
+      }
+    })
+
+    expect(result).toMatchObject({
+      deviceId: 'IPAD-UDID',
+      deviceName: 'iPad Pro 13-inch',
+      bundleIdentifier: 'com.example.PopPang',
+      processId: 4242
+    })
+    expect(progress).toEqual(['preparing', 'booting', 'building', 'installing', 'launching'])
+    expect(progressUpdates).toEqual([
+      {},
+      { deviceId: 'IPAD-UDID', deviceName: 'iPad Pro 13-inch' },
+      {},
+      {
+        deviceId: 'IPAD-UDID',
+        deviceName: 'iPad Pro 13-inch',
+        bundleIdentifier: 'com.example.PopPang'
+      },
+      {
+        deviceId: 'IPAD-UDID',
+        deviceName: 'iPad Pro 13-inch',
+        bundleIdentifier: 'com.example.PopPang'
+      }
+    ])
+    const resolvedWorktree = await realpath(worktree)
+    expect(commands.map((request) => [request.command, ...request.args.slice(0, 3)])).toEqual([
+      ['/usr/bin/xcrun', 'simctl', 'list', 'devices'],
+      ['/usr/bin/xcrun', 'simctl', 'bootstatus', 'IPAD-UDID'],
+      ['/usr/bin/open', '-a', 'Simulator', '--args'],
+      ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
+      ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
+      ['/usr/bin/xcrun', 'simctl', 'install', 'IPAD-UDID'],
+      ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process']
+    ])
+  })
+
+  it('reports a clear error when no iPad Simulator is available', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-ios-runtime-'))
+    temporaryDirectories.push(directory)
+    const worktree = join(directory, 'worktree')
+    await mkdir(join(worktree, 'PopPang.xcodeproj'), { recursive: true })
+
+    await expect(
+      launchIosSimulatorRuntime({
+        taskId: '22222222-2222-4222-8222-222222222222',
+        worktreePath: worktree,
+        runtimeRoot: join(directory, 'runtime-sessions'),
+        contract: {
+          kind: 'ios-simulator',
+          container: 'PopPang.xcodeproj',
+          scheme: 'PopPang',
+          configuration: 'Debug'
+        },
+        execute: async () => ({
+          code: 0,
+          output: '',
+          stdout: JSON.stringify({
+            devices: {
+              runtime: [
+                { udid: 'IPHONE-UDID', name: 'iPhone 16 Pro', state: 'Shutdown', isAvailable: true }
+              ]
+            }
+          })
+        }),
+        onProgress: () => undefined
+      })
+    ).rejects.toThrow('사용 가능한 iPad Simulator가 없습니다.')
+  })
+
+  it('rejects Xcode containers that escape through a symbolic link', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-ios-runtime-'))
+    temporaryDirectories.push(directory)
+    const worktree = join(directory, 'worktree')
+    const external = join(directory, 'external.xcworkspace')
+    await mkdir(worktree)
+    await mkdir(external)
+    await symlink(external, join(worktree, 'PopPang.xcworkspace'))
+
+    await expect(
+      launchIosSimulatorRuntime({
+        taskId: '33333333-3333-4333-8333-333333333333',
+        worktreePath: worktree,
+        runtimeRoot: join(directory, 'runtime-sessions'),
+        contract: {
+          kind: 'ios-simulator',
+          container: 'PopPang.xcworkspace',
+          scheme: 'PopPang',
+          configuration: 'Debug'
+        },
+        execute: async () => ({ code: 0, output: '', stdout: '' }),
+        onProgress: () => undefined
+      })
+    ).rejects.toThrow('심볼릭 링크가 아닌 디렉터리여야 합니다.')
+  })
+
+  it('rejects task runtime directories that escape through a symbolic link', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-ios-runtime-'))
+    temporaryDirectories.push(directory)
+    const worktree = join(directory, 'worktree')
+    const runtimeRoot = join(directory, 'runtime-sessions')
+    const external = join(directory, 'external-runtime')
+    const taskId = '44444444-4444-4444-8444-444444444444'
+    await mkdir(join(worktree, 'PopPang.xcodeproj'), { recursive: true })
+    await mkdir(runtimeRoot)
+    await mkdir(external)
+    await symlink(external, join(runtimeRoot, taskId))
+
+    await expect(
+      launchIosSimulatorRuntime({
+        taskId,
+        worktreePath: worktree,
+        runtimeRoot,
+        contract: {
+          kind: 'ios-simulator',
+          container: 'PopPang.xcodeproj',
+          scheme: 'PopPang',
+          configuration: 'Debug'
+        },
+        execute: async () => ({ code: 0, output: '', stdout: '' }),
+        onProgress: () => undefined
+      })
+    ).rejects.toThrow('심볼릭 링크가 아닌 디렉터리여야 합니다.')
+  })
+
+  it('prefers a booted iPad before newer shutdown devices', () => {
+    const devices = parseAvailableIPadDevices(
+      JSON.stringify({
+        devices: {
+          'runtime-27': [
+            { udid: 'NEW', name: 'iPad Air', state: 'Shutdown', isAvailable: true }
+          ],
+          'runtime-26': [
+            { udid: 'BOOTED', name: 'iPad Pro', state: 'Booted', isAvailable: true }
+          ]
+        }
+      })
+    )
+
+    expect(devices.map((device) => device.udid)).toEqual(['BOOTED', 'NEW'])
+  })
+})

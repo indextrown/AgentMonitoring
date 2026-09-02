@@ -7,6 +7,8 @@ import type {
   FindingRecord,
   NoteRecord,
   ProjectRecord,
+  RuntimeSessionRecord,
+  RuntimeSessionStatus,
   Severity,
   TaskRecord,
   TaskStatus,
@@ -70,6 +72,20 @@ const noteColumns = `
   created_at AS createdAt
 `
 
+const runtimeSessionColumns = `
+  task_id AS taskId,
+  project_id AS projectId,
+  status,
+  adapter_kind AS adapterKind,
+  device_id AS deviceId,
+  device_name AS deviceName,
+  bundle_identifier AS bundleIdentifier,
+  process_id AS processId,
+  message,
+  started_at AS startedAt,
+  updated_at AS updatedAt
+`
+
 function projectFromRow(row: Row): ProjectRecord {
   return {
     id: String(row.id),
@@ -131,6 +147,22 @@ function noteFromRow(row: Row): NoteRecord {
     title: String(row.title),
     body: String(row.body),
     createdAt: String(row.createdAt)
+  }
+}
+
+function runtimeSessionFromRow(row: Row): RuntimeSessionRecord {
+  return {
+    taskId: String(row.taskId),
+    projectId: String(row.projectId),
+    status: String(row.status) as RuntimeSessionStatus,
+    adapterKind: 'ios-simulator',
+    deviceId: row.deviceId ? String(row.deviceId) : null,
+    deviceName: row.deviceName ? String(row.deviceName) : null,
+    bundleIdentifier: row.bundleIdentifier ? String(row.bundleIdentifier) : null,
+    processId: row.processId === null || row.processId === undefined ? null : Number(row.processId),
+    message: String(row.message),
+    startedAt: String(row.startedAt),
+    updatedAt: String(row.updatedAt)
   }
 }
 
@@ -204,12 +236,28 @@ export class AppStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS runtime_sessions (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        adapter_kind TEXT NOT NULL,
+        device_id TEXT,
+        device_name TEXT,
+        bundle_identifier TEXT,
+        process_id INTEGER,
+        message TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_project_created
         ON tasks(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_project_created
         ON events(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_findings_project_created
         ON findings(project_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_runtime_sessions_project_updated
+        ON runtime_sessions(project_id, updated_at DESC);
     `)
   }
 
@@ -333,6 +381,102 @@ export class AppStore {
       .prepare('UPDATE tasks SET worktree_path = NULL, updated_at = ? WHERE id = ?')
       .run(now, taskId)
     return this.getTask(taskId)
+  }
+
+  getRuntimeSession(taskId: string): RuntimeSessionRecord | null {
+    const row = this.database
+      .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions WHERE task_id = ?`)
+      .get(taskId) as Row | undefined
+    return row ? runtimeSessionFromRow(row) : null
+  }
+
+  listRuntimeSessions(projectId?: string): RuntimeSessionRecord[] {
+    const rows = projectId
+      ? (this.database
+          .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions WHERE project_id = ? ORDER BY updated_at DESC`)
+          .all(projectId) as Row[])
+      : (this.database
+          .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions ORDER BY updated_at DESC`)
+          .all() as Row[])
+    return rows.map(runtimeSessionFromRow)
+  }
+
+  setRuntimeSession(
+    taskId: string,
+    status: RuntimeSessionStatus,
+    update: Partial<
+      Pick<RuntimeSessionRecord, 'deviceId' | 'deviceName' | 'bundleIdentifier' | 'processId' | 'message'>
+    > = {}
+  ): RuntimeSessionRecord {
+    const task = this.getTask(taskId)
+    const existing = this.getRuntimeSession(taskId)
+    const now = new Date().toISOString()
+    const next: RuntimeSessionRecord = {
+      taskId,
+      projectId: task.projectId,
+      status,
+      adapterKind: 'ios-simulator',
+      deviceId: 'deviceId' in update ? update.deviceId ?? null : existing?.deviceId ?? null,
+      deviceName: 'deviceName' in update ? update.deviceName ?? null : existing?.deviceName ?? null,
+      bundleIdentifier: 'bundleIdentifier' in update
+        ? update.bundleIdentifier ?? null
+        : existing?.bundleIdentifier ?? null,
+      processId: 'processId' in update ? update.processId ?? null : existing?.processId ?? null,
+      message: (update.message ?? existing?.message ?? '').slice(0, 8_000),
+      startedAt: status === 'preparing' && existing?.status !== 'preparing' ? now : existing?.startedAt ?? now,
+      updatedAt: now
+    }
+    this.database
+      .prepare(`
+        INSERT INTO runtime_sessions (
+          task_id, project_id, status, adapter_kind, device_id, device_name,
+          bundle_identifier, process_id, message, started_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          status = excluded.status,
+          adapter_kind = excluded.adapter_kind,
+          device_id = excluded.device_id,
+          device_name = excluded.device_name,
+          bundle_identifier = excluded.bundle_identifier,
+          process_id = excluded.process_id,
+          message = excluded.message,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        next.taskId,
+        next.projectId,
+        next.status,
+        next.adapterKind,
+        next.deviceId,
+        next.deviceName,
+        next.bundleIdentifier,
+        next.processId,
+        next.message,
+        next.startedAt,
+        next.updatedAt
+      )
+    return this.getRuntimeSession(taskId)!
+  }
+
+  recoverInterruptedRuntimeSessions(): RuntimeSessionRecord[] {
+    const interrupted = this.listRuntimeSessions().filter(
+      (session) => !['failed', 'stopped'].includes(session.status)
+    )
+    return interrupted.map((session) => {
+      const recovered = this.setRuntimeSession(session.taskId, 'stopped', {
+        message: '앱이 다시 시작되어 runtime session을 중단 상태로 복구했습니다.',
+        processId: null
+      })
+      this.addEvent(
+        session.projectId,
+        session.taskId,
+        'runtime_stopped',
+        'runtime',
+        recovered.message,
+        'low'
+      )
+      return recovered
+    })
   }
 
   recoverInterruptedTasks(): TaskRecord[] {
@@ -481,7 +625,8 @@ export class AppStore {
         tasks: [],
         events: [],
         findings: [],
-        notes: []
+        notes: [],
+        runtimeSessions: []
       }
     }
     const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0]
@@ -501,7 +646,8 @@ export class AppStore {
         .prepare(`SELECT ${noteColumns} FROM notes WHERE project_id = ? ORDER BY created_at DESC`)
         .all(selectedProject.id) as Row[]
     ).map(noteFromRow)
+    const runtimeSessions = this.listRuntimeSessions(selectedProject.id)
 
-    return { projects, selectedProject, tasks, events, findings, notes }
+    return { projects, selectedProject, tasks, events, findings, notes, runtimeSessions }
   }
 }

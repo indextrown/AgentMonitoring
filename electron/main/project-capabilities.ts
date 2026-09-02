@@ -24,7 +24,7 @@ const relativeXcodeContainerSchema = z.string().min(1).max(512).refine(
   'container는 저장소 내부의 .xcworkspace 또는 .xcodeproj 상대 경로여야 합니다.'
 )
 
-const projectCapabilityManifestSchema = z
+export const projectCapabilityManifestSchema = z
   .object({
     version: z.literal(1),
     adapter: z
@@ -66,7 +66,12 @@ const projectCapabilityManifestSchema = z
     }
   })
 
-type ProjectCapabilityManifest = z.infer<typeof projectCapabilityManifestSchema>
+export type ProjectCapabilityManifest = z.infer<typeof projectCapabilityManifestSchema>
+
+export type ProjectCapabilityManifestReadResult =
+  | { state: 'missing' }
+  | { state: 'valid'; value: ProjectCapabilityManifest }
+  | { state: 'invalid'; message: string }
 
 export interface ProjectCapabilityResult {
   manifest: ProjectCapabilityManifestInspection
@@ -90,11 +95,9 @@ function manifestErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-async function readManifest(projectPath: string): Promise<
-  | { state: 'missing' }
-  | { state: 'valid'; value: ProjectCapabilityManifest }
-  | { state: 'invalid'; message: string }
-> {
+export async function readProjectCapabilityManifest(
+  projectPath: string
+): Promise<ProjectCapabilityManifestReadResult> {
   const manifestPath = join(projectPath, PROJECT_CAPABILITY_MANIFEST_PATH)
   try {
     const stats = await lstat(manifestPath)
@@ -119,11 +122,18 @@ function declaredCapability(
   return { key, status: 'declared', detail: `${detail} · 실행 어댑터 연결 예정` }
 }
 
+function readyCapability(
+  key: ProjectCapability['key'],
+  detail: string
+): ProjectCapability {
+  return { key, status: 'ready', detail }
+}
+
 export async function inspectProjectCapabilities(
   project: ProjectRecord,
   trackedFileCount: number
 ): Promise<ProjectCapabilityResult> {
-  const result = await readManifest(project.path)
+  const result = await readProjectCapabilityManifest(project.path)
   const code: ProjectCapability = {
     key: 'code',
     status: 'ready',
@@ -187,10 +197,10 @@ export async function inspectProjectCapabilities(
     capabilities: [
       code,
       capabilities.build
-        ? declaredCapability('build', `${adapter.scheme} Debug 빌드 계약 선언`)
+        ? readyCapability('build', `${adapter.scheme} Debug 빌드 adapter 사용 가능`)
         : missingCapability('build', 'build가 비활성화되어 있습니다.'),
       capabilities.run
-        ? declaredCapability('run', 'iOS Simulator 실행 계약 선언')
+        ? readyCapability('run', 'iPad Simulator 실행 adapter 사용 가능')
         : missingCapability('run', 'run이 비활성화되어 있습니다.'),
       capabilities.observe.length
         ? declaredCapability('observe', `${capabilities.observe.map((item) => observeLabels[item]).join(' · ')} 관찰 계약 선언`)

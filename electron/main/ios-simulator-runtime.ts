@@ -1,0 +1,394 @@
+import { lstat, mkdir, realpath } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import type { ProjectCapabilityManifest } from './project-capabilities'
+import type { RuntimeSessionRecord, RuntimeSessionStatus } from '../../src/shared/types'
+
+export interface RuntimeCommandRequest {
+  command: string
+  args: string[]
+  cwd: string
+  label: string
+  timeoutMs: number
+}
+
+export interface RuntimeCommandResult {
+  code: number
+  output: string
+  stdout: string
+}
+
+export type RuntimeCommandExecutor = (
+  request: RuntimeCommandRequest
+) => Promise<RuntimeCommandResult>
+
+export interface IosSimulatorLaunchInput {
+  taskId: string
+  worktreePath: string
+  runtimeRoot: string
+  contract: ProjectCapabilityManifest['adapter']
+  execute: RuntimeCommandExecutor
+  onProgress: (
+    status: RuntimeSessionStatus,
+    message: string,
+    update?: Partial<Pick<RuntimeSessionRecord, 'deviceId' | 'deviceName' | 'bundleIdentifier'>>
+  ) => void
+}
+
+export interface IosSimulatorLaunchResult {
+  deviceId: string
+  deviceName: string
+  bundleIdentifier: string
+  processId: number | null
+  appPath: string
+}
+
+export interface IosSimulatorStopInput {
+  session: RuntimeSessionRecord
+  cwd: string
+  execute: RuntimeCommandExecutor
+}
+
+export interface IosSimulatorRuntimeAdapter {
+  launch: (input: IosSimulatorLaunchInput) => Promise<IosSimulatorLaunchResult>
+  stop: (input: IosSimulatorStopInput) => Promise<void>
+}
+
+interface SimulatorDevice {
+  runtime: string
+  udid: string
+  name: string
+  state: string
+  isAvailable: boolean
+  lastBootedAt: string | null
+}
+
+interface XcodeBuildSettingsEntry {
+  target?: string
+  buildSettings?: Record<string, unknown>
+}
+
+const RUNTIME_TIMEOUTS = {
+  inspect: 30_000,
+  boot: 5 * 60_000,
+  build: 30 * 60_000,
+  install: 2 * 60_000,
+  launch: 60_000,
+  stop: 30_000
+} as const
+
+const XCRUN_COMMAND = '/usr/bin/xcrun'
+
+export class IosRuntimeStageError extends Error {
+  constructor(
+    readonly status: RuntimeSessionStatus,
+    message: string
+  ) {
+    super(message)
+  }
+}
+
+function parseJson(source: string, label: string): unknown {
+  try {
+    return JSON.parse(source)
+  } catch {
+    throw new IosRuntimeStageError('failed', `${label} JSON을 해석할 수 없습니다.`)
+  }
+}
+
+export function parseAvailableIPadDevices(source: string): SimulatorDevice[] {
+  const payload = parseJson(source, 'Simulator 기기 목록') as {
+    devices?: Record<string, Array<Record<string, unknown>>>
+  }
+  const devices = Object.entries(payload.devices ?? {}).flatMap(([runtime, entries]) =>
+    entries.map((entry) => ({
+      runtime,
+      udid: String(entry.udid ?? ''),
+      name: String(entry.name ?? ''),
+      state: String(entry.state ?? ''),
+      isAvailable: entry.isAvailable !== false,
+      lastBootedAt: entry.lastBootedAt ? String(entry.lastBootedAt) : null
+    }))
+  )
+
+  return devices
+    .filter((device) => device.isAvailable && device.udid && device.name.toLowerCase().includes('ipad'))
+    .sort((left, right) => {
+      const booted = Number(right.state === 'Booted') - Number(left.state === 'Booted')
+      if (booted !== 0) return booted
+      const runtime = right.runtime.localeCompare(left.runtime, undefined, { numeric: true })
+      if (runtime !== 0) return runtime
+      return (right.lastBootedAt ?? '').localeCompare(left.lastBootedAt ?? '')
+    })
+}
+
+export function parseXcodeAppProduct(source: string): {
+  targetBuildDirectory: string
+  wrapperName: string
+  bundleIdentifier: string
+} {
+  const payload = parseJson(source, 'Xcode build settings')
+  if (!Array.isArray(payload)) {
+    throw new IosRuntimeStageError('building', 'Xcode build settings 응답이 배열이 아닙니다.')
+  }
+
+  const candidates = (payload as XcodeBuildSettingsEntry[])
+    .map((entry) => {
+      const settings = entry.buildSettings ?? {}
+      return {
+        target: entry.target ?? '',
+        targetBuildDirectory: String(settings.TARGET_BUILD_DIR ?? ''),
+        wrapperName: String(settings.WRAPPER_NAME ?? ''),
+        bundleIdentifier: String(settings.PRODUCT_BUNDLE_IDENTIFIER ?? ''),
+        wrapperExtension: String(settings.WRAPPER_EXTENSION ?? ''),
+        productType: String(settings.PRODUCT_TYPE ?? ''),
+        skipInstall: String(settings.SKIP_INSTALL ?? '')
+      }
+    })
+    .filter(
+      (candidate) =>
+        candidate.targetBuildDirectory &&
+        candidate.wrapperName &&
+        candidate.bundleIdentifier &&
+        candidate.wrapperExtension === 'app' &&
+        candidate.productType === 'com.apple.product-type.application'
+    )
+    .sort((left, right) => Number(left.skipInstall === 'YES') - Number(right.skipInstall === 'YES'))
+
+  const product = candidates[0]
+  if (!product) {
+    throw new IosRuntimeStageError(
+      'building',
+      'scheme에서 설치 가능한 iOS 앱 산출물과 bundle identifier를 찾지 못했습니다.'
+    )
+  }
+  return product
+}
+
+async function executeRequired(
+  execute: RuntimeCommandExecutor,
+  request: RuntimeCommandRequest,
+  status: RuntimeSessionStatus
+): Promise<RuntimeCommandResult> {
+  const result = await execute(request)
+  if (result.code !== 0) {
+    const detail = result.output.trim().slice(-2_000)
+    throw new IosRuntimeStageError(status, detail ? `${request.label} 실패\n${detail}` : `${request.label} 실패`)
+  }
+  return result
+}
+
+async function requireContainedDirectory(
+  rootPath: string,
+  candidatePath: string,
+  label: string
+): Promise<string> {
+  const root = await realpath(rootPath)
+  const candidate = resolve(root, candidatePath)
+  const stats = await lstat(candidate)
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new IosRuntimeStageError('preparing', `${label}은 심볼릭 링크가 아닌 디렉터리여야 합니다.`)
+  }
+  const resolvedCandidate = await realpath(candidate)
+  if (!resolvedCandidate.startsWith(`${root}/`)) {
+    throw new IosRuntimeStageError('preparing', `${label}이 격리 worktree 밖을 가리킵니다.`)
+  }
+  return resolvedCandidate
+}
+
+function xcodeContainerArguments(containerPath: string): string[] {
+  return containerPath.endsWith('.xcworkspace')
+    ? ['-workspace', containerPath]
+    : ['-project', containerPath]
+}
+
+function parseProcessId(output: string): number | null {
+  const match = output.match(/:\s*(\d+)\s*$/m)
+  return match ? Number(match[1]) : null
+}
+
+export async function launchIosSimulatorRuntime(
+  input: IosSimulatorLaunchInput
+): Promise<IosSimulatorLaunchResult> {
+  input.onProgress('preparing', 'iPad Simulator runtime 계약과 worktree를 확인하고 있습니다.')
+  const worktreePath = await realpath(input.worktreePath)
+  const containerPath = await requireContainedDirectory(worktreePath, input.contract.container, 'Xcode container')
+  await mkdir(resolve(input.runtimeRoot), { recursive: true })
+  const runtimeRoot = await realpath(resolve(input.runtimeRoot))
+  const sessionRoot = resolve(runtimeRoot, input.taskId)
+  if (!sessionRoot.startsWith(`${runtimeRoot}/`)) {
+    throw new IosRuntimeStageError('preparing', '안전하지 않은 runtime session 경로입니다.')
+  }
+  await mkdir(sessionRoot, { recursive: true })
+  const resolvedSessionRoot = await requireContainedDirectory(
+    runtimeRoot,
+    input.taskId,
+    'runtime session'
+  )
+  await mkdir(resolve(resolvedSessionRoot, 'DerivedData'), { recursive: true })
+  const derivedDataPath = await requireContainedDirectory(
+    resolvedSessionRoot,
+    'DerivedData',
+    'DerivedData'
+  )
+
+  const deviceList = await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['simctl', 'list', 'devices', 'available', '--json'],
+      cwd: worktreePath,
+      label: '사용 가능한 Simulator 조회',
+      timeoutMs: RUNTIME_TIMEOUTS.inspect
+    },
+    'preparing'
+  )
+  const device = parseAvailableIPadDevices(deviceList.stdout)[0]
+  if (!device) {
+    throw new IosRuntimeStageError(
+      'preparing',
+      '사용 가능한 iPad Simulator가 없습니다. Xcode에서 iPad Simulator 기기를 만든 뒤 다시 실행하세요.'
+    )
+  }
+
+  input.onProgress(
+    'booting',
+    `${device.name} 부팅을 준비하고 있습니다.`,
+    { deviceId: device.udid, deviceName: device.name }
+  )
+  await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['simctl', 'bootstatus', device.udid, '-b'],
+      cwd: worktreePath,
+      label: `${device.name} 부팅`,
+      timeoutMs: RUNTIME_TIMEOUTS.boot
+    },
+    'booting'
+  )
+  await executeRequired(
+    input.execute,
+    {
+      command: '/usr/bin/open',
+      args: ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', device.udid],
+      cwd: worktreePath,
+      label: 'Simulator 창 열기',
+      timeoutMs: RUNTIME_TIMEOUTS.inspect
+    },
+    'booting'
+  )
+
+  const commonXcodeArguments = [
+    ...xcodeContainerArguments(containerPath),
+    '-scheme',
+    input.contract.scheme,
+    '-configuration',
+    input.contract.configuration,
+    '-sdk',
+    'iphonesimulator',
+    '-destination',
+    `id=${device.udid}`,
+    '-derivedDataPath',
+    derivedDataPath
+  ]
+
+  input.onProgress('building', `${input.contract.scheme} Debug 앱을 격리 worktree에서 빌드하고 있습니다.`)
+  await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['xcodebuild', ...commonXcodeArguments, 'build'],
+      cwd: worktreePath,
+      label: 'Swift 앱 빌드',
+      timeoutMs: RUNTIME_TIMEOUTS.build
+    },
+    'building'
+  )
+  const buildSettings = await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['xcodebuild', ...commonXcodeArguments, '-showBuildSettings', '-json'],
+      cwd: worktreePath,
+      label: '앱 산출물 설정 확인',
+      timeoutMs: RUNTIME_TIMEOUTS.inspect
+    },
+    'building'
+  )
+  const product = parseXcodeAppProduct(buildSettings.stdout)
+  const appPath = await requireContainedDirectory(
+    derivedDataPath,
+    resolve(product.targetBuildDirectory, product.wrapperName),
+    '빌드된 앱'
+  )
+
+  input.onProgress(
+    'installing',
+    `${device.name}에 ${product.wrapperName}을 설치하고 있습니다.`,
+    { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+  )
+  await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['simctl', 'install', device.udid, appPath],
+      cwd: worktreePath,
+      label: 'Simulator 앱 설치',
+      timeoutMs: RUNTIME_TIMEOUTS.install
+    },
+    'installing'
+  )
+
+  input.onProgress(
+    'launching',
+    `${product.bundleIdentifier} 앱을 실행하고 있습니다.`,
+    { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+  )
+  const launchResult = await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: [
+        'simctl',
+        'launch',
+        '--terminate-running-process',
+        device.udid,
+        product.bundleIdentifier
+      ],
+      cwd: worktreePath,
+      label: 'Simulator 앱 실행',
+      timeoutMs: RUNTIME_TIMEOUTS.launch
+    },
+    'launching'
+  )
+
+  return {
+    deviceId: device.udid,
+    deviceName: device.name,
+    bundleIdentifier: product.bundleIdentifier,
+    processId: parseProcessId(launchResult.stdout || launchResult.output),
+    appPath
+  }
+}
+
+export async function stopIosSimulatorRuntime(
+  input: IosSimulatorStopInput
+): Promise<void> {
+  if (!input.session.deviceId || !input.session.bundleIdentifier) return
+  await executeRequired(
+    input.execute,
+    {
+      command: XCRUN_COMMAND,
+      args: ['simctl', 'terminate', input.session.deviceId, input.session.bundleIdentifier],
+      cwd: input.cwd,
+      label: 'Simulator 앱 종료',
+      timeoutMs: RUNTIME_TIMEOUTS.stop
+    },
+    'stopped'
+  )
+}
+
+export const iosSimulatorRuntimeAdapter: IosSimulatorRuntimeAdapter = {
+  launch: launchIosSimulatorRuntime,
+  stop: stopIosSimulatorRuntime
+}

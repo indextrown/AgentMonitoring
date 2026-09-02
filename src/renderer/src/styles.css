@@ -2383,6 +2383,81 @@ kbd {
   gap: 5px;
 }
 
+.runtime-session {
+  padding: 15px 20px;
+  border-bottom: 1px solid #252b30;
+  background: #10161a;
+}
+
+.runtime-session .drawer-section-title > span {
+  padding: 3px 6px;
+  border: 1px solid #3b4d5d;
+  border-radius: 999px;
+  color: #82a4c2;
+  background: #141e26;
+}
+
+.runtime-running .drawer-section-title > span {
+  border-color: #315a46;
+  color: #72c297;
+  background: #122219;
+}
+
+.runtime-failed .drawer-section-title > span {
+  border-color: #623b3d;
+  color: #d98287;
+  background: #291719;
+}
+
+.runtime-session-target {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runtime-session-target > svg {
+  color: #7899b6;
+}
+
+.runtime-session-target strong,
+.runtime-session-target small {
+  display: block;
+}
+
+.runtime-session-target strong {
+  color: #bac4cd;
+  font-size: 9px;
+}
+
+.runtime-session-target small {
+  margin-top: 3px;
+  color: #65717c;
+  font-size: 7px;
+}
+
+.runtime-session-target code {
+  color: #718ca4;
+  font-size: 7px;
+}
+
+.runtime-session > p {
+  margin: 11px 0 5px;
+  color: #7b8791;
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+.runtime-session > small {
+  color: #505c66;
+  font-size: 7px;
+}
+
+.runtime-failed > p {
+  color: #c77b80;
+}
+
 .task-changes {
   max-height: 40vh;
   padding: 15px 20px;

@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AgentRunner, parseConfiguredCommand, parseReviewerFindings } from '../../electron/main/runner'
+import {
+  IosRuntimeStageError,
+  type IosSimulatorRuntimeAdapter
+} from '../../electron/main/ios-simulator-runtime'
 import { AppStore } from '../../electron/main/store'
 
 const execFileAsync = promisify(execFile)
@@ -36,6 +40,8 @@ async function createExecutionFixture(options: {
   codexSource: (directory: string) => string
   makefile?: string
   policy?: ConstructorParameters<typeof AgentRunner>[5]
+  withRuntimeManifest?: boolean
+  runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
   repository: string
@@ -51,7 +57,33 @@ async function createExecutionFixture(options: {
   await execFileAsync('git', ['init', '-b', 'main'], { cwd: repository })
   await writeFile(join(repository, 'README.md'), '# Runtime fixture\n')
   await writeFile(join(repository, 'Makefile'), options.makefile ?? 'test:\n\t@true\n')
-  await execFileAsync('git', ['add', 'README.md', 'Makefile'], { cwd: repository })
+  const trackedFiles = ['README.md', 'Makefile']
+  if (options.withRuntimeManifest) {
+    await mkdir(join(repository, '.agentmonitor'))
+    await mkdir(join(repository, 'App.xcodeproj'))
+    await writeFile(
+      join(repository, '.agentmonitor', 'project.json'),
+      JSON.stringify({
+        version: 1,
+        adapter: {
+          kind: 'ios-simulator',
+          container: 'App.xcodeproj',
+          scheme: 'App',
+          configuration: 'Debug'
+        },
+        capabilities: {
+          build: true,
+          run: true,
+          observe: [],
+          act: [],
+          verify: ['test-command']
+        }
+      })
+    )
+    await writeFile(join(repository, 'App.xcodeproj', 'project.pbxproj'), '// fixture\n')
+    trackedFiles.push('.agentmonitor/project.json', 'App.xcodeproj/project.pbxproj')
+  }
+  await execFileAsync('git', ['add', ...trackedFiles], { cwd: repository })
   await execFileAsync(
     'git',
     ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'],
@@ -66,7 +98,15 @@ async function createExecutionFixture(options: {
   const project = store.addProject('Runtime fixture', repository)
   store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
   const task = store.createTask(project.id, '실행 수명주기', '중단과 시간 초과를 안전하게 처리한다.', 1)
-  const runner = new AgentRunner(store, worktrees, () => undefined, fakeCodex, undefined, options.policy)
+  const runner = new AgentRunner(
+    store,
+    worktrees,
+    () => undefined,
+    fakeCodex,
+    undefined,
+    options.policy,
+    options.runtimeAdapter
+  )
   activeRunners.push(runner)
   return { directory, repository, store, runner, taskId: task.id }
 }
@@ -322,6 +362,96 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(await readFile(join(repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(repository, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
     store.close()
+  })
+
+  it('launches and persists an iPad runtime only when the project contract enables it', async () => {
+    const launchedWorktrees: string[] = []
+    const stoppedBundles: string[] = []
+    const runtimeAdapter: IosSimulatorRuntimeAdapter = {
+      launch: async (input) => {
+        launchedWorktrees.push(input.worktreePath)
+        input.onProgress('booting', 'iPad 부팅')
+        input.onProgress('building', 'Swift 앱 빌드')
+        return {
+          deviceId: 'IPAD-UDID',
+          deviceName: 'iPad Pro 13-inch',
+          bundleIdentifier: 'com.example.App',
+          processId: 4242,
+          appPath: join(input.runtimeRoot, input.taskId, 'App.app')
+        }
+      },
+      stop: async ({ session }) => {
+        stoppedBundles.push(session.bundleIdentifier ?? '')
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      withRuntimeManifest: true,
+      runtimeAdapter
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task.status).toBe('awaiting_approval')
+    expect(launchedWorktrees).toEqual([task.worktreePath])
+    expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({
+      status: 'running',
+      deviceName: 'iPad Pro 13-inch',
+      bundleIdentifier: 'com.example.App',
+      processId: 4242
+    })
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_ready')).toBe(true)
+
+    await fixture.runner.discard(task.id)
+    expect(stoppedBundles).toEqual(['com.example.App'])
+    expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({ status: 'stopped', processId: null })
+    fixture.store.close()
+  })
+
+  it('fails the task with a runtime finding when a required Swift build cannot launch', async () => {
+    const stoppedBundles: string[] = []
+    const runtimeAdapter: IosSimulatorRuntimeAdapter = {
+      launch: async (input) => {
+        input.onProgress('launching', 'fixture 앱 실행 중', {
+          deviceId: 'IPAD-UDID',
+          deviceName: 'iPad Pro 13-inch',
+          bundleIdentifier: 'com.example.App'
+        })
+        throw new IosRuntimeStageError('launching', 'fixture Swift 앱 실행 실패')
+      },
+      stop: async ({ session }) => {
+        stoppedBundles.push(session.bundleIdentifier ?? '')
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      withRuntimeManifest: true,
+      runtimeAdapter
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('fixture Swift 앱 실행 실패')
+
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task.status).toBe('failed')
+    expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({
+      status: 'failed',
+      message: 'fixture Swift 앱 실행 실패',
+      processId: null
+    })
+    expect(stoppedBundles).toEqual(['com.example.App'])
+    expect(fixture.store.getSnapshot(task.projectId).findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: expect.stringContaining('Swift runtime launching 단계 실패') })
+      ])
+    )
+    fixture.store.close()
   })
 
   it('keeps the task awaiting approval when the original checkout is dirty', async () => {

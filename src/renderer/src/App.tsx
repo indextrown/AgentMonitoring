@@ -57,6 +57,8 @@ import type {
   ProjectChangeKind,
   ProjectRecord,
   ProjectInspection,
+  RuntimeSessionRecord,
+  RuntimeSessionStatus,
   TaskChanges,
   TaskRecord,
   TaskStatus
@@ -120,6 +122,17 @@ const PROJECT_CAPABILITY_STATUS_LABELS: Record<ProjectCapabilityStatus, string> 
   ready: '지금 사용 가능',
   declared: '프로젝트 선언 · 연결 예정',
   missing: '미설정'
+}
+
+const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
+  preparing: '준비 중',
+  booting: 'Simulator 부팅',
+  building: '앱 빌드',
+  installing: '앱 설치',
+  launching: '앱 실행',
+  running: '실행 중',
+  failed: '실패',
+  stopped: '종료됨'
 }
 
 const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard }> = [
@@ -611,6 +624,7 @@ export function App(): React.JSX.Element {
         <TaskDrawer
           task={selectedTask}
           changes={taskChanges}
+          runtime={snapshot.runtimeSessions.find((session) => session.taskId === selectedTask.id) ?? null}
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
@@ -810,7 +824,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>이 계약은 접근 범위만 선언합니다. 앱 빌드·실행·관찰 연결은 다음 단계에서 추가합니다.</small>
+              <small>Build·Run은 작업별 Swift runtime에서 사용합니다. 화면 관찰과 조작은 다음 단계에서 연결합니다.</small>
             )}
           </footer>
         </article>
@@ -1475,6 +1489,7 @@ function TaskDrawer({
   task,
   events,
   changes,
+  runtime,
   onClose,
   onRun,
   onAction,
@@ -1483,6 +1498,7 @@ function TaskDrawer({
   task: TaskRecord
   events: EventRecord[]
   changes: TaskChanges | null
+  runtime: RuntimeSessionRecord | null
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
@@ -1493,6 +1509,24 @@ function TaskDrawer({
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {runtime && (
+          <section className={`runtime-session runtime-${runtime.status}`}>
+            <div className="drawer-section-title">
+              <strong>Swift runtime</strong>
+              <span>{RUNTIME_SESSION_STATUS_LABELS[runtime.status]}</span>
+            </div>
+            <div className="runtime-session-target">
+              <SquareTerminal size={15} />
+              <div>
+                <strong>{runtime.deviceName ?? 'iPad Simulator 확인 중'}</strong>
+                <small>{runtime.bundleIdentifier ?? '앱 산출물 확인 전'}</small>
+              </div>
+              {runtime.processId && <code>PID {runtime.processId}</code>}
+            </div>
+            <p>{runtime.message}</p>
+            <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>
+          </section>
+        )}
         {task.worktreePath && (
           <section className="task-changes">
             <div className="drawer-section-title"><strong>변경 내역</strong><span>{changes ? `${changes.files.length}개 파일` : '불러오는 중'}</span></div>

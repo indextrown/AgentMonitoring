@@ -2,10 +2,17 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
-import type { EventRecord, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
+import type { EventRecord, ProjectRecord, RuntimeSessionStatus, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
 import { isActiveTask } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import {
+  IosRuntimeStageError,
+  iosSimulatorRuntimeAdapter,
+  type IosSimulatorRuntimeAdapter,
+  type RuntimeCommandRequest
+} from './ios-simulator-runtime'
+import { readProjectCapabilityManifest } from './project-capabilities'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -39,6 +46,7 @@ interface ActiveRun {
 interface ProcessResult {
   code: number
   output: string
+  stdout: string
   finalMessage: string
 }
 
@@ -141,7 +149,9 @@ function eventMessage(payload: Record<string, unknown>): string | null {
 
 export class AgentRunner {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly managedRuntimeTaskIds = new Set<string>()
   private readonly policy: RunnerPolicy
+  private readonly runtimeRoot: string
 
   constructor(
     private readonly store: AppStore,
@@ -149,9 +159,11 @@ export class AgentRunner {
     private readonly publish: (event: EventRecord) => void,
     private readonly codexCommand = 'codex',
     private readonly codexHome?: string,
-    policy: Partial<RunnerPolicy> = {}
+    policy: Partial<RunnerPolicy> = {},
+    private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
+    this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
   }
 
   isRunning(taskId: string): boolean {
@@ -377,6 +389,7 @@ export class AgentRunner {
         return
       }
 
+      const runtimeSummary = await this.runRuntimeIfConfigured(task, project, worktreePath, control)
       this.store.resolveTaskFindings(task.id)
       const review = await this.runCodexStage(
         this.store.getTask(taskId),
@@ -387,6 +400,7 @@ export class AgentRunner {
           `작업 목표: ${task.prompt}`,
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+          runtimeSummary ? `Swift runtime 결과:\n${runtimeSummary}` : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
           '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
           '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
@@ -403,13 +417,25 @@ export class AgentRunner {
     } catch (error) {
       const current = this.store.getTask(taskId)
       if (error instanceof StoppedError || control.stopped) {
+        await this.stopRuntimeSession(current, 'stopped', '사용자가 작업을 중단해 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
         this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
       } else if (error instanceof ProcessTimeoutError) {
+        await this.stopRuntimeSession(current, 'failed', '시간 초과로 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
         this.emit(current, 'task_timed_out', 'orchestrator', `시간 초과 · ${error.message}`, 'high')
         this.store.addFinding(current.projectId, current.id, `${current.title} · ${error.label} 시간 초과`, 'high')
+      } else if (error instanceof IosRuntimeStageError) {
+        await this.stopRuntimeSession(current, 'failed', error.message)
+        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+        this.store.addFinding(
+          current.projectId,
+          current.id,
+          `${current.title} · Swift runtime ${error.status} 단계 실패`,
+          'high'
+        )
       } else {
+        await this.stopRuntimeSession(current, 'failed', '작업 실패로 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
         this.emit(current, 'agent', 'orchestrator', `실행 실패 · ${redact(String(error))}`, 'high')
         this.store.addFinding(current.projectId, current.id, `${current.title} 실행 실패`, 'high')
@@ -434,6 +460,13 @@ export class AgentRunner {
     for (const control of controls) control.stopped = true
     await Promise.all(controls.map((control) => this.terminateControl(control)))
     await Promise.all(controls.map((control) => control.done))
+    for (const taskId of [...this.managedRuntimeTaskIds]) {
+      await this.stopRuntimeSession(
+        this.store.getTask(taskId),
+        'stopped',
+        'AgentMonitoring 종료로 Simulator 앱을 정리했습니다.'
+      )
+    }
   }
 
   async approve(taskId: string): Promise<void> {
@@ -441,6 +474,8 @@ export class AgentRunner {
     if (task.status !== 'awaiting_approval') throw new Error('승인 대기 중인 작업만 원본에 적용할 수 있습니다.')
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
+
+    await this.stopRuntimeSession(task, 'stopped', '작업 승인으로 Simulator 앱을 정리했습니다.')
 
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
@@ -508,6 +543,7 @@ export class AgentRunner {
   async discard(taskId: string): Promise<void> {
     const task = this.store.getTask(taskId)
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
+    await this.stopRuntimeSession(task, 'stopped', '작업 폐기로 Simulator 앱을 정리했습니다.')
     const discarded = this.store.transitionTask(taskId, 'discarded')
     this.emit(discarded, 'task_discarded', 'human', `${task.title} 변경 폐기`)
 
@@ -529,6 +565,10 @@ export class AgentRunner {
       await stat(project.path)
     } catch {
       projectAvailable = false
+    }
+
+    for (const task of tasks) {
+      await this.stopRuntimeSession(task, 'stopped', '프로젝트 연결 삭제로 Simulator 앱을 정리했습니다.')
     }
 
     if (projectAvailable) {
@@ -626,6 +666,117 @@ export class AgentRunner {
     })
   }
 
+  private async runRuntimeIfConfigured(
+    task: TaskRecord,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun
+  ): Promise<string> {
+    const manifest = await readProjectCapabilityManifest(project.path)
+    if (manifest.state === 'missing') return ''
+    if (manifest.state === 'invalid') {
+      this.emit(
+        task,
+        'runtime_failed',
+        'runtime',
+        `Swift runtime 계약 오류로 앱 실행을 건너뜁니다. ${manifest.message}`,
+        'low'
+      )
+      return ''
+    }
+    if (!manifest.value.capabilities.build || !manifest.value.capabilities.run) return ''
+
+    const startMessage = '작업 전용 Swift runtime session을 준비합니다.'
+    this.store.setRuntimeSession(task.id, 'preparing', {
+      deviceId: null,
+      deviceName: null,
+      bundleIdentifier: null,
+      processId: null,
+      message: startMessage
+    })
+    this.managedRuntimeTaskIds.add(task.id)
+    this.emit(task, 'runtime_started', 'runtime', startMessage)
+
+    try {
+      const result = await this.runtimeAdapter.launch({
+        taskId: task.id,
+        worktreePath,
+        runtimeRoot: this.runtimeRoot,
+        contract: manifest.value.adapter,
+        execute: (request) => this.executeRuntimeCommand(request, control),
+        onProgress: (status, message, update = {}) => {
+          this.store.setRuntimeSession(task.id, status, { ...update, message })
+          this.emit(task, 'runtime_started', 'runtime', message)
+        }
+      })
+      const message = `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`
+      this.store.setRuntimeSession(task.id, 'running', {
+        deviceId: result.deviceId,
+        deviceName: result.deviceName,
+        bundleIdentifier: result.bundleIdentifier,
+        processId: result.processId,
+        message
+      })
+      this.emit(task, 'runtime_ready', 'runtime', message)
+      return message
+    } catch (error) {
+      if (error instanceof StoppedError) throw error
+      if (error instanceof ProcessTimeoutError) {
+        this.emit(task, 'runtime_failed', 'runtime', error.message, 'high')
+        throw error
+      }
+      const runtimeError = error instanceof IosRuntimeStageError
+        ? error
+        : new IosRuntimeStageError('failed', redact(String(error)))
+      this.emit(task, 'runtime_failed', 'runtime', runtimeError.message, 'high')
+      throw runtimeError
+    }
+  }
+
+  private async executeRuntimeCommand(
+    request: RuntimeCommandRequest,
+    control: ActiveRun | null
+  ): Promise<ProcessResult> {
+    return this.runProcess(
+      request.command,
+      request.args,
+      request.cwd,
+      control,
+      undefined,
+      process.env,
+      { timeoutMs: request.timeoutMs, label: request.label }
+    )
+  }
+
+  private async stopRuntimeSession(
+    task: TaskRecord,
+    status: Extract<RuntimeSessionStatus, 'failed' | 'stopped'>,
+    message: string
+  ): Promise<void> {
+    const session = this.store.getRuntimeSession(task.id)
+    if (!session || ['failed', 'stopped'].includes(session.status)) {
+      this.managedRuntimeTaskIds.delete(task.id)
+      return
+    }
+
+    let cleanupMessage = message
+    if (session.deviceId && session.bundleIdentifier) {
+      try {
+        await this.runtimeAdapter.stop({
+          session,
+          cwd: this.runtimeRoot,
+          execute: (request) => this.executeRuntimeCommand(request, null)
+        })
+      } catch (error) {
+        cleanupMessage = `${message} 종료 명령 경고: ${redact(String(error))}`
+      }
+    }
+
+    this.store.setRuntimeSession(task.id, status, { message: cleanupMessage, processId: null })
+    this.managedRuntimeTaskIds.delete(task.id)
+    this.emit(task, 'runtime_stopped', 'runtime', cleanupMessage, status === 'failed' ? 'high' : null)
+  }
+
   private runProcess(
     command: string,
     args: string[],
@@ -645,6 +796,7 @@ export class AgentRunner {
       if (control) control.child = child
 
       let output = ''
+      let stdout = ''
       let finalMessage = ''
       let stdoutBuffer = ''
       let timedOut = false
@@ -662,6 +814,7 @@ export class AgentRunner {
 
       const consumeLine = (rawLine: string): void => {
         const line = redact(rawLine)
+        stdout = `${stdout}${line}\n`.slice(-1_000_000)
         output = `${output}${line}\n`.slice(-80_000)
         onLine?.(line)
         try {
@@ -706,7 +859,7 @@ export class AgentRunner {
           reject(new ProcessTimeoutError(deadline.label, deadline.timeoutMs))
           return
         }
-        resolvePromise({ code: code ?? 1, output, finalMessage })
+        resolvePromise({ code: code ?? 1, output, stdout, finalMessage })
       })
 
       if (deadline && deadline.timeoutMs > 0) {
