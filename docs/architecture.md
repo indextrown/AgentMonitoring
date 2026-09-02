@@ -33,11 +33,11 @@ Renderer는 다음 상태를 구분한다.
 
 | 상태 | 의미 |
 | --- | --- |
-| `ready` | 현재 AgentMonitoring이 바로 사용할 수 있다. Code, 저장된 검증 명령, 유효한 iOS 계약의 Build·Run이 해당한다. |
+| `ready` | 현재 AgentMonitoring이 바로 사용할 수 있다. Code, 저장된 검증 명령, 유효한 iOS 계약의 Build·Run·Observe screen이 해당한다. |
 | `declared` | 프로젝트 계약에는 있지만 실행 adapter가 아직 연결되지 않았다. |
 | `missing` | 프로젝트에서 선언하거나 설정하지 않았다. |
 
-유효한 iOS 계약에서 `build`와 `run`이 활성화되면 AgentRunner가 테스트 통과 뒤 Xcode와 Simulator runtime을 시작한다. `observe`, `act`, runtime `verify`는 아직 선언 상태로만 표시한다. manifest가 없거나 Build·Run이 비활성화된 프로젝트는 기존 코드 작업 모드로 동작한다.
+유효한 iOS 계약에서 `build`와 `run`이 활성화되면 AgentRunner가 테스트 통과 뒤 Xcode와 Simulator runtime을 시작한다. `observe`의 `screen`은 화면 캡처 adapter에 연결하고, 접근성·상태 관찰과 `act`, runtime `verify`는 아직 선언 상태로 표시한다. manifest가 없거나 Build·Run이 비활성화된 프로젝트는 기존 코드 작업 모드로 동작한다.
 
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
 
@@ -62,8 +62,8 @@ awaiting_approval/failed/stopped → discarded
 | Critic | read-only | 없음 | 테스트 공백과 약화 가능성 검토 |
 | Implementer | workspace-write | 제품 코드 | 목표 구현과 테스트 실패 수정 |
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
-| Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad Simulator 설치·실행 |
-| Reviewer | read-only | 없음 | diff, 회귀, 보안, 테스트 공백 보고 |
+| Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad Simulator 설치·실행, 선언된 화면 캡처 |
+| Reviewer | read-only | 없음 | diff, runtime 화면, 회귀, 보안, 테스트 공백 보고 |
 | Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
 
 ## Swift runtime session
@@ -79,11 +79,15 @@ AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있
   → build settings에서 앱 경로와 bundle identifier 확인
   → `simctl install`
   → `simctl launch --terminate-running-process`
+  → Observe screen 계약이면 `simctl io <udid> screenshot`
+  → PNG를 `codex exec --image`로 Reviewer에 첨부
 ```
 
-빌드는 `<Electron userData>/runtime-sessions/<task-id>/DerivedData`에 격리한다. `.app` 산출물의 실경로가 이 디렉터리 밖이면 설치하지 않는다. runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다.
+빌드는 `<Electron userData>/runtime-sessions/<task-id>/DerivedData`에 격리한다. `.app` 산출물의 실경로가 이 디렉터리 밖이면 설치하지 않는다. 화면 증거는 같은 session의 `evidence` 디렉터리에 UUID 파일명의 PNG로 저장한다. 일반 파일이고 1 byte 이상 25MB 이하이며 실경로가 evidence 디렉터리 안인 경우에만 기록하고 Reviewer에 첨부한다.
 
-사용 가능한 iPad가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면과 접근성 구조 수집은 이 adapter의 후속 단계다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다.
+runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `observing`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다. 화면 증거 메타데이터는 별도 레코드로 보존해 작업 상세에서 파일을 열 수 있다.
+
+사용 가능한 iPad가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면 캡처가 실패해도 runtime 실패로 처리하며 단계와 원인을 기록한다. 접근성 구조 수집은 이 adapter의 후속 단계다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다. 프로젝트 연결을 삭제하면 해당 프로젝트 작업의 정확한 runtime session 경로도 함께 제거한다.
 
 ## Git 격리
 
@@ -108,6 +112,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
 | `runtime_sessions` | 작업별 Simulator 단계, 기기, 앱, PID와 진단 |
+| `runtime_evidence` | 작업별 화면 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
 
 대시보드의 수치와 최근 활동은 `events`, `tasks`, `findings`에서 계산한다. JSONL 원문 전체 대신 UI에 필요한 redacted 메시지만 최대 길이를 제한해 저장한다.
 
@@ -117,6 +122,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - Codex 단계 제한 시간 초과: 역할별 30분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
 - 검증 명령 제한 시간 초과: 45분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
 - Swift runtime 실패: 실패 단계를 session과 `runtime_failed` 이벤트에 기록하고 작업을 `failed`로 전환한다.
+- 화면 캡처 실패: `observing` 단계 실패로 기록하고 실행 중인 관리 대상 앱을 정리한다.
 - 사용 가능한 iPad 없음: 새 기기를 만들지 않고 Xcode에서 기기를 준비하도록 안내한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
@@ -136,7 +142,8 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 검증 명령은 shell을 거치지 않고 허용 목록의 실행 파일만 `spawn`한다.
 - Swift runtime은 manifest의 명령을 실행하지 않고 고정된 `/usr/bin/xcrun xcodebuild`, `/usr/bin/xcrun simctl`, `/usr/bin/open`과 인자 배열만 사용한다.
 - runtime 계약은 원본 checkout에서 읽어 worktree 안의 에이전트 변경으로 실행 권한을 넓힐 수 없게 한다.
-- Xcode container는 worktree 내부 실경로, `.app` 산출물은 작업 전용 DerivedData 내부 실경로일 때만 허용한다.
+- Xcode container는 worktree 내부 실경로, `.app` 산출물은 작업 전용 DerivedData 내부 실경로, 화면 PNG는 작업 전용 evidence 내부 실경로일 때만 허용한다.
+- 화면 증거는 Observe screen 계약이 있을 때만 생성하며 최종 Reviewer의 `--image` 입력에만 첨부한다.
 - 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`와 고정 경로의 선언형 `.agentmonitor/project.json`만 사용한다. `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용은 검사 응답으로 가져오지 않는다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
@@ -151,7 +158,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 앱 재시작은 프로세스 실행을 이어받지 않고 안전한 `stopped` 상태에서 사람의 재실행 결정을 기다린다.
 - 비정상 종료로 Simulator 앱이 남으면 다음 동일 bundle 실행의 `--terminate-running-process` 또는 사용자의 수동 종료로 정리한다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
-- Simulator 화면·접근성 구조·Debug 상태 관찰, UI·fixture 조작, runtime 시나리오 자가수정은 아직 없다.
+- Simulator 접근성 구조·Debug 상태 관찰, UI·fixture 조작, runtime 시나리오 자가수정은 아직 없다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.
 

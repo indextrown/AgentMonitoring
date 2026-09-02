@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -92,6 +92,10 @@ describe('iOS Simulator runtime adapter', () => {
       if (request.args.includes('launch')) {
         return { code: 0, output: 'com.example.PopPang: 4242\n', stdout: 'com.example.PopPang: 4242\n' }
       }
+      if (request.args.includes('screenshot')) {
+        await writeFile(request.args.at(-1)!, 'fixture-png')
+        return { code: 0, output: 'Wrote screenshot', stdout: '' }
+      }
       return { code: 0, output: '', stdout: '' }
     }
 
@@ -105,7 +109,9 @@ describe('iOS Simulator runtime adapter', () => {
         scheme: 'PopPang',
         configuration: 'Debug'
       },
+      captureScreen: true,
       execute,
+      wait: async () => undefined,
       onProgress: (status, _message, update) => {
         progress.push(status)
         progressUpdates.push(update ?? {})
@@ -116,13 +122,23 @@ describe('iOS Simulator runtime adapter', () => {
       deviceId: 'IPAD-UDID',
       deviceName: 'iPad Pro 13-inch',
       bundleIdentifier: 'com.example.PopPang',
-      processId: 4242
+      processId: 4242,
+      screenEvidence: {
+        mimeType: 'image/png',
+        sizeBytes: 11
+      }
     })
-    expect(progress).toEqual(['preparing', 'booting', 'building', 'installing', 'launching'])
+    expect(result.screenEvidence?.path).toMatch(/runtime-sessions\/.+\/evidence\/screen-.+\.png$/)
+    expect(progress).toEqual(['preparing', 'booting', 'building', 'installing', 'launching', 'observing'])
     expect(progressUpdates).toEqual([
       {},
       { deviceId: 'IPAD-UDID', deviceName: 'iPad Pro 13-inch' },
       {},
+      {
+        deviceId: 'IPAD-UDID',
+        deviceName: 'iPad Pro 13-inch',
+        bundleIdentifier: 'com.example.PopPang'
+      },
       {
         deviceId: 'IPAD-UDID',
         deviceName: 'iPad Pro 13-inch',
@@ -142,7 +158,8 @@ describe('iOS Simulator runtime adapter', () => {
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'simctl', 'install', 'IPAD-UDID'],
-      ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process']
+      ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
+      ['/usr/bin/xcrun', 'simctl', 'io', 'IPAD-UDID']
     ])
   })
 
@@ -163,6 +180,7 @@ describe('iOS Simulator runtime adapter', () => {
           scheme: 'PopPang',
           configuration: 'Debug'
         },
+        captureScreen: false,
         execute: async () => ({
           code: 0,
           output: '',
@@ -199,6 +217,7 @@ describe('iOS Simulator runtime adapter', () => {
           scheme: 'PopPang',
           configuration: 'Debug'
         },
+        captureScreen: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -228,6 +247,7 @@ describe('iOS Simulator runtime adapter', () => {
           scheme: 'PopPang',
           configuration: 'Debug'
         },
+        captureScreen: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })

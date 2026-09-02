@@ -28,6 +28,7 @@ export type EventKind =
   | 'task_discarded'
   | 'runtime_started'
   | 'runtime_ready'
+  | 'runtime_observed'
   | 'runtime_failed'
   | 'runtime_stopped'
   | 'project_created'
@@ -131,6 +132,7 @@ export type RuntimeSessionStatus =
   | 'building'
   | 'installing'
   | 'launching'
+  | 'observing'
   | 'running'
   | 'failed'
   | 'stopped'
@@ -147,6 +149,17 @@ export interface RuntimeSessionRecord {
   message: string
   startedAt: string
   updatedAt: string
+}
+
+export interface RuntimeEvidenceRecord {
+  id: string
+  taskId: string
+  projectId: string
+  kind: 'screen'
+  path: string
+  mimeType: 'image/png'
+  sizeBytes: number
+  createdAt: string
 }
 
 export interface EventRecord {
@@ -203,6 +216,7 @@ export interface DashboardSnapshot {
   findings: FindingRecord[]
   notes: NoteRecord[]
   runtimeSessions: RuntimeSessionRecord[]
+  runtimeEvidence: RuntimeEvidenceRecord[]
 }
 
 export interface CreateTaskInput {

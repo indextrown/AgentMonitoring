@@ -15,6 +15,7 @@ import {
   Gauge,
   GitCompareArrows,
   GitBranch,
+  Image as ImageIcon,
   LayoutDashboard,
   ListTodo,
   LogIn,
@@ -57,6 +58,7 @@ import type {
   ProjectChangeKind,
   ProjectRecord,
   ProjectInspection,
+  RuntimeEvidenceRecord,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   TaskChanges,
@@ -130,6 +132,7 @@ const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
   building: '앱 빌드',
   installing: '앱 설치',
   launching: '앱 실행',
+  observing: '화면 캡처',
   running: '실행 중',
   failed: '실패',
   stopped: '종료됨'
@@ -155,6 +158,12 @@ function timeAgo(value: string): string {
 function shortDate(value: string): string {
   const date = new Date(value)
   return `${date.getMonth() + 1}월 ${date.getDate()}일`
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${value} B`
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KB`
+  return `${(value / (1_024 * 1_024)).toFixed(1)} MB`
 }
 
 function duration(task: TaskRecord): string {
@@ -625,11 +634,13 @@ export function App(): React.JSX.Element {
           task={selectedTask}
           changes={taskChanges}
           runtime={snapshot.runtimeSessions.find((session) => session.taskId === selectedTask.id) ?? null}
+          evidence={snapshot.runtimeEvidence.filter((item) => item.taskId === selectedTask.id)}
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
+          onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
         />
       )}
       {error && (
@@ -824,7 +835,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run은 작업별 Swift runtime에서 사용합니다. 화면 관찰과 조작은 다음 단계에서 연결합니다.</small>
+              <small>Build·Run과 화면 캡처는 작업별 Swift runtime에서 사용합니다. 접근성·상태 관찰과 조작은 다음 단계에서 연결합니다.</small>
             )}
           </footer>
         </article>
@@ -1490,19 +1501,23 @@ function TaskDrawer({
   events,
   changes,
   runtime,
+  evidence,
   onClose,
   onRun,
   onAction,
-  onOpenPath
+  onOpenPath,
+  onOpenEvidence
 }: {
   task: TaskRecord
   events: EventRecord[]
   changes: TaskChanges | null
   runtime: RuntimeSessionRecord | null
+  evidence: RuntimeEvidenceRecord[]
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
   onOpenPath: () => void
+  onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
@@ -1524,6 +1539,21 @@ function TaskDrawer({
               {runtime.processId && <code>PID {runtime.processId}</code>}
             </div>
             <p>{runtime.message}</p>
+            {evidence.length > 0 && (
+              <div className="runtime-evidence-list">
+                {evidence.slice(0, 3).map((item) => (
+                  <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
+                    <ImageIcon size={14} />
+                    <span>
+                      <strong>Simulator 화면 증거</strong>
+                      <small>PNG · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
+                    </span>
+                    <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
+                  </button>
+                ))}
+                {evidence.length > 3 && <small>최근 3개 표시 · 전체 {evidence.length}개 저장</small>}
+              </div>
+            )}
             <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>
           </section>
         )}

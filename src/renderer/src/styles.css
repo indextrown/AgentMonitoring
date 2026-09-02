@@ -2454,6 +2454,57 @@ kbd {
   font-size: 7px;
 }
 
+.runtime-evidence-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 8px;
+}
+
+.runtime-evidence-list button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #2d3c47;
+  border-radius: 6px;
+  color: #809eb8;
+  text-align: left;
+  background: #111b22;
+}
+
+.runtime-evidence-list button:hover {
+  border-color: #46647d;
+  background: #14212a;
+}
+
+.runtime-evidence-list span,
+.runtime-evidence-list strong,
+.runtime-evidence-list small {
+  display: block;
+  min-width: 0;
+}
+
+.runtime-evidence-list .runtime-evidence-action {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #7898b3;
+  font-size: 7px;
+}
+
+.runtime-evidence-list strong {
+  color: #b9c6d0;
+  font-size: 8px;
+}
+
+.runtime-evidence-list small {
+  margin-top: 3px;
+  color: #667681;
+  font-size: 7px;
+}
+
 .runtime-failed > p {
   color: #c77b80;
 }

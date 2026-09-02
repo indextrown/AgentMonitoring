@@ -202,8 +202,20 @@ export async function inspectProjectCapabilities(
       capabilities.run
         ? readyCapability('run', 'iPad Simulator 실행 adapter 사용 가능')
         : missingCapability('run', 'run이 비활성화되어 있습니다.'),
-      capabilities.observe.length
-        ? declaredCapability('observe', `${capabilities.observe.map((item) => observeLabels[item]).join(' · ')} 관찰 계약 선언`)
+      capabilities.observe.includes('screen')
+        ? readyCapability(
+            'observe',
+            [
+              'Simulator 화면 캡처 사용 가능',
+              capabilities.observe
+                .filter((item) => item !== 'screen')
+                .map((item) => observeLabels[item])
+                .join(' · '),
+              capabilities.observe.some((item) => item !== 'screen') ? '연결 예정' : ''
+            ].filter(Boolean).join(' · ')
+          )
+        : capabilities.observe.length
+          ? declaredCapability('observe', `${capabilities.observe.map((item) => observeLabels[item]).join(' · ')} 관찰 계약 선언`)
         : missingCapability('observe', '관찰 채널이 선언되지 않았습니다.'),
       capabilities.act.length
         ? declaredCapability('act', `${capabilities.act.map((item) => actLabels[item]).join(' · ')} 조작 계약 선언`)

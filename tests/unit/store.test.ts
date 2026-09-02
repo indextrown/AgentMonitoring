@@ -22,6 +22,7 @@ describe('AppStore', () => {
     expect(initial.selectedProject).toBeNull()
     expect(initial.tasks).toEqual([])
     expect(initial.events).toEqual([])
+    expect(initial.runtimeEvidence).toEqual([])
 
     const project = store.addProject('Fixture', join(directory, 'fixture'))
     const task = store.createTask(project.id, '테스트 작업', '테스트 작업의 완료 조건을 검증한다.', 3)
@@ -113,6 +114,13 @@ describe('AppStore', () => {
       processId: 4242,
       message: '앱 실행 완료'
     })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'screen',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'screen.png'),
+      mimeType: 'image/png',
+      sizeBytes: 1_024,
+      createdAt: new Date().toISOString()
+    })
     store.close()
 
     const reopened = new AppStore(databasePath)
@@ -123,6 +131,14 @@ describe('AppStore', () => {
         deviceId: 'IPAD-UDID',
         bundleIdentifier: 'com.example.App',
         processId: 4242
+      }
+    ])
+    expect(reopened.getSnapshot(project.id).runtimeEvidence).toMatchObject([
+      {
+        taskId: task.id,
+        kind: 'screen',
+        mimeType: 'image/png',
+        sizeBytes: 1_024
       }
     ])
 

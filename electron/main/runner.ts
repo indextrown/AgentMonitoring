@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdir, stat } from 'node:fs/promises'
+import { lstat, mkdir, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
 import type { EventRecord, ProjectRecord, RuntimeSessionStatus, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
@@ -53,6 +53,11 @@ interface ProcessResult {
 interface ProcessDeadline {
   timeoutMs: number
   label: string
+}
+
+interface RuntimeRunResult {
+  summary: string
+  evidencePaths: string[]
 }
 
 export interface RunnerPolicy {
@@ -389,7 +394,7 @@ export class AgentRunner {
         return
       }
 
-      const runtimeSummary = await this.runRuntimeIfConfigured(task, project, worktreePath, control)
+      const runtimeResult = await this.runRuntimeIfConfigured(task, project, worktreePath, control)
       this.store.resolveTaskFindings(task.id)
       const review = await this.runCodexStage(
         this.store.getTask(taskId),
@@ -400,12 +405,18 @@ export class AgentRunner {
           `작업 목표: ${task.prompt}`,
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
-          runtimeSummary ? `Swift runtime 결과:\n${runtimeSummary}` : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
+          runtimeResult
+            ? `Swift runtime 결과:\n${runtimeResult.summary}`
+            : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
+          runtimeResult?.evidencePaths.length
+            ? '첨부된 이미지는 이 작업이 실행한 iPad Simulator의 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
+            : '',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
           '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
           '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
           '코드는 수정하지 마세요.'
-        ].join('\n\n')
+        ].filter(Boolean).join('\n\n'),
+        runtimeResult?.evidencePaths ?? []
       )
       for (const finding of parseReviewerFindings(review.finalMessage)) {
         this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
@@ -586,7 +597,30 @@ export class AgentRunner {
       }
     }
 
+    for (const task of tasks) {
+      await this.removeRuntimeArtifacts(task.id)
+    }
+
     this.store.deleteProject(projectId)
+  }
+
+  private async removeRuntimeArtifacts(taskId: string): Promise<void> {
+    const runtimeRoot = resolve(this.runtimeRoot)
+    const sessionPath = resolve(runtimeRoot, taskId)
+    if (!sessionPath.startsWith(`${runtimeRoot}/`)) {
+      throw new Error('안전하지 않은 runtime session 정리 경로입니다.')
+    }
+    let stats: Awaited<ReturnType<typeof lstat>>
+    try {
+      stats = await lstat(sessionPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    await rm(sessionPath, {
+      recursive: stats.isDirectory() && !stats.isSymbolicLink(),
+      force: true
+    })
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {
@@ -619,7 +653,8 @@ export class AgentRunner {
     cwd: string,
     actor: string,
     sandbox: 'read-only' | 'workspace-write',
-    prompt: string
+    prompt: string,
+    imagePaths: string[] = []
   ): Promise<ProcessResult> {
     const control = this.activeRuns.get(task.id)
     if (!control || control.stopped) throw new StoppedError()
@@ -631,6 +666,7 @@ export class AgentRunner {
         ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
         'exec',
         '--json',
+        ...imagePaths.flatMap((path) => ['--image', path]),
         '--sandbox',
         sandbox,
         '--cd',
@@ -671,9 +707,9 @@ export class AgentRunner {
     project: ProjectRecord,
     worktreePath: string,
     control: ActiveRun
-  ): Promise<string> {
+  ): Promise<RuntimeRunResult | null> {
     const manifest = await readProjectCapabilityManifest(project.path)
-    if (manifest.state === 'missing') return ''
+    if (manifest.state === 'missing') return null
     if (manifest.state === 'invalid') {
       this.emit(
         task,
@@ -682,9 +718,9 @@ export class AgentRunner {
         `Swift runtime 계약 오류로 앱 실행을 건너뜁니다. ${manifest.message}`,
         'low'
       )
-      return ''
+      return null
     }
-    if (!manifest.value.capabilities.build || !manifest.value.capabilities.run) return ''
+    if (!manifest.value.capabilities.build || !manifest.value.capabilities.run) return null
 
     const startMessage = '작업 전용 Swift runtime session을 준비합니다.'
     this.store.setRuntimeSession(task.id, 'preparing', {
@@ -703,13 +739,37 @@ export class AgentRunner {
         worktreePath,
         runtimeRoot: this.runtimeRoot,
         contract: manifest.value.adapter,
+        captureScreen: manifest.value.capabilities.observe.includes('screen'),
         execute: (request) => this.executeRuntimeCommand(request, control),
         onProgress: (status, message, update = {}) => {
           this.store.setRuntimeSession(task.id, status, { ...update, message })
           this.emit(task, 'runtime_started', 'runtime', message)
         }
       })
-      const message = `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`
+      if (manifest.value.capabilities.observe.includes('screen') && !result.screenEvidence) {
+        throw new IosRuntimeStageError('observing', '화면 관찰 계약이 활성화됐지만 화면 증거가 생성되지 않았습니다.')
+      }
+      const evidencePaths: string[] = []
+      if (result.screenEvidence) {
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          kind: 'screen',
+          path: result.screenEvidence.path,
+          mimeType: result.screenEvidence.mimeType,
+          sizeBytes: result.screenEvidence.sizeBytes,
+          createdAt: result.screenEvidence.capturedAt
+        })
+        evidencePaths.push(evidence.path)
+        this.emit(
+          task,
+          'runtime_observed',
+          'runtime',
+          `Simulator 화면 증거 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+        )
+      }
+      const message = [
+        `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`,
+        result.screenEvidence ? '화면 증거 1개 저장' : ''
+      ].filter(Boolean).join(' · ')
       this.store.setRuntimeSession(task.id, 'running', {
         deviceId: result.deviceId,
         deviceName: result.deviceName,
@@ -718,7 +778,7 @@ export class AgentRunner {
         message
       })
       this.emit(task, 'runtime_ready', 'runtime', message)
-      return message
+      return { summary: message, evidencePaths }
     } catch (error) {
       if (error instanceof StoppedError) throw error
       if (error instanceof ProcessTimeoutError) {

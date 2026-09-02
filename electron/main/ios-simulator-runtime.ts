@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { ProjectCapabilityManifest } from './project-capabilities'
@@ -26,12 +27,21 @@ export interface IosSimulatorLaunchInput {
   worktreePath: string
   runtimeRoot: string
   contract: ProjectCapabilityManifest['adapter']
+  captureScreen: boolean
   execute: RuntimeCommandExecutor
+  wait?: (milliseconds: number) => Promise<void>
   onProgress: (
     status: RuntimeSessionStatus,
     message: string,
     update?: Partial<Pick<RuntimeSessionRecord, 'deviceId' | 'deviceName' | 'bundleIdentifier'>>
   ) => void
+}
+
+export interface RuntimeScreenEvidence {
+  path: string
+  mimeType: 'image/png'
+  sizeBytes: number
+  capturedAt: string
 }
 
 export interface IosSimulatorLaunchResult {
@@ -40,6 +50,7 @@ export interface IosSimulatorLaunchResult {
   bundleIdentifier: string
   processId: number | null
   appPath: string
+  screenEvidence: RuntimeScreenEvidence | null
 }
 
 export interface IosSimulatorStopInput {
@@ -73,10 +84,13 @@ const RUNTIME_TIMEOUTS = {
   build: 30 * 60_000,
   install: 2 * 60_000,
   launch: 60_000,
+  observe: 30_000,
   stop: 30_000
 } as const
 
 const XCRUN_COMMAND = '/usr/bin/xcrun'
+const SCREEN_SETTLE_MS = 1_000
+const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024
 
 export class IosRuntimeStageError extends Error {
   constructor(
@@ -204,6 +218,10 @@ function xcodeContainerArguments(containerPath: string): string[] {
 function parseProcessId(output: string): number | null {
   const match = output.match(/:\s*(\d+)\s*$/m)
   return match ? Number(match[1]) : null
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds))
 }
 
 export async function launchIosSimulatorRuntime(
@@ -362,12 +380,63 @@ export async function launchIosSimulatorRuntime(
     'launching'
   )
 
+  let screenEvidence: RuntimeScreenEvidence | null = null
+  if (input.captureScreen) {
+    input.onProgress(
+      'observing',
+      `${device.name}의 실행 화면을 증거로 캡처하고 있습니다.`,
+      { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+    )
+    await (input.wait ?? wait)(SCREEN_SETTLE_MS)
+    await mkdir(resolve(resolvedSessionRoot, 'evidence'), { recursive: true })
+    const evidenceRoot = await requireContainedDirectory(
+      resolvedSessionRoot,
+      'evidence',
+      'runtime evidence'
+    )
+    const screenshotPath = resolve(evidenceRoot, `screen-${randomUUID()}.png`)
+    await executeRequired(
+      input.execute,
+      {
+        command: XCRUN_COMMAND,
+        args: ['simctl', 'io', device.udid, 'screenshot', '--type=png', screenshotPath],
+        cwd: worktreePath,
+        label: 'Simulator 화면 캡처',
+        timeoutMs: RUNTIME_TIMEOUTS.observe
+      },
+      'observing'
+    )
+    const screenshotStats = await lstat(screenshotPath).catch(() => {
+      throw new IosRuntimeStageError('observing', 'Simulator 화면 증거 파일이 생성되지 않았습니다.')
+    })
+    if (!screenshotStats.isFile() || screenshotStats.isSymbolicLink()) {
+      throw new IosRuntimeStageError('observing', '화면 증거가 일반 PNG 파일로 생성되지 않았습니다.')
+    }
+    if (screenshotStats.size <= 0 || screenshotStats.size > MAX_SCREENSHOT_BYTES) {
+      throw new IosRuntimeStageError(
+        'observing',
+        `화면 증거 크기가 허용 범위를 벗어났습니다: ${screenshotStats.size.toLocaleString('ko-KR')} bytes`
+      )
+    }
+    const resolvedScreenshotPath = await realpath(screenshotPath)
+    if (!resolvedScreenshotPath.startsWith(`${evidenceRoot}/`)) {
+      throw new IosRuntimeStageError('observing', '화면 증거가 작업별 runtime 경로 밖을 가리킵니다.')
+    }
+    screenEvidence = {
+      path: resolvedScreenshotPath,
+      mimeType: 'image/png',
+      sizeBytes: screenshotStats.size,
+      capturedAt: new Date().toISOString()
+    }
+  }
+
   return {
     deviceId: device.udid,
     deviceName: device.name,
     bundleIdentifier: product.bundleIdentifier,
     processId: parseProcessId(launchResult.stdout || launchResult.output),
-    appPath
+    appPath,
+    screenEvidence
   }
 }
 

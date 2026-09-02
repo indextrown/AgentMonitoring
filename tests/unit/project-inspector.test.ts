@@ -166,7 +166,7 @@ describe('inspectProject', () => {
       { key: 'code', status: 'ready' },
       { key: 'build', status: 'ready' },
       { key: 'run', status: 'ready' },
-      { key: 'observe', status: 'declared' },
+      { key: 'observe', status: 'ready' },
       { key: 'act', status: 'declared' },
       { key: 'verify', status: 'ready' }
     ])

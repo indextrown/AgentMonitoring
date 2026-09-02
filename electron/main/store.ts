@@ -7,6 +7,7 @@ import type {
   FindingRecord,
   NoteRecord,
   ProjectRecord,
+  RuntimeEvidenceRecord,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   Severity,
@@ -86,6 +87,17 @@ const runtimeSessionColumns = `
   updated_at AS updatedAt
 `
 
+const runtimeEvidenceColumns = `
+  id,
+  task_id AS taskId,
+  project_id AS projectId,
+  kind,
+  path,
+  mime_type AS mimeType,
+  size_bytes AS sizeBytes,
+  created_at AS createdAt
+`
+
 function projectFromRow(row: Row): ProjectRecord {
   return {
     id: String(row.id),
@@ -163,6 +175,19 @@ function runtimeSessionFromRow(row: Row): RuntimeSessionRecord {
     message: String(row.message),
     startedAt: String(row.startedAt),
     updatedAt: String(row.updatedAt)
+  }
+}
+
+function runtimeEvidenceFromRow(row: Row): RuntimeEvidenceRecord {
+  return {
+    id: String(row.id),
+    taskId: String(row.taskId),
+    projectId: String(row.projectId),
+    kind: 'screen',
+    path: String(row.path),
+    mimeType: 'image/png',
+    sizeBytes: Number(row.sizeBytes),
+    createdAt: String(row.createdAt)
   }
 }
 
@@ -250,6 +275,17 @@ export class AppStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS runtime_evidence (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_project_created
         ON tasks(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_project_created
@@ -258,6 +294,8 @@ export class AppStore {
         ON findings(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_runtime_sessions_project_updated
         ON runtime_sessions(project_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_runtime_evidence_task_created
+        ON runtime_evidence(task_id, created_at DESC);
     `)
   }
 
@@ -479,6 +517,47 @@ export class AppStore {
     })
   }
 
+  addRuntimeEvidence(
+    taskId: string,
+    input: Pick<RuntimeEvidenceRecord, 'kind' | 'path' | 'mimeType' | 'sizeBytes' | 'createdAt'>
+  ): RuntimeEvidenceRecord {
+    const task = this.getTask(taskId)
+    const evidence: RuntimeEvidenceRecord = {
+      id: randomUUID(),
+      taskId,
+      projectId: task.projectId,
+      ...input
+    }
+    this.database
+      .prepare(`
+        INSERT INTO runtime_evidence (
+          id, task_id, project_id, kind, path, mime_type, size_bytes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        evidence.id,
+        evidence.taskId,
+        evidence.projectId,
+        evidence.kind,
+        evidence.path,
+        evidence.mimeType,
+        evidence.sizeBytes,
+        evidence.createdAt
+      )
+    return evidence
+  }
+
+  listRuntimeEvidence(projectId?: string): RuntimeEvidenceRecord[] {
+    const rows = projectId
+      ? (this.database
+          .prepare(`SELECT ${runtimeEvidenceColumns} FROM runtime_evidence WHERE project_id = ? ORDER BY created_at DESC`)
+          .all(projectId) as Row[])
+      : (this.database
+          .prepare(`SELECT ${runtimeEvidenceColumns} FROM runtime_evidence ORDER BY created_at DESC`)
+          .all() as Row[])
+    return rows.map(runtimeEvidenceFromRow)
+  }
+
   recoverInterruptedTasks(): TaskRecord[] {
     const interrupted = (
       this.database
@@ -626,7 +705,8 @@ export class AppStore {
         events: [],
         findings: [],
         notes: [],
-        runtimeSessions: []
+        runtimeSessions: [],
+        runtimeEvidence: []
       }
     }
     const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0]
@@ -647,7 +727,8 @@ export class AppStore {
         .all(selectedProject.id) as Row[]
     ).map(noteFromRow)
     const runtimeSessions = this.listRuntimeSessions(selectedProject.id)
+    const runtimeEvidence = this.listRuntimeEvidence(selectedProject.id)
 
-    return { projects, selectedProject, tasks, events, findings, notes, runtimeSessions }
+    return { projects, selectedProject, tasks, events, findings, notes, runtimeSessions, runtimeEvidence }
   }
 }

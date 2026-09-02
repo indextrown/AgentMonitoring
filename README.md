@@ -10,7 +10,7 @@ AgentMonitoring은 코드를 직접 편집하는 IDE가 아니에요. 개발자�
 로컬 Git 저장소 연결
   → 작업 목표와 완료 조건 입력
   → 테스트 설계 → 비평 → 구현 → 검증
-  → Swift 계약이 있으면 iPad Simulator에 앱 실행
+  → Swift 계약이 있으면 iPad Simulator에 앱 실행·화면 캡처
   → 코드와 runtime 결과 리뷰
   → 변경 파일과 테스트 결과 확인
   → 사람의 승인 후 현재 로컬 브랜치에 적용
@@ -27,7 +27,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | ChatGPT 로그인 | Codex app-server로 로그인하고 앱 전용 인증 상태를 관리해요. OpenAI API 키는 필요하지 않아요. |
 | 로컬 프로젝트 연결 | 실제 Git 저장소를 등록하고 브랜치, 변경 파일, 언어, 빌드 도구, 테스트 파일을 검사해요. |
 | AI 접근성 진단 | 프로젝트가 Code, Build, Run, Observe, Act, Verify 중 어느 영역을 제공하도록 구성됐는지 확인해요. |
-| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad Simulator에 설치·실행해요. |
+| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad Simulator에 설치·실행하고 화면 증거를 남겨요. |
 | 작업 등록 | 구현 목표, 완료 조건, 최대 자가 수정 횟수를 작업별로 저장해요. |
 | 다중 역할 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 정해진 순서로 실행해요. |
 | 테스트와 자가 수정 | 프로젝트 검증 명령을 실행하고, 실패 원인을 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
@@ -46,7 +46,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | 사용자와 장비 | 단일 사용자, 단일 Mac |
 | AI 작업자 | Codex만 지원 |
 | 대상 코드 | 사용자가 연결한 로컬 Git 저장소 |
-| 앱 실행·관찰 | iPad Simulator 빌드·실행을 지원하며 화면·접근성·상태 관찰은 아직 지원하지 않음 |
+| 앱 실행·관찰 | iPad Simulator 빌드·실행과 화면 캡처를 지원하며 접근성·내부 상태 관찰은 아직 지원하지 않음 |
 | 변경 반영 | 사람 승인 후 현재 로컬 브랜치에만 적용 |
 | 데이터 저장 | 로컬 SQLite와 Git worktree |
 
@@ -111,7 +111,7 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 4. 추천 검증 명령을 적용하거나 **프로젝트 설정**에서 직접 입력하세요.
 5. **새 작업**을 누르고 목표, 완료 조건, 최대 재시도 횟수를 입력하세요.
 6. 작업 상세 화면에서 **실행**을 누르세요.
-7. 역할별 로그와 테스트 결과를 확인하세요. Build·Run 계약이 있으면 Swift runtime 상태와 실행 기기도 함께 표시돼요.
+7. 역할별 로그와 테스트 결과를 확인하세요. Build·Run 계약이 있으면 Swift runtime 상태와 실행 기기가 표시되고, `observe`에 `screen`이 있으면 화면 증거도 열어볼 수 있어요.
 8. 작업이 **승인 대기** 상태가 되면 변경 파일, 줄 증감, Git patch를 검토하세요.
 9. 변경이 적절하면 **원본에 적용**을 누르세요. 변경을 사용하지 않으려면 worktree를 폐기하세요.
 
@@ -130,7 +130,7 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 | Code | Git이 추적하는 코드를 읽고 수정해요. | 프로젝트를 연결하면 사용 가능 |
 | Build | Swift 앱을 빌드해요. | iOS 계약에서 활성화하면 사용 가능 |
 | Run | 앱을 Simulator에서 실행해요. | Build와 Run을 활성화하고 iPad Simulator가 있으면 사용 가능 |
-| Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
+| Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | `screen`은 사용 가능하며 접근성·상태 연결은 준비 중 |
 | Act | UI를 조작하거나 Debug fixture를 적용해요. | 프로젝트 계약 선언 여부를 진단하며 실제 연결은 준비 중 |
 | Verify | 등록한 명령으로 테스트를 실행해요. | 검증 명령을 저장하면 사용 가능 |
 
@@ -157,7 +157,7 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 
 이 파일에는 셸 명령을 넣을 수 없어요. 지원하는 adapter와 정해진 capability 값만 선언할 수 있고, 크기도 64KB로 제한해요. 파일이 없더라도 기존 코드 작업과 검증 명령은 그대로 사용할 수 있어요.
 
-Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 순서로 실행해요.
+Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 순서로 실행해요. `observe`에 `screen`이 있으면 화면 캡처 단계도 실행해요.
 
 ```text
 격리 worktree의 Xcode container 확인
@@ -165,10 +165,11 @@ Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 
   → 작업 전용 DerivedData에 Debug 앱 빌드
   → bundle identifier와 .app 산출물 검증
   → Simulator 설치·실행
+  → 화면을 PNG로 캡처해 Reviewer에 첨부
   → 기기, bundle identifier, PID를 작업 runtime session에 기록
 ```
 
-사용 가능한 iPad가 없으면 자동으로 기기를 만들지 않고 작업을 실패 상태로 전환해요. Xcode에서 iPad Simulator를 만든 뒤 작업을 다시 실행하세요. 현재는 앱 실행까지만 지원하며 화면 캡처, 접근성 구조, 내부 상태 관찰, UI 조작은 아직 수행하지 않아요.
+사용 가능한 iPad가 없으면 자동으로 기기를 만들지 않고 작업을 실패 상태로 전환해요. Xcode에서 iPad Simulator를 만든 뒤 작업을 다시 실행하세요. 현재는 앱 실행과 단일 화면 캡처를 지원하며 접근성 구조, 내부 상태 관찰, UI 조작은 아직 수행하지 않아요.
 
 ## 실제 앱과 브라우저 미리보기 구분하기
 
@@ -189,7 +190,8 @@ Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 
   → 프로젝트 검증 명령 실행
       ├─ 실패: 원인을 전달하고 정해진 횟수 안에서 다시 구현
       └─ 성공: Build·Run 계약이 있으면 iPad Simulator에 앱 실행
-  → 읽기 전용 Reviewer가 코드와 runtime 결과 검토
+          └─ Observe screen 계약이 있으면 화면 증거 저장
+  → 읽기 전용 Reviewer가 코드, runtime 결과, 첨부 화면 검토
   → 사람의 최종 승인 대기
 ```
 
@@ -199,7 +201,7 @@ Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 
 | Critic | 테스트가 요구사항과 실패 경로를 충분히 검증하는지 평가해요. | 수정하지 않음 |
 | Implementer | 테스트와 프로젝트 규칙을 지키며 기능을 구현해요. | 수정함 |
 | Test Runner | 프로젝트에 등록된 검증 명령을 실행해요. | 수정하지 않음 |
-| Swift Runtime | worktree 앱을 빌드하고 iPad Simulator에 설치·실행해요. | 수정하지 않음 |
+| Swift Runtime | worktree 앱을 빌드하고 iPad Simulator에 설치·실행한 뒤 선언된 화면 증거를 저장해요. | 수정하지 않음 |
 | Reviewer | 최종 diff와 테스트 결과를 검토하고 심각도별 finding을 남겨요. | 수정하지 않음 |
 
 오케스트레이터는 대규모 언어 모델(LLM)이 아니라 코드로 작성한 상태 머신이에요. AI는 역할별 결과를 만들지만, 허용 상태 전이, 재시도 횟수, sandbox, 최종 승인 여부는 앱이 통제해요. 자세한 경계와 상태 전이는 [아키텍처 문서](./docs/architecture.md)에서 확인할 수 있어요.
@@ -223,7 +225,7 @@ python python3 pytest make cmake gradle
 
 ### Swift runtime 명령을 고정해요
 
-runtime manifest에는 명령 문자열을 넣을 수 없어요. 계약은 에이전트가 수정하는 worktree가 아니라 원본 checkout에서 읽어요. AgentMonitoring이 `/usr/bin/xcrun xcodebuild`, `/usr/bin/xcrun simctl`, `/usr/bin/open`을 고정된 인자 배열로 직접 실행해요. Xcode container는 worktree 내부의 실제 디렉터리여야 하고, 빌드된 `.app`도 작업 전용 DerivedData 안에 있을 때만 설치해요.
+runtime manifest에는 명령 문자열을 넣을 수 없어요. 계약은 에이전트가 수정하는 worktree가 아니라 원본 checkout에서 읽어요. AgentMonitoring이 `/usr/bin/xcrun xcodebuild`, `/usr/bin/xcrun simctl`, `/usr/bin/open`을 고정된 인자 배열로 직접 실행해요. Xcode container는 worktree 내부의 실제 디렉터리여야 하고, 빌드된 `.app`과 화면 PNG도 작업 전용 runtime 경로 안에 있을 때만 사용해요.
 
 ### 멈추지 않는 프로세스를 종료해요
 
@@ -236,6 +238,7 @@ runtime manifest에는 명령 문자열을 넣을 수 없어요. 계약은 에�
 | Swift 앱 빌드 | 30분 |
 | 앱 설치 | 2분 |
 | 앱 실행 | 1분 |
+| 화면 캡처 | 30초 |
 
 사용자가 작업을 중단하거나 제한 시간을 넘기면 프로세스 그룹에 `SIGTERM`을 보내요. 3초 안에 종료되지 않으면 `SIGKILL`로 종료해요.
 
@@ -290,11 +293,12 @@ pnpm test:package
 
 Electron의 `userData` 아래에 다음 데이터를 저장해요.
 
-- `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모
+- `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모, runtime session과 화면 증거 메타데이터
 - `worktrees/<project-id>/<task-id>`: 작업별 Git worktree
 - `runtime-sessions/<task-id>/DerivedData`: Swift 작업별 빌드 산출물
+- `runtime-sessions/<task-id>/evidence/*.png`: 작업별 Simulator 화면 증거
 
-AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
+AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. `observe`에 `screen`을 선언하면 캡처한 화면을 최종 Reviewer의 이미지 입력으로 전송해요. 저장소 코드와 화면을 포함해 Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
 
 ## 아직 지원하지 않는 기능
 
@@ -306,7 +310,7 @@ AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우�
 - 원격 팀 협업
 - 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
-- Simulator 화면·접근성 구조·Debug 상태 수집과 UI 조작
+- Simulator 접근성 구조·Debug 상태 수집과 UI 조작
 - runtime 시나리오 기반 자가 수정 루프
 - 앱 자동 업데이트와 코드 서명
 

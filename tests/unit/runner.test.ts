@@ -41,6 +41,7 @@ async function createExecutionFixture(options: {
   makefile?: string
   policy?: ConstructorParameters<typeof AgentRunner>[5]
   withRuntimeManifest?: boolean
+  withScreenObservation?: boolean
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -74,7 +75,7 @@ async function createExecutionFixture(options: {
         capabilities: {
           build: true,
           run: true,
-          observe: [],
+          observe: options.withScreenObservation ? ['screen'] : [],
           act: [],
           verify: ['test-command']
         }
@@ -367,17 +368,29 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
   it('launches and persists an iPad runtime only when the project contract enables it', async () => {
     const launchedWorktrees: string[] = []
     const stoppedBundles: string[] = []
+    let screenEvidencePath = ''
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
         launchedWorktrees.push(input.worktreePath)
+        expect(input.captureScreen).toBe(true)
         input.onProgress('booting', 'iPad 부팅')
         input.onProgress('building', 'Swift 앱 빌드')
+        const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')
+        await mkdir(evidenceDirectory, { recursive: true })
+        screenEvidencePath = join(evidenceDirectory, 'screen-fixture.png')
+        await writeFile(screenEvidencePath, 'fixture-png')
         return {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',
           bundleIdentifier: 'com.example.App',
           processId: 4242,
-          appPath: join(input.runtimeRoot, input.taskId, 'App.app')
+          appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+          screenEvidence: {
+            path: screenEvidencePath,
+            mimeType: 'image/png',
+            sizeBytes: 11,
+            capturedAt: new Date().toISOString()
+          }
         }
       },
       stop: async ({ session }) => {
@@ -385,11 +398,14 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       }
     }
     const fixture = await createExecutionFixture({
-      codexSource: () => `#!/usr/bin/env node
+      codexSource: (directory) => `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(join(directory, 'codex-argv.jsonl'))}, JSON.stringify(process.argv.slice(2)) + '\\n')
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `,
       withRuntimeManifest: true,
+      withScreenObservation: true,
       runtimeAdapter
     })
 
@@ -405,6 +421,21 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       processId: 4242
     })
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_ready')).toBe(true)
+    expect(fixture.store.getSnapshot(task.projectId).runtimeEvidence).toMatchObject([
+      {
+        taskId: task.id,
+        kind: 'screen',
+        path: screenEvidencePath,
+        mimeType: 'image/png',
+        sizeBytes: 11
+      }
+    ])
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_observed')).toBe(true)
+    const codexCalls = (await readFile(join(fixture.directory, 'codex-argv.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[])
+    expect(codexCalls.at(-1)).toEqual(expect.arrayContaining(['--image', screenEvidencePath]))
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App'])
@@ -416,6 +447,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const stoppedBundles: string[] = []
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
+        expect(input.captureScreen).toBe(false)
         input.onProgress('launching', 'fixture 앱 실행 중', {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',
@@ -493,10 +525,14 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
   it('removes managed worktrees and monitoring data without deleting the source repository', async () => {
     const fixture = await createApprovalFixture()
+    const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(join(runtimeSessionPath, 'evidence', 'screen.png'), 'fixture-png')
 
     await fixture.runner.removeProject(fixture.store.getTask(fixture.taskId).projectId)
 
     await expect(stat(fixture.worktreePath)).rejects.toThrow()
+    await expect(stat(runtimeSessionPath)).rejects.toThrow()
     expect((await stat(fixture.repository)).isDirectory()).toBe(true)
     expect(fixture.store.getSnapshot().projects).toEqual([])
     fixture.store.close()
