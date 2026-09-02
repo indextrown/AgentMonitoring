@@ -64,14 +64,17 @@ export interface IosSimulatorRuntimeAdapter {
   stop: (input: IosSimulatorStopInput) => Promise<void>
 }
 
-interface SimulatorDevice {
+export interface SimulatorDevice {
   runtime: string
   udid: string
   name: string
   state: string
   isAvailable: boolean
   lastBootedAt: string | null
+  deviceTypeIdentifier: string | null
 }
+
+export type IosSimulatorDeviceFamily = ProjectCapabilityManifest['adapter']['deviceFamily']
 
 interface XcodeBuildSettingsEntry {
   target?: string
@@ -109,7 +112,10 @@ function parseJson(source: string, label: string): unknown {
   }
 }
 
-export function parseAvailableIPadDevices(source: string): SimulatorDevice[] {
+export function parseAvailableSimulatorDevices(
+  source: string,
+  family: IosSimulatorDeviceFamily
+): SimulatorDevice[] {
   const payload = parseJson(source, 'Simulator 기기 목록') as {
     devices?: Record<string, Array<Record<string, unknown>>>
   }
@@ -120,12 +126,23 @@ export function parseAvailableIPadDevices(source: string): SimulatorDevice[] {
       name: String(entry.name ?? ''),
       state: String(entry.state ?? ''),
       isAvailable: entry.isAvailable !== false,
-      lastBootedAt: entry.lastBootedAt ? String(entry.lastBootedAt) : null
+      lastBootedAt: entry.lastBootedAt ? String(entry.lastBootedAt) : null,
+      deviceTypeIdentifier: entry.deviceTypeIdentifier
+        ? String(entry.deviceTypeIdentifier)
+        : null
     }))
   )
 
   return devices
-    .filter((device) => device.isAvailable && device.udid && device.name.toLowerCase().includes('ipad'))
+    .filter((device) => {
+      const deviceTypeIdentifier = device.deviceTypeIdentifier?.toLowerCase() ?? ''
+      const deviceName = device.name.toLowerCase()
+      return (
+        device.isAvailable &&
+        device.udid &&
+        (deviceTypeIdentifier.includes(`.${family}-`) || deviceName.startsWith(family))
+      )
+    })
     .sort((left, right) => {
       const booted = Number(right.state === 'Booted') - Number(left.state === 'Booted')
       if (booted !== 0) return booted
@@ -227,7 +244,11 @@ function wait(milliseconds: number): Promise<void> {
 export async function launchIosSimulatorRuntime(
   input: IosSimulatorLaunchInput
 ): Promise<IosSimulatorLaunchResult> {
-  input.onProgress('preparing', 'iPad Simulator runtime 계약과 worktree를 확인하고 있습니다.')
+  const deviceFamilyLabel = input.contract.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
+  input.onProgress(
+    'preparing',
+    `${deviceFamilyLabel} Simulator runtime 계약과 worktree를 확인하고 있습니다.`
+  )
   const worktreePath = await realpath(input.worktreePath)
   const containerPath = await requireContainedDirectory(worktreePath, input.contract.container, 'Xcode container')
   await mkdir(resolve(input.runtimeRoot), { recursive: true })
@@ -260,11 +281,11 @@ export async function launchIosSimulatorRuntime(
     },
     'preparing'
   )
-  const device = parseAvailableIPadDevices(deviceList.stdout)[0]
+  const device = parseAvailableSimulatorDevices(deviceList.stdout, input.contract.deviceFamily)[0]
   if (!device) {
     throw new IosRuntimeStageError(
       'preparing',
-      '사용 가능한 iPad Simulator가 없습니다. Xcode에서 iPad Simulator 기기를 만든 뒤 다시 실행하세요.'
+      `사용 가능한 ${deviceFamilyLabel} Simulator가 없습니다. Xcode에서 ${deviceFamilyLabel} Simulator 기기를 만든 뒤 다시 실행하세요.`
     )
   }
 
@@ -310,7 +331,10 @@ export async function launchIosSimulatorRuntime(
     derivedDataPath
   ]
 
-  input.onProgress('building', `${input.contract.scheme} Debug 앱을 격리 worktree에서 빌드하고 있습니다.`)
+  input.onProgress(
+    'building',
+    `${input.contract.scheme} ${input.contract.configuration} 앱을 격리 worktree에서 빌드하고 있습니다.`
+  )
   await executeRequired(
     input.execute,
     {

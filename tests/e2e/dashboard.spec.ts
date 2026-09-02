@@ -31,7 +31,7 @@ test('opens search and task detail interactions', async ({ page }) => {
 })
 
 test('shows the task-scoped Swift runtime session target', async ({ page }) => {
-  await page.goto('/?runtime=running')
+  await page.goto('/?runtime=running&device=iphone')
   await page.locator('.search-trigger').click()
   await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
   await page.locator('.search-results button').first().click()
@@ -39,7 +39,7 @@ test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   const runtime = page.locator('.runtime-session')
   await expect(runtime.getByText('Swift runtime')).toBeVisible()
   await expect(runtime.getByText('실행 중')).toBeVisible()
-  await expect(runtime.getByText('iPad Pro 13-inch', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('iPhone 16 Pro', { exact: true })).toBeVisible()
   await expect(runtime.getByText('com.example.ElmwoodOnline', { exact: true })).toBeVisible()
   await expect(runtime.getByText('PID 43120', { exact: true })).toBeVisible()
   await expect(runtime.getByRole('button', { name: /Simulator 화면 증거/ })).toContainText('1.2 MB')

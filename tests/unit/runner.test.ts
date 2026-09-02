@@ -373,6 +373,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       launch: async (input) => {
         launchedWorktrees.push(input.worktreePath)
         expect(input.captureScreen).toBe(true)
+        expect(input.contract.deviceFamily).toBe('ipad')
         input.onProgress('booting', 'iPad 부팅')
         input.onProgress('building', 'Swift 앱 빌드')
         const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')

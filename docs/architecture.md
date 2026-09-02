@@ -17,7 +17,7 @@ Electron main
           ├── Codex app-server auth adapter
           ├── Codex CLI execution adapter
           ├── 허용 목록 기반 test runner
-          └── iPad Simulator runtime adapter
+          └── iPad·iPhone Simulator runtime adapter
 ```
 
 Renderer에는 Node.js 권한이 없다. 파일 선택, 외부 경로 열기, 데이터 변경, 프로세스 실행은 preload가 공개한 제한된 IPC를 통해서만 요청한다.
@@ -27,7 +27,7 @@ Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되�
 
 작업 이력이 없는 프로젝트를 선택하면 Renderer가 제한된 `project:inspect` IPC를 호출한다. `ProjectInspector`는 Git 명령으로 현재 브랜치, commit, remote, clean/dirty 상태와 tracked 파일 목록을 읽는다. 변경 상태는 폴더 단위로 축약하지 않고 파일별로 수집해 수정·추가·삭제·이름 변경·미추적·충돌로 분류하며, Renderer에는 종류별 개수와 최대 5개의 경로를 제공한다. 파일 확장자와 알려진 manifest 이름만으로 언어·도구·검증 명령 후보를 계산한다.
 
-프로젝트 루트에 `.agentmonitor/project.json`이 있으면 `ProjectCapabilityInspector`가 최대 64KB의 해당 파일만 추가로 읽는다. Zod의 strict schema로 version, iOS Simulator adapter, Xcode container·scheme, 선언된 capability를 검증하며 임의 명령이나 알 수 없는 필드는 허용하지 않는다. manifest 자체가 심볼릭 링크이거나 저장소 외부 Xcode container 경로를 가리키면 유효하지 않은 계약으로 처리한다. 오류는 프로젝트 검사 전체를 실패시키지 않고 Renderer에 진단 상태로 전달한다.
+프로젝트 루트에 `.agentmonitor/project.json`이 있으면 `ProjectCapabilityInspector`가 최대 64KB의 해당 파일만 추가로 읽는다. Zod의 strict schema로 version, iOS Simulator adapter, Xcode container·scheme, iPad·iPhone 기기군, 선언된 capability를 검증하며 임의 명령이나 알 수 없는 필드는 허용하지 않는다. `deviceFamily`를 생략한 기존 계약은 iPad를 기본값으로 사용한다. manifest 자체가 심볼릭 링크이거나 저장소 외부 Xcode container 경로를 가리키면 유효하지 않은 계약으로 처리한다. 오류는 프로젝트 검사 전체를 실패시키지 않고 Renderer에 진단 상태로 전달한다.
 
 Renderer는 다음 상태를 구분한다.
 
@@ -62,7 +62,7 @@ awaiting_approval/failed/stopped → discarded
 | Critic | read-only | 없음 | 테스트 공백과 약화 가능성 검토 |
 | Implementer | workspace-write | 제품 코드 | 목표 구현과 테스트 실패 수정 |
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
-| Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad Simulator 설치·실행, 선언된 화면 캡처 |
+| Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, 선택한 iPad·iPhone Simulator 설치·실행, 선언된 화면 캡처 |
 | Reviewer | read-only | 없음 | diff, runtime 화면, 회귀, 보안, 테스트 공백 보고 |
 | Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
 
@@ -73,7 +73,7 @@ AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있
 ```text
 원본 프로젝트의 선언형 계약 읽기
   → worktree 내부 Xcode container 실경로 확인
-  → `simctl list devices available --json`에서 iPad 선택
+  → `simctl list devices available --json`에서 `deviceFamily`에 맞는 iPad 또는 iPhone 선택
   → `simctl bootstatus <udid> -b`
   → 작업별 DerivedData로 `xcodebuild ... build`
   → build settings에서 앱 경로와 bundle identifier 확인
@@ -87,7 +87,7 @@ AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있
 
 runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `observing`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다. 화면 증거 메타데이터는 별도 레코드로 보존해 작업 상세에서 파일을 열 수 있다.
 
-사용 가능한 iPad가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면 캡처가 실패해도 runtime 실패로 처리하며 단계와 원인을 기록한다. 접근성 구조 수집은 이 adapter의 후속 단계다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다. 프로젝트 연결을 삭제하면 해당 프로젝트 작업의 정확한 runtime session 경로도 함께 제거한다.
+선택한 기기군에 사용 가능한 Simulator가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면 캡처가 실패해도 runtime 실패로 처리하며 단계와 원인을 기록한다. 접근성 구조 수집은 이 adapter의 후속 단계다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다. 프로젝트 연결을 삭제하면 해당 프로젝트 작업의 정확한 runtime session 경로도 함께 제거한다.
 
 ## Git 격리
 
@@ -123,7 +123,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 검증 명령 제한 시간 초과: 45분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
 - Swift runtime 실패: 실패 단계를 session과 `runtime_failed` 이벤트에 기록하고 작업을 `failed`로 전환한다.
 - 화면 캡처 실패: `observing` 단계 실패로 기록하고 실행 중인 관리 대상 앱을 정리한다.
-- 사용 가능한 iPad 없음: 새 기기를 만들지 않고 Xcode에서 기기를 준비하도록 안내한다.
+- 선택한 iPad·iPhone 기기군이 없음: 새 기기를 만들지 않고 Xcode에서 해당 기기를 준비하도록 안내한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
 - 재시도 한도 초과: 작업을 `failed`로 전환한다.

@@ -128,7 +128,8 @@ describe('inspectProject', () => {
           kind: 'ios-simulator',
           container: 'PopPang.xcworkspace',
           scheme: 'PopPang',
-          configuration: 'Debug'
+          configuration: 'Debug',
+          deviceFamily: 'iphone'
         },
         capabilities: {
           build: true,
@@ -160,7 +161,7 @@ describe('inspectProject', () => {
       path: '.agentmonitor/project.json',
       state: 'valid',
       adapterKind: 'ios-simulator',
-      message: 'PopPang.xcworkspace · PopPang · Debug'
+      message: 'PopPang.xcworkspace · PopPang · Debug · iPhone'
     })
     expect(inspection.capabilities.map(({ key, status }) => ({ key, status }))).toEqual([
       { key: 'code', status: 'ready' },
@@ -170,6 +171,9 @@ describe('inspectProject', () => {
       { key: 'act', status: 'declared' },
       { key: 'verify', status: 'ready' }
     ])
+    expect(inspection.capabilities.find(({ key }) => key === 'run')?.detail).toBe(
+      'iPhone Simulator 실행 adapter 사용 가능'
+    )
   })
 
   it('reports invalid capability contracts without failing repository inspection', async () => {

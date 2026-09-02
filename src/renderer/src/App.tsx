@@ -1533,7 +1533,7 @@ function TaskDrawer({
             <div className="runtime-session-target">
               <SquareTerminal size={15} />
               <div>
-                <strong>{runtime.deviceName ?? 'iPad Simulator 확인 중'}</strong>
+                <strong>{runtime.deviceName ?? 'iOS Simulator 확인 중'}</strong>
                 <small>{runtime.bundleIdentifier ?? '앱 산출물 확인 전'}</small>
               </div>
               {runtime.processId && <code>PID {runtime.processId}</code>}

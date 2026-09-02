@@ -32,7 +32,8 @@ export const projectCapabilityManifestSchema = z
         kind: z.literal('ios-simulator'),
         container: relativeXcodeContainerSchema,
         scheme: z.string().trim().min(1).max(128),
-        configuration: z.literal('Debug').default('Debug')
+        configuration: z.literal('Debug').default('Debug'),
+        deviceFamily: z.enum(['ipad', 'iphone']).default('ipad')
       })
       .strict(),
     capabilities: z
@@ -183,6 +184,7 @@ export async function inspectProjectCapabilities(
   }
 
   const { adapter, capabilities } = result.value
+  const deviceFamilyLabel = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
   const observeLabels = { screen: '화면', accessibility: '접근성', state: '앱 상태' } as const
   const actLabels = { ui: 'UI', fixture: 'fixture' } as const
   const verifyLabels = { 'test-command': '검증 명령', 'runtime-scenario': '실행 시나리오' } as const
@@ -192,7 +194,7 @@ export async function inspectProjectCapabilities(
       path: PROJECT_CAPABILITY_MANIFEST_PATH,
       state: 'valid',
       adapterKind: adapter.kind,
-      message: `${adapter.container} · ${adapter.scheme} · ${adapter.configuration}`
+      message: `${adapter.container} · ${adapter.scheme} · ${adapter.configuration} · ${deviceFamilyLabel}`
     },
     capabilities: [
       code,
@@ -200,7 +202,7 @@ export async function inspectProjectCapabilities(
         ? readyCapability('build', `${adapter.scheme} Debug 빌드 adapter 사용 가능`)
         : missingCapability('build', 'build가 비활성화되어 있습니다.'),
       capabilities.run
-        ? readyCapability('run', 'iPad Simulator 실행 adapter 사용 가능')
+        ? readyCapability('run', `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능`)
         : missingCapability('run', 'run이 비활성화되어 있습니다.'),
       capabilities.observe.includes('screen')
         ? readyCapability(

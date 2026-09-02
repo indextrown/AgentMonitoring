@@ -409,7 +409,7 @@ export class AgentRunner {
             ? `Swift runtime 결과:\n${runtimeResult.summary}`
             : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
           runtimeResult?.evidencePaths.length
-            ? '첨부된 이미지는 이 작업이 실행한 iPad Simulator의 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
+            ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
             : '',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
           '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',

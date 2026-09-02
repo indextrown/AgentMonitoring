@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   launchIosSimulatorRuntime,
-  parseAvailableIPadDevices,
+  parseAvailableSimulatorDevices,
   type RuntimeCommandRequest
 } from '../../electron/main/ios-simulator-runtime'
 
@@ -15,7 +15,7 @@ afterEach(async () => {
 })
 
 describe('iOS Simulator runtime adapter', () => {
-  it('selects an iPad and builds, installs, and launches the worktree app', async () => {
+  it('selects the configured iPhone and builds, installs, and launches the worktree app', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-ios-runtime-'))
     temporaryDirectories.push(directory)
     const worktree = join(directory, 'worktree')
@@ -38,13 +38,13 @@ describe('iOS Simulator runtime adapter', () => {
                 {
                   udid: 'IPAD-UDID',
                   name: 'iPad Pro 13-inch',
-                  state: 'Shutdown',
+                  state: 'Booted',
                   isAvailable: true
                 },
                 {
                   udid: 'IPHONE-UDID',
                   name: 'iPhone 16 Pro',
-                  state: 'Booted',
+                  state: 'Shutdown',
                   isAvailable: true
                 }
               ]
@@ -107,7 +107,8 @@ describe('iOS Simulator runtime adapter', () => {
         kind: 'ios-simulator',
         container: 'PopPang.xcworkspace',
         scheme: 'PopPang',
-        configuration: 'Debug'
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
       },
       captureScreen: true,
       execute,
@@ -119,8 +120,8 @@ describe('iOS Simulator runtime adapter', () => {
     })
 
     expect(result).toMatchObject({
-      deviceId: 'IPAD-UDID',
-      deviceName: 'iPad Pro 13-inch',
+      deviceId: 'IPHONE-UDID',
+      deviceName: 'iPhone 16 Pro',
       bundleIdentifier: 'com.example.PopPang',
       processId: 4242,
       screenEvidence: {
@@ -132,34 +133,34 @@ describe('iOS Simulator runtime adapter', () => {
     expect(progress).toEqual(['preparing', 'booting', 'building', 'installing', 'launching', 'observing'])
     expect(progressUpdates).toEqual([
       {},
-      { deviceId: 'IPAD-UDID', deviceName: 'iPad Pro 13-inch' },
+      { deviceId: 'IPHONE-UDID', deviceName: 'iPhone 16 Pro' },
       {},
       {
-        deviceId: 'IPAD-UDID',
-        deviceName: 'iPad Pro 13-inch',
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
         bundleIdentifier: 'com.example.PopPang'
       },
       {
-        deviceId: 'IPAD-UDID',
-        deviceName: 'iPad Pro 13-inch',
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
         bundleIdentifier: 'com.example.PopPang'
       },
       {
-        deviceId: 'IPAD-UDID',
-        deviceName: 'iPad Pro 13-inch',
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
         bundleIdentifier: 'com.example.PopPang'
       }
     ])
     const resolvedWorktree = await realpath(worktree)
     expect(commands.map((request) => [request.command, ...request.args.slice(0, 3)])).toEqual([
       ['/usr/bin/xcrun', 'simctl', 'list', 'devices'],
-      ['/usr/bin/xcrun', 'simctl', 'bootstatus', 'IPAD-UDID'],
+      ['/usr/bin/xcrun', 'simctl', 'bootstatus', 'IPHONE-UDID'],
       ['/usr/bin/open', '-a', 'Simulator', '--args'],
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
-      ['/usr/bin/xcrun', 'simctl', 'install', 'IPAD-UDID'],
+      ['/usr/bin/xcrun', 'simctl', 'install', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
-      ['/usr/bin/xcrun', 'simctl', 'io', 'IPAD-UDID']
+      ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID']
     ])
   })
 
@@ -178,7 +179,8 @@ describe('iOS Simulator runtime adapter', () => {
           kind: 'ios-simulator',
           container: 'PopPang.xcodeproj',
           scheme: 'PopPang',
-          configuration: 'Debug'
+          configuration: 'Debug',
+          deviceFamily: 'ipad'
         },
         captureScreen: false,
         execute: async () => ({
@@ -215,7 +217,8 @@ describe('iOS Simulator runtime adapter', () => {
           kind: 'ios-simulator',
           container: 'PopPang.xcworkspace',
           scheme: 'PopPang',
-          configuration: 'Debug'
+          configuration: 'Debug',
+          deviceFamily: 'ipad'
         },
         captureScreen: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
@@ -245,7 +248,8 @@ describe('iOS Simulator runtime adapter', () => {
           kind: 'ios-simulator',
           container: 'PopPang.xcodeproj',
           scheme: 'PopPang',
-          configuration: 'Debug'
+          configuration: 'Debug',
+          deviceFamily: 'ipad'
         },
         captureScreen: false,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
@@ -255,7 +259,7 @@ describe('iOS Simulator runtime adapter', () => {
   })
 
   it('prefers a booted iPad before newer shutdown devices', () => {
-    const devices = parseAvailableIPadDevices(
+    const devices = parseAvailableSimulatorDevices(
       JSON.stringify({
         devices: {
           'runtime-27': [
@@ -265,9 +269,40 @@ describe('iOS Simulator runtime adapter', () => {
             { udid: 'BOOTED', name: 'iPad Pro', state: 'Booted', isAvailable: true }
           ]
         }
-      })
+      }),
+      'ipad'
     )
 
     expect(devices.map((device) => device.udid)).toEqual(['BOOTED', 'NEW'])
+  })
+
+  it('uses device type identifiers to separate iPhone and iPad families', () => {
+    const source = JSON.stringify({
+      devices: {
+        runtime: [
+          {
+            udid: 'PHONE',
+            name: 'Custom phone name',
+            state: 'Shutdown',
+            isAvailable: true,
+            deviceTypeIdentifier: 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro'
+          },
+          {
+            udid: 'TABLET',
+            name: 'Custom tablet name',
+            state: 'Booted',
+            isAvailable: true,
+            deviceTypeIdentifier: 'com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB'
+          }
+        ]
+      }
+    })
+
+    expect(parseAvailableSimulatorDevices(source, 'iphone').map((device) => device.udid)).toEqual([
+      'PHONE'
+    ])
+    expect(parseAvailableSimulatorDevices(source, 'ipad').map((device) => device.udid)).toEqual([
+      'TABLET'
+    ])
   })
 })

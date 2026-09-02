@@ -20,6 +20,9 @@ function atOffset(days: number, hours: number, minutes = 0): string {
 }
 
 function buildSnapshot(): DashboardSnapshot {
+  const runtimeDeviceName = searchParams.get('device') === 'iphone'
+    ? 'iPhone 16 Pro'
+    : 'iPad Pro 13-inch'
   const projects: ProjectRecord[] = [
     {
       id: projectId,
@@ -130,10 +133,10 @@ function buildSnapshot(): DashboardSnapshot {
           status: 'running' as const,
           adapterKind: 'ios-simulator' as const,
           deviceId: '00000000-0000-0000-0000-000000000001',
-          deviceName: 'iPad Pro 13-inch',
+          deviceName: runtimeDeviceName,
           bundleIdentifier: 'com.example.ElmwoodOnline',
           processId: 43120,
-          message: 'iPad Pro 13-inch에서 com.example.ElmwoodOnline 실행 완료 · PID 43120',
+          message: `${runtimeDeviceName}에서 com.example.ElmwoodOnline 실행 완료 · PID 43120`,
           startedAt: atOffset(0, 8, 30),
           updatedAt: atOffset(0, 8, 58)
         }
@@ -281,6 +284,7 @@ export const demoBridge: AgentMonitoringBridge = {
     const dirty = connected && searchParams.get('inspection') === 'dirty'
     const hasTestCommand = Boolean(project.testCommand.trim())
     const hasIosContract = connected && searchParams.get('contract') === 'ios'
+    const deviceFamilyLabel = searchParams.get('device') === 'iphone' ? 'iPhone' : 'iPad'
     const dirtyFiles = [0, 1, 2, 3, 4].map((index) => ({
       kind: 'untracked' as const,
       path: `fastlane/screenshots/ko/${index}_APP_IPHONE_65_${index}.png`
@@ -314,7 +318,7 @@ export const demoBridge: AgentMonitoringBridge = {
             path: '.agentmonitor/project.json',
             state: 'valid' as const,
             adapterKind: 'ios-simulator' as const,
-            message: 'PopPang.xcworkspace · PopPang · Debug'
+            message: `PopPang.xcworkspace · PopPang · Debug · ${deviceFamilyLabel}`
           }
         : {
             path: '.agentmonitor/project.json',
@@ -332,7 +336,7 @@ export const demoBridge: AgentMonitoringBridge = {
           ? { key: 'build' as const, status: 'ready' as const, detail: 'PopPang Debug 빌드 adapter 사용 가능' }
           : { key: 'build' as const, status: 'missing' as const, detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
         hasIosContract
-          ? { key: 'run' as const, status: 'ready' as const, detail: 'iPad Simulator 실행 adapter 사용 가능' }
+          ? { key: 'run' as const, status: 'ready' as const, detail: `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능` }
           : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
         hasIosContract
           ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 사용 가능 · 접근성 · 앱 상태 연결 예정' }
