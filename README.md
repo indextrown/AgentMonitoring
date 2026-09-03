@@ -34,6 +34,7 @@ Swift 프로젝트에 runtime 계약을 추가하면 코드뿐 아니라 iPhone�
 - [에이전트 역할](#에이전트-역할)
 - [실행 안전장치](#실행-안전장치)
 - [개발하고 검증하기](#개발하고-검증하기)
+- [사용 예시](./docs/사용예시.md)
 
 ## 지금 제공하는 기능
 
@@ -190,12 +191,14 @@ Swift runtime은 선택 기능이에요. `.agentmonitor/project.json`이 없어�
     "assertions": [
       {
         "kind": "accessibility",
+        "name": "시작 버튼 활성화",
         "identifier": "start-navigation",
         "property": "enabled",
         "expected": true
       },
       {
         "kind": "evidence",
+        "name": "최종 화면 저장",
         "target": "screen"
       }
     ]
@@ -271,12 +274,14 @@ Swift runtime은 선택 기능이에요. `.agentmonitor/project.json`이 없어�
       },
       {
         "kind": "accessibility",
+        "name": "시작 버튼 활성화",
         "identifier": "start-navigation",
         "property": "enabled",
         "expected": true
       },
       {
         "kind": "evidence",
+        "name": "최종 화면 저장",
         "target": "screen"
       }
     ]
