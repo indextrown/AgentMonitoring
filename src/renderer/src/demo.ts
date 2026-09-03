@@ -30,6 +30,16 @@ function buildSnapshot(): DashboardSnapshot {
       name: 'ElmwoodOnline',
       path: `demo://${projectId}`,
       testCommand: '',
+      runtimeAdapter: searchParams.get('contract') === 'ios'
+        ? {
+            kind: 'ios-simulator',
+            container: 'ElmwoodOnline.xcodeproj',
+            scheme: 'ElmwoodOnline',
+            configuration: 'Debug',
+            deviceFamily: searchParams.get('device') === 'ipad' ? 'ipad' : 'iphone'
+          }
+        : null,
+      runtimeConfigSource: searchParams.get('contract') === 'ios' ? 'detected' : null,
       isDemo: true,
       createdAt: atOffset(-30, 9)
     },
@@ -38,6 +48,8 @@ function buildSnapshot(): DashboardSnapshot {
       name: 'AgentMonitoring',
       path: `demo://${secondaryProjectId}`,
       testCommand: '',
+      runtimeAdapter: null,
+      runtimeConfigSource: null,
       isDemo: true,
       createdAt: atOffset(-10, 9)
     }
@@ -61,6 +73,9 @@ function buildSnapshot(): DashboardSnapshot {
       attempt: index === 31 && runtimeRunning ? 2 : 1,
       branchName: null,
       worktreePath: null,
+      runtimeContract: null,
+      runtimeScenarioSummary: null,
+      runtimeScenarioApprovedAt: null,
       createdAt,
       updatedAt: new Date(new Date(createdAt).getTime() + 62 * 60 * 1000).toISOString()
     }
@@ -353,11 +368,22 @@ export const demoBridge: AgentMonitoringBridge = {
   },
   addProject: async () => {
     const now = new Date().toISOString()
+    const hasIosRuntime = searchParams.get('contract') === 'ios'
     const project: ProjectRecord = {
       id: crypto.randomUUID(),
       name: 'ConnectedRepository',
       path: 'demo://connected-repository',
       testCommand: '',
+      runtimeAdapter: hasIosRuntime
+        ? {
+            kind: 'ios-simulator',
+            container: 'ConnectedRepository.xcodeproj',
+            scheme: 'ConnectedRepository',
+            configuration: 'Debug',
+            deviceFamily: searchParams.get('device') === 'ipad' ? 'ipad' : 'iphone'
+          }
+        : null,
+      runtimeConfigSource: hasIosRuntime ? 'detected' : null,
       isDemo: false,
       createdAt: now
     }
@@ -371,7 +397,13 @@ export const demoBridge: AgentMonitoringBridge = {
       ...state,
       projects: state.projects.map((project) => {
         if (project.id !== input.projectId) return project
-        updated = { ...project, name: input.name, testCommand: input.testCommand }
+        updated = {
+          ...project,
+          name: input.name,
+          testCommand: input.testCommand,
+          runtimeAdapter: input.runtimeAdapter,
+          runtimeConfigSource: input.runtimeAdapter ? 'detected' : null
+        }
         return updated
       })
     }
@@ -454,6 +486,36 @@ export const demoBridge: AgentMonitoringBridge = {
       inspectedAt: new Date().toISOString()
     }
   },
+  generateRuntimeScenario: async (input) => {
+    const project = state.projects.find((item) => item.id === input.projectId)
+    if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
+    return {
+      summary: '입력한 항목을 추가하고 목록에 표시되는지 확인합니다.',
+      contract: {
+        version: 1,
+        adapter: project.runtimeAdapter,
+        capabilities: {
+          build: true,
+          run: true,
+          observe: ['screen', 'accessibility'],
+          act: ['ui'],
+          verify: ['test-command', 'runtime-scenario']
+        },
+        runtimeScenario: {
+          actions: [
+            { kind: 'type-text', identifier: 'item-input', text: '우유', timeoutSeconds: 10 },
+            { kind: 'tap', identifier: 'add-item', timeoutSeconds: 10 }
+          ],
+          assertions: [
+            { kind: 'accessibility', name: '추가한 항목 표시', identifier: 'item-row', property: 'exists', expected: true },
+            { kind: 'evidence', name: '최종 화면 저장', target: 'screen' },
+            { kind: 'evidence', name: '접근성 트리 저장', target: 'accessibility' },
+            { kind: 'evidence', name: 'UI 조작 결과 저장', target: 'ui-actions' }
+          ]
+        }
+      }
+    }
+  },
   removeProject: async (projectIdToRemove) => {
     const projects = state.projects.filter((project) => project.id !== projectIdToRemove)
     state = {
@@ -481,6 +543,9 @@ export const demoBridge: AgentMonitoringBridge = {
       attempt: 0,
       branchName: null,
       worktreePath: null,
+      runtimeContract: input.runtimeContract ?? null,
+      runtimeScenarioSummary: input.runtimeScenarioSummary ?? null,
+      runtimeScenarioApprovedAt: input.runtimeContract ? now : null,
       createdAt: now,
       updatedAt: now
     }

@@ -13,7 +13,7 @@ import {
   type IosSimulatorRuntimeAdapter,
   type RuntimeCommandRequest
 } from './ios-simulator-runtime'
-import { readProjectCapabilityManifest } from './project-capabilities'
+import { projectCapabilityManifestSchema, readProjectCapabilityManifest } from './project-capabilities'
 import {
   evaluateRuntimeAcceptance,
   summarizeRuntimeAcceptance,
@@ -173,6 +173,17 @@ function eventMessage(payload: Record<string, unknown>): string | null {
     if (item.type === 'file_change') return '파일 변경을 적용했습니다.'
   }
   return null
+}
+
+function runtimeContractPrompt(task: TaskRecord): string {
+  if (!task.runtimeContract) return '이 작업에는 별도로 승인된 Simulator 검증 시나리오가 없습니다.'
+  return [
+    '아래 JSON은 사람이 작업 등록 전에 승인한 고정 Simulator 검증 계약입니다.',
+    '계약의 accessibility identifier를 제품 코드에 구현하되, 계약 자체를 수정하거나 검증을 우회하지 마세요.',
+    '```json',
+    JSON.stringify(task.runtimeContract, null, 2),
+    '```'
+  ].join('\n')
 }
 
 export class AgentRunner {
@@ -335,6 +346,7 @@ export class AgentRunner {
       const worktreePath = await this.prepareWorktree(task)
       task = this.store.transitionTask(taskId, 'running', 1)
       this.emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
+      const approvedRuntimeContract = runtimeContractPrompt(task)
 
       const testDesign = await this.runCodexStage(
         task,
@@ -346,6 +358,7 @@ export class AgentRunner {
           '당신은 테스트 설계자입니다. 프로덕션 구현은 수정하지 마세요.',
           '기존 테스트 구조를 확인하고 이 목표의 성공·실패·경계 조건을 검증하는 테스트만 추가하거나 보완하세요.',
           '테스트를 만들 수 없다면 이유와 필요한 테스트 훅을 최종 메시지에 기록하세요.',
+          approvedRuntimeContract,
           '커밋, push, merge는 하지 마세요.'
         ].join('\n\n')
       )
@@ -389,6 +402,7 @@ export class AgentRunner {
             `작업 목표: ${task.prompt}`,
             '당신은 구현 담당자입니다. 현재 테스트와 프로젝트 규칙을 지키며 목표를 완성하세요.',
             '테스트를 삭제하거나 약화하지 마세요. 관련 없는 파일은 수정하지 마세요.',
+            approvedRuntimeContract,
             '변경 후 프로젝트에 맞는 검증을 실행하세요. 커밋, push, merge는 하지 마세요.',
             `테스트 비평가 보고:\n${critique.finalMessage || '보고 없음'}`,
             repairContext
@@ -426,7 +440,7 @@ export class AgentRunner {
             repairContext = [
               '직전 runtime acceptance 검증이 실패했습니다.',
               '아래 증거에서 기대값과 실제값의 차이를 찾아 제품 코드를 수정하세요.',
-              '합격 조건은 원본 checkout의 manifest에서 다시 읽으므로 assertion을 수정하거나 약화하지 마세요.',
+              '합격 조건은 작업 등록 때 승인된 스냅샷에서 다시 읽으므로 assertion을 수정하거나 약화하지 마세요.',
               error.repairContext
             ].join('\n\n')
             repairImagePaths = error.imagePaths
@@ -470,6 +484,7 @@ export class AgentRunner {
           `작업 목표: ${task.prompt}`,
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+          approvedRuntimeContract,
           runtimeResult
             ? [
                 `Swift runtime 결과:\n${runtimeResult.summary}`,
@@ -777,7 +792,9 @@ export class AgentRunner {
     control: ActiveRun,
     runId: string
   ): Promise<RuntimeRunResult | null> {
-    const manifest = await readProjectCapabilityManifest(project.path)
+    const manifest = task.runtimeContract
+      ? { state: 'valid' as const, value: projectCapabilityManifestSchema.parse(task.runtimeContract) }
+      : await readProjectCapabilityManifest(project.path)
     if (manifest.state === 'missing') return null
     if (manifest.state === 'invalid') {
       this.emit(

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
+  ApprovedRuntimeContract,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -24,6 +25,8 @@ const projectColumns = `
   name,
   path,
   test_command AS testCommand,
+  runtime_adapter_json AS runtimeAdapterJson,
+  runtime_config_source AS runtimeConfigSource,
   is_demo AS isDemo,
   created_at AS createdAt
 `
@@ -39,6 +42,9 @@ const taskColumns = `
   attempt,
   branch_name AS branchName,
   worktree_path AS worktreePath,
+  runtime_contract_json AS runtimeContractJson,
+  runtime_scenario_summary AS runtimeScenarioSummary,
+  runtime_scenario_approved_at AS runtimeScenarioApprovedAt,
   created_at AS createdAt,
   updated_at AS updatedAt
 `
@@ -108,6 +114,12 @@ function projectFromRow(row: Row): ProjectRecord {
     name: String(row.name),
     path: String(row.path),
     testCommand: String(row.testCommand),
+    runtimeAdapter: row.runtimeAdapterJson
+      ? JSON.parse(String(row.runtimeAdapterJson)) as ProjectRecord['runtimeAdapter']
+      : null,
+    runtimeConfigSource: row.runtimeConfigSource
+      ? String(row.runtimeConfigSource) as ProjectRecord['runtimeConfigSource']
+      : null,
     isDemo: Boolean(row.isDemo),
     createdAt: String(row.createdAt)
   }
@@ -125,6 +137,13 @@ function taskFromRow(row: Row): TaskRecord {
     attempt: Number(row.attempt),
     branchName: row.branchName ? String(row.branchName) : null,
     worktreePath: row.worktreePath ? String(row.worktreePath) : null,
+    runtimeContract: row.runtimeContractJson
+      ? JSON.parse(String(row.runtimeContractJson)) as ApprovedRuntimeContract
+      : null,
+    runtimeScenarioSummary: row.runtimeScenarioSummary ? String(row.runtimeScenarioSummary) : null,
+    runtimeScenarioApprovedAt: row.runtimeScenarioApprovedAt
+      ? String(row.runtimeScenarioApprovedAt)
+      : null,
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt)
   }
@@ -220,6 +239,8 @@ export class AppStore {
         name TEXT NOT NULL,
         path TEXT NOT NULL UNIQUE,
         test_command TEXT NOT NULL DEFAULT '',
+        runtime_adapter_json TEXT,
+        runtime_config_source TEXT,
         is_demo INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
@@ -235,6 +256,9 @@ export class AppStore {
         attempt INTEGER NOT NULL DEFAULT 0,
         branch_name TEXT,
         worktree_path TEXT,
+        runtime_contract_json TEXT,
+        runtime_scenario_summary TEXT,
+        runtime_scenario_approved_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -310,6 +334,29 @@ export class AppStore {
         ON runtime_evidence(task_id, created_at DESC);
     `)
 
+    const projectColumnNames = new Set(
+      (this.database.prepare('PRAGMA table_info(projects)').all() as Row[]).map((row) => String(row.name))
+    )
+    if (!projectColumnNames.has('runtime_adapter_json')) {
+      this.database.exec('ALTER TABLE projects ADD COLUMN runtime_adapter_json TEXT')
+    }
+    if (!projectColumnNames.has('runtime_config_source')) {
+      this.database.exec('ALTER TABLE projects ADD COLUMN runtime_config_source TEXT')
+    }
+
+    const taskColumnNames = new Set(
+      (this.database.prepare('PRAGMA table_info(tasks)').all() as Row[]).map((row) => String(row.name))
+    )
+    if (!taskColumnNames.has('runtime_contract_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_contract_json TEXT')
+    }
+    if (!taskColumnNames.has('runtime_scenario_summary')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_scenario_summary TEXT')
+    }
+    if (!taskColumnNames.has('runtime_scenario_approved_at')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_scenario_approved_at TEXT')
+    }
+
     const runtimeEvidenceColumnNames = new Set(
       (this.database.prepare('PRAGMA table_info(runtime_evidence)').all() as Row[]).map((row) =>
         String(row.name)
@@ -358,21 +405,66 @@ export class AppStore {
       name,
       path,
       testCommand: '',
+      runtimeAdapter: null,
+      runtimeConfigSource: null,
       isDemo: false,
       createdAt: new Date().toISOString()
     }
     this.database
-      .prepare('INSERT INTO projects (id, name, path, test_command, is_demo, created_at) VALUES (?, ?, ?, ?, 0, ?)')
+      .prepare(`
+        INSERT INTO projects (
+          id, name, path, test_command, runtime_adapter_json, runtime_config_source,
+          is_demo, created_at
+        ) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)
+      `)
       .run(project.id, project.name, project.path, project.testCommand, project.createdAt)
     this.addEvent(project.id, null, 'project_created', 'human', `${project.name} 프로젝트 등록`)
     return project
   }
 
   updateProject(input: UpdateProjectInput): ProjectRecord {
+    const existing = this.getProject(input.projectId)
+    const runtimeAdapter = input.runtimeAdapter === undefined
+      ? existing.runtimeAdapter ?? null
+      : input.runtimeAdapter
+    const runtimeConfigSource = input.runtimeAdapter === undefined
+      ? existing.runtimeConfigSource ?? null
+      : runtimeAdapter
+        ? 'detected'
+        : null
     this.database
-      .prepare('UPDATE projects SET name = ?, test_command = ? WHERE id = ?')
-      .run(input.name.trim(), input.testCommand.trim(), input.projectId)
+      .prepare(`
+        UPDATE projects
+        SET name = ?, test_command = ?, runtime_adapter_json = ?, runtime_config_source = ?
+        WHERE id = ?
+      `)
+      .run(
+        input.name.trim(),
+        input.testCommand.trim(),
+        runtimeAdapter ? JSON.stringify(runtimeAdapter) : null,
+        runtimeConfigSource,
+        input.projectId
+      )
     return this.getProject(input.projectId)
+  }
+
+  setProjectRuntimeAdapter(
+    projectId: string,
+    runtimeAdapter: ProjectRecord['runtimeAdapter'],
+    source: ProjectRecord['runtimeConfigSource']
+  ): ProjectRecord {
+    this.database
+      .prepare(`
+        UPDATE projects
+        SET runtime_adapter_json = $runtimeAdapter, runtime_config_source = $source
+        WHERE id = $projectId
+      `)
+      .run({
+        runtimeAdapter: runtimeAdapter ? JSON.stringify(runtimeAdapter) : null,
+        source: source ?? null,
+        projectId
+      })
+    return this.getProject(projectId)
   }
 
   deleteProject(projectId: string): ProjectRecord {
@@ -381,7 +473,14 @@ export class AppStore {
     return project
   }
 
-  createTask(projectId: string, title: string, prompt: string, maxAttempts: number): TaskRecord {
+  createTask(
+    projectId: string,
+    title: string,
+    prompt: string,
+    maxAttempts: number,
+    runtimeContract: ApprovedRuntimeContract | null = null,
+    runtimeScenarioSummary: string | null = null
+  ): TaskRecord {
     this.getProject(projectId)
     const now = new Date().toISOString()
     const task: TaskRecord = {
@@ -395,6 +494,9 @@ export class AppStore {
       attempt: 0,
       branchName: null,
       worktreePath: null,
+      runtimeContract,
+      runtimeScenarioSummary: runtimeScenarioSummary?.trim() || null,
+      runtimeScenarioApprovedAt: runtimeContract ? now : null,
       createdAt: now,
       updatedAt: now
     }
@@ -402,10 +504,27 @@ export class AppStore {
       .prepare(`
         INSERT INTO tasks (
           id, project_id, title, prompt, status, provider, max_attempts, attempt,
-          branch_name, worktree_path, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'codex', ?, 0, NULL, NULL, ?, ?)
+          branch_name, worktree_path, runtime_contract_json, runtime_scenario_summary,
+          runtime_scenario_approved_at, created_at, updated_at
+        ) VALUES (
+          $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
+          NULL, NULL, $runtimeContract, $runtimeScenarioSummary,
+          $runtimeScenarioApprovedAt, $createdAt, $updatedAt
+        )
       `)
-      .run(task.id, task.projectId, task.title, task.prompt, task.status, task.maxAttempts, now, now)
+      .run({
+        id: task.id,
+        projectId: task.projectId,
+        title: task.title,
+        prompt: task.prompt,
+        status: task.status,
+        maxAttempts: task.maxAttempts,
+        runtimeContract: runtimeContract ? JSON.stringify(runtimeContract) : null,
+        runtimeScenarioSummary: task.runtimeScenarioSummary ?? null,
+        runtimeScenarioApprovedAt: task.runtimeScenarioApprovedAt ?? null,
+        createdAt: now,
+        updatedAt: now
+      })
     this.addEvent(projectId, task.id, 'task_created', 'human', `${task.title} 작업 등록`)
     return task
   }

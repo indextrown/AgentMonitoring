@@ -10,6 +10,7 @@ import {
   type IosSimulatorRuntimeAdapter
 } from '../../electron/main/ios-simulator-runtime'
 import { AppStore } from '../../electron/main/store'
+import type { ApprovedRuntimeContract } from '../../src/shared/types'
 
 const execFileAsync = promisify(execFile)
 const temporaryDirectories: string[] = []
@@ -49,6 +50,7 @@ async function createExecutionFixture(options: {
   runtimeAssertions?: Array<Record<string, unknown>>
   maxAttempts?: number
   runtimeAdapter?: IosSimulatorRuntimeAdapter
+  runtimeContract?: ApprovedRuntimeContract
 }): Promise<{
   directory: string
   repository: string
@@ -143,7 +145,9 @@ async function createExecutionFixture(options: {
     project.id,
     '실행 수명주기',
     '중단과 시간 초과를 안전하게 처리한다.',
-    options.maxAttempts ?? 1
+    options.maxAttempts ?? 1,
+    options.runtimeContract ?? null,
+    options.runtimeContract ? '승인된 테스트 시나리오' : null
   )
   const runner = new AgentRunner(
     store,
@@ -227,6 +231,62 @@ describe('AgentRunner', () => {
     await expect(runner.run(task.id)).rejects.toThrow('검증 명령을 등록한 뒤 작업을 실행하세요.')
     expect(store.getTask(task.id).status).toBe('queued')
     store.close()
+  })
+
+  it('uses the task approval snapshot even when the repository has no project manifest', async () => {
+    let launchCount = 0
+    const runtimeContract: ApprovedRuntimeContract = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'App.xcodeproj',
+        scheme: 'App',
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: ['screen', 'accessibility'],
+        act: ['ui'],
+        verify: ['test-command', 'runtime-scenario']
+      },
+      runtimeScenario: {
+        actions: [{ kind: 'tap', identifier: 'save-profile', timeoutSeconds: 10 }],
+        assertions: [
+          {
+            kind: 'accessibility',
+            name: '저장 완료 표시',
+            identifier: 'profile-saved',
+            property: 'exists',
+            expected: true
+          }
+        ]
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      runtimeContract,
+      runtimeAdapter: {
+        launch: async (input) => {
+          launchCount += 1
+          expect(input.contract).toMatchObject({ deviceFamily: 'iphone', scheme: 'App' })
+          expect(input.uiActions).toEqual([
+            { kind: 'tap', identifier: 'save-profile', timeoutSeconds: 10 }
+          ])
+          throw new IosRuntimeStageError('launching', '승인 스냅샷 사용 확인')
+        },
+        stop: async () => undefined
+      }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('승인 스냅샷 사용 확인')
+    expect(launchCount).toBe(1)
+    expect(fixture.store.getTask(fixture.taskId).runtimeContract).toEqual(runtimeContract)
+    fixture.store.close()
   })
 
   it('times out a Codex process group and records a distinct failure', async () => {

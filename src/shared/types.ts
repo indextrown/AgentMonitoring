@@ -48,11 +48,89 @@ export interface CodexAuthStatus {
   message?: string
 }
 
+export type IosDeviceFamily = 'iphone' | 'ipad'
+
+export interface IosRuntimeAdapterConfig {
+  kind: 'ios-simulator'
+  container: string
+  scheme: string
+  configuration: 'Debug'
+  deviceFamily: IosDeviceFamily
+}
+
+export type ProjectRuntimeConfigSource = 'detected' | 'manifest'
+
+export type RuntimeUiAction =
+  | {
+      kind: 'tap'
+      identifier: string
+      timeoutSeconds: number
+    }
+  | {
+      kind: 'type-text'
+      identifier: string
+      text: string
+      timeoutSeconds: number
+    }
+
+export type RuntimeAcceptanceAssertion =
+  | {
+      kind: 'accessibility'
+      name?: string
+      identifier: string
+      property: 'exists'
+      expected: boolean
+    }
+  | {
+      kind: 'accessibility'
+      name?: string
+      identifier: string
+      property: 'label' | 'title' | 'value' | 'placeholderValue' | 'elementType'
+      expected: string
+    }
+  | {
+      kind: 'accessibility'
+      name?: string
+      identifier: string
+      property: 'enabled' | 'selected'
+      expected: boolean
+    }
+  | {
+      kind: 'evidence'
+      name?: string
+      target: 'screen' | 'accessibility' | 'ui-actions'
+    }
+
+export interface TaskRuntimeScenario {
+  actions: RuntimeUiAction[]
+  assertions: RuntimeAcceptanceAssertion[]
+}
+
+export interface ApprovedRuntimeContract {
+  version: 1
+  adapter: IosRuntimeAdapterConfig
+  capabilities: {
+    build: true
+    run: true
+    observe: Array<'screen' | 'accessibility'>
+    act: Array<'ui'>
+    verify: Array<'test-command' | 'runtime-scenario'>
+  }
+  runtimeScenario: TaskRuntimeScenario
+}
+
+export interface GeneratedRuntimeScenario {
+  summary: string
+  contract: ApprovedRuntimeContract
+}
+
 export interface ProjectRecord {
   id: string
   name: string
   path: string
   testCommand: string
+  runtimeAdapter?: IosRuntimeAdapterConfig | null
+  runtimeConfigSource?: ProjectRuntimeConfigSource | null
   isDemo: boolean
   createdAt: string
 }
@@ -125,6 +203,9 @@ export interface TaskRecord {
   attempt: number
   branchName: string | null
   worktreePath: string | null
+  runtimeContract?: ApprovedRuntimeContract | null
+  runtimeScenarioSummary?: string | null
+  runtimeScenarioApprovedAt?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -233,12 +314,21 @@ export interface CreateTaskInput {
   title: string
   prompt: string
   maxAttempts: number
+  runtimeContract?: ApprovedRuntimeContract | null
+  runtimeScenarioSummary?: string | null
 }
 
 export interface UpdateProjectInput {
   projectId: string
   name: string
   testCommand: string
+  runtimeAdapter?: IosRuntimeAdapterConfig | null
+}
+
+export interface GenerateRuntimeScenarioInput {
+  projectId: string
+  title: string
+  prompt: string
 }
 
 export interface AgentMonitoringBridge {
@@ -250,6 +340,7 @@ export interface AgentMonitoringBridge {
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
   inspectProject: (projectId: string) => Promise<ProjectInspection>
+  generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>

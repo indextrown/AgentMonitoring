@@ -4,6 +4,7 @@ import type {
   CodexAuthStatus,
   CreateTaskInput,
   EventRecord,
+  GenerateRuntimeScenarioInput,
   UpdateProjectInput
 } from '../../src/shared/types'
 
@@ -16,6 +17,8 @@ const bridge: AgentMonitoringBridge = {
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
   inspectProject: (projectId: string) => ipcRenderer.invoke('project:inspect', projectId),
+  generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
+    ipcRenderer.invoke('runtime-scenario:generate', input),
   removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),

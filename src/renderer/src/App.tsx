@@ -58,6 +58,7 @@ import type {
   DashboardSnapshot,
   EventKind,
   EventRecord,
+  GeneratedRuntimeScenario,
   NoteRecord,
   ProjectCapabilityKey,
   ProjectCapabilityStatus,
@@ -65,11 +66,14 @@ import type {
   ProjectRecord,
   ProjectInspection,
   RuntimeEvidenceRecord,
+  RuntimeAcceptanceAssertion,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
+  RuntimeUiAction,
   TaskChanges,
   TaskRecord,
-  TaskStatus
+  TaskStatus,
+  UpdateProjectInput
 } from '../../shared/types'
 import { demoBridge } from './demo'
 
@@ -467,7 +471,12 @@ export function App(): React.JSX.Element {
   const applySuggestedTestCommand = async (project: ProjectRecord, command: string): Promise<void> => {
     if (!window.confirm(`“${command}”을 ${project.name}의 검증 명령으로 저장할까요?`)) return
     try {
-      await bridge.updateProject({ projectId: project.id, name: project.name, testCommand: command })
+      await bridge.updateProject({
+        projectId: project.id,
+        name: project.name,
+        testCommand: command,
+        runtimeAdapter: project.runtimeAdapter
+      })
       await load(project.id)
       await refreshInspection(project.id)
     } catch (commandError) {
@@ -610,6 +619,7 @@ export function App(): React.JSX.Element {
       {selectedProject && taskModal && (
         <TaskModal
           project={selectedProject}
+          onGenerate={(input) => bridge.generateRuntimeScenario(input)}
           onClose={() => setTaskModal(false)}
           onCreate={async (input) => {
             const task = await bridge.createTask(input)
@@ -1369,22 +1379,76 @@ function ProjectsPage({
   onRemove
 }: {
   project: ProjectRecord
-  onSave: (input: { projectId: string; name: string; testCommand: string }) => Promise<void>
+  onSave: (input: UpdateProjectInput) => Promise<void>
   onOpen: () => void
   onRemove: () => void
 }): React.JSX.Element {
   const [name, setName] = useState(project.name)
   const [testCommand, setTestCommand] = useState(project.testCommand)
-  useEffect(() => { setName(project.name); setTestCommand(project.testCommand) }, [project])
+  const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
+  useEffect(() => {
+    setName(project.name)
+    setTestCommand(project.testCommand)
+    setRuntimeAdapter(project.runtimeAdapter)
+  }, [project])
   return (
     <section className="workspace-page">
       <PageHeading title="프로젝트 설정" description="에이전트가 접근할 저장소와 검증 명령을 명시한다." />
-      <form className="panel settings-form" onSubmit={(event) => { event.preventDefault(); void onSave({ projectId: project.id, name, testCommand }) }}>
+      <form className="panel settings-form" onSubmit={(event) => {
+        event.preventDefault()
+        void onSave({ projectId: project.id, name, testCommand, runtimeAdapter })
+      }}>
         <div className="setting-icon"><Settings2 size={18} /></div>
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label><span>저장소 경로</span><div className="path-field"><code>{project.path}</code><button type="button" disabled={project.isDemo} onClick={onOpen}><FolderOpen size={14} /> 열기</button></div></label>
         <label><span>검증 명령</span><input value={testCommand} placeholder="예: pnpm check 또는 xcodebuild test ..." onChange={(event) => setTestCommand(event.target.value)} /><small>shell 연산자 없이 허용된 실행 파일과 인자만 입력한다.</small></label>
         <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
+        <section className="runtime-settings">
+          <div className="runtime-settings-heading">
+            <div>
+              <strong>iOS Simulator 실행 설정</strong>
+              <small>
+                {runtimeAdapter
+                  ? `${project.runtimeConfigSource === 'manifest' ? 'project.json에서 읽음' : '프로젝트에서 자동 감지'} · 작업별 검증 시나리오에 사용`
+                  : 'Xcode 구성을 자동으로 찾지 못했습니다.'}
+              </small>
+            </div>
+            {runtimeAdapter ? (
+              <button type="button" className="text-button" onClick={() => setRuntimeAdapter(null)}>사용 안 함</button>
+            ) : (
+              <button type="button" className="secondary-button" onClick={() => setRuntimeAdapter({
+                kind: 'ios-simulator',
+                container: '',
+                scheme: '',
+                configuration: 'Debug',
+                deviceFamily: 'iphone'
+              })}>직접 설정</button>
+            )}
+          </div>
+          {runtimeAdapter && (
+            <div className="runtime-settings-grid">
+              <label>
+                <span>Xcode 프로젝트·Workspace</span>
+                <input required value={runtimeAdapter.container} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, container: event.target.value })} placeholder="예: MyApp.xcodeproj" />
+              </label>
+              <label>
+                <span>Scheme</span>
+                <input required value={runtimeAdapter.scheme} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, scheme: event.target.value })} placeholder="예: MyApp" />
+              </label>
+              <label>
+                <span>실행 기기</span>
+                <select value={runtimeAdapter.deviceFamily} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, deviceFamily: event.target.value as 'iphone' | 'ipad' })}>
+                  <option value="iphone">iPhone</option>
+                  <option value="ipad">iPad</option>
+                </select>
+              </label>
+              <label>
+                <span>빌드 구성</span>
+                <input disabled value="Debug" />
+              </label>
+            </div>
+          )}
+        </section>
         <button className="primary-button" type="submit">설정 저장</button>
       </form>
       <section className="panel danger-zone">
@@ -1406,10 +1470,10 @@ function EmptyState({ icon: Icon, title }: { icon: typeof Bug; title: string }):
   return <div className="panel empty-state"><Icon size={20} /><span>{title}</span></div>
 }
 
-function Modal({ title, description, onClose, children }: { title: string; description?: string; onClose: () => void; children: React.ReactNode }): React.JSX.Element {
+function Modal({ title, description, onClose, children, wide = false }: { title: string; description?: string; onClose: () => void; children: React.ReactNode; wide?: boolean }): React.JSX.Element {
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className="modal-card" role="dialog" aria-modal="true">
+      <section className={`modal-card${wide ? ' modal-wide' : ''}`} role="dialog" aria-modal="true">
         <header><div><h2>{title}</h2>{description && <p>{description}</p>}</div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         {children}
       </section>
@@ -1417,24 +1481,140 @@ function Modal({ title, description, onClose, children }: { title: string; descr
   )
 }
 
-function TaskModal({ project, onClose, onCreate }: { project: ProjectRecord; onClose: () => void; onCreate: (input: { projectId: string; title: string; prompt: string; maxAttempts: number }) => Promise<void> }): React.JSX.Element {
+function TaskModal({
+  project,
+  onClose,
+  onCreate,
+  onGenerate
+}: {
+  project: ProjectRecord
+  onClose: () => void
+  onCreate: (input: Parameters<AgentMonitoringBridge['createTask']>[0]) => Promise<void>
+  onGenerate: (input: Parameters<AgentMonitoringBridge['generateRuntimeScenario']>[0]) => Promise<GeneratedRuntimeScenario>
+}): React.JSX.Element {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [maxAttempts, setMaxAttempts] = useState(3)
+  const [includeRuntime, setIncludeRuntime] = useState(Boolean(project.runtimeAdapter))
+  const [generated, setGenerated] = useState<GeneratedRuntimeScenario | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const [generationError, setGenerationError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const generate = async (): Promise<void> => {
+    setGenerating(true)
+    setGenerationError(null)
+    try {
+      setGenerated(await onGenerate({ projectId: project.id, title, prompt }))
+    } catch (error) {
+      setGenerationError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setGenerating(false)
+    }
+  }
+  const updateAction = (index: number, action: RuntimeUiAction): void => {
+    if (!generated) return
+    const actions = generated.contract.runtimeScenario.actions.map((current, actionIndex) => actionIndex === index ? action : current)
+    setGenerated({
+      ...generated,
+      contract: { ...generated.contract, runtimeScenario: { ...generated.contract.runtimeScenario, actions } }
+    })
+  }
+  const updateAssertion = (index: number, assertion: RuntimeAcceptanceAssertion): void => {
+    if (!generated) return
+    const assertions = generated.contract.runtimeScenario.assertions.map((current, assertionIndex) => assertionIndex === index ? assertion : current)
+    setGenerated({
+      ...generated,
+      contract: { ...generated.contract, runtimeScenario: { ...generated.contract.runtimeScenario, assertions } }
+    })
+  }
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
+    if (includeRuntime && !generated) {
+      setGenerationError('작업을 등록하기 전에 검증 시나리오를 만들고 확인하세요.')
+      return
+    }
     setSubmitting(true)
-    try { await onCreate({ projectId: project.id, title, prompt, maxAttempts }) } finally { setSubmitting(false) }
+    try {
+      await onCreate({
+        projectId: project.id,
+        title,
+        prompt,
+        maxAttempts,
+        runtimeContract: includeRuntime ? generated?.contract ?? null : null,
+        runtimeScenarioSummary: includeRuntime ? generated?.summary ?? null : null
+      })
+    } finally {
+      setSubmitting(false)
+    }
   }
   return (
-    <Modal title="새 에이전트 작업" description={`${project.name}의 격리된 worktree에서 실행된다.`} onClose={onClose}>
+    <Modal wide title="새 에이전트 작업" description={`${project.name}의 격리된 worktree에서 실행된다.`} onClose={onClose}>
       <form className="modal-form" onSubmit={(event) => void submit(event)}>
-        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
-        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={8} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setGenerated(null) }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
+        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setGenerated(null) }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        {project.runtimeAdapter && (
+          <section className="scenario-builder">
+            <label className="scenario-toggle">
+              <input type="checkbox" checked={includeRuntime} onChange={(event) => setIncludeRuntime(event.target.checked)} />
+              <span>
+                <strong>Simulator에서 실제 사용 흐름 검증</strong>
+                <small>{project.runtimeAdapter.scheme} · {project.runtimeAdapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'} · Debug</small>
+              </span>
+            </label>
+            {includeRuntime && !generated && (
+              <div className="scenario-empty">
+                <ShieldCheck size={18} />
+                <div><strong>자연어 목표를 검증 단계로 바꿉니다</strong><p>Codex가 저장소를 읽고 누를 요소와 확인할 결과를 제안합니다. 확인한 뒤에만 작업에 고정됩니다.</p></div>
+                <button className="secondary-button" type="button" disabled={generating || title.trim().length < 2 || prompt.trim().length < 10} onClick={() => void generate()}>
+                  {generating ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
+                  {generating ? '시나리오 생성 중' : '검증 시나리오 만들기'}
+                </button>
+              </div>
+            )}
+            {includeRuntime && generated && (
+              <div className="scenario-review">
+                <header>
+                  <div><span>승인 전 검토</span><strong>{generated.summary}</strong></div>
+                  <button className="text-button" type="button" disabled={generating} onClick={() => void generate()}>다시 생성</button>
+                </header>
+                <div className="scenario-list">
+                  <p>사용자 조작 {generated.contract.runtimeScenario.actions.length}단계</p>
+                  {generated.contract.runtimeScenario.actions.map((action, index) => (
+                    <div className="scenario-row" key={`action-${index}`}>
+                      <span>{index + 1}</span>
+                      <strong>{action.kind === 'tap' ? '누르기' : '텍스트 입력'}</strong>
+                      <input aria-label={`조작 ${index + 1} 식별자`} value={action.identifier} onChange={(event) => updateAction(index, { ...action, identifier: event.target.value })} />
+                      {action.kind === 'type-text' && <input aria-label={`조작 ${index + 1} 입력값`} value={action.text} onChange={(event) => updateAction(index, { ...action, text: event.target.value })} />}
+                    </div>
+                  ))}
+                  <p>합격 조건</p>
+                  {generated.contract.runtimeScenario.assertions.map((assertion, index) => assertion.kind === 'evidence' ? (
+                    <div className="scenario-evidence" key={`assertion-${index}`}><FileJson size={12} /><span>{assertion.name}</span></div>
+                  ) : (
+                    <div className="scenario-row assertion" key={`assertion-${index}`}>
+                      <Check size={12} />
+                      <input aria-label={`합격 조건 ${index + 1} 이름`} value={assertion.name ?? ''} onChange={(event) => updateAssertion(index, { ...assertion, name: event.target.value })} />
+                      <input aria-label={`합격 조건 ${index + 1} 식별자`} value={assertion.identifier} onChange={(event) => updateAssertion(index, { ...assertion, identifier: event.target.value })} />
+                      {typeof assertion.expected === 'boolean' ? (
+                        <select aria-label={`합격 조건 ${index + 1} 예상값`} value={String(assertion.expected)} onChange={(event) => updateAssertion(index, { ...assertion, expected: event.target.value === 'true' })}>
+                          <option value="true">참</option><option value="false">거짓</option>
+                        </select>
+                      ) : (
+                        <input aria-label={`합격 조건 ${index + 1} 예상값`} value={assertion.expected} onChange={(event) => updateAssertion(index, { ...assertion, expected: event.target.value })} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <p className="scenario-lock"><ShieldCheck size={12} />등록하면 이 조건이 작업에 고정됩니다. 구현 에이전트는 조건을 낮추거나 바꿀 수 없습니다.</p>
+              </div>
+            )}
+            {generationError && <p className="scenario-error">{generationError}</p>}
+          </section>
+        )}
+        {!project.runtimeAdapter && <p className="scenario-unavailable"><FileJson size={13} />iOS 프로젝트가 아니거나 실행 설정이 없습니다. 코드와 테스트만 검증합니다.</p>}
         <label><span>최대 자가 수정 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /></label>
         <div className="workflow-preview"><span><FileText size={13} />테스트 설계</span><i /><span><Search size={13} />비평</span><i /><span><Bot size={13} />구현</span><i /><span><CheckCircle2 size={13} />검증</span></div>
-        <button className="primary-button" disabled={submitting || project.isDemo} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '작업 등록'}</button>
+        <button className="primary-button" disabled={submitting || generating || project.isDemo || (includeRuntime && Boolean(project.runtimeAdapter) && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : includeRuntime && generated ? '검증 조건 승인하고 작업 등록' : '작업 등록'}</button>
       </form>
     </Modal>
   )
@@ -1552,6 +1732,18 @@ function TaskDrawer({
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {task.runtimeContract && (
+          <section className="approved-scenario">
+            <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>
+            <p>{task.runtimeScenarioSummary ?? '사용자가 승인한 작업별 검증 시나리오'}</p>
+            <div>
+              <span><Play size={12} />조작 {task.runtimeContract.runtimeScenario.actions.length}단계</span>
+              <span><CheckCircle2 size={12} />검증 {task.runtimeContract.runtimeScenario.assertions.length}개</span>
+              <span><SquareTerminal size={12} />{task.runtimeContract.adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'}</span>
+            </div>
+            <small><ShieldCheck size={11} />{task.runtimeScenarioApprovedAt ? `${timeAgo(task.runtimeScenarioApprovedAt)} 승인` : '등록 시 승인'} · 에이전트가 변경할 수 없는 스냅샷</small>
+          </section>
+        )}
         {runtime && (
           <section className={`runtime-session runtime-${runtime.status}`}>
             <div className="drawer-section-title">

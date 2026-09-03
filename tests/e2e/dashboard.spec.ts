@@ -222,6 +222,36 @@ test('distinguishes supported iOS runtime capabilities from planned access', asy
   await expect(page.getByText('Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.')).toBeVisible()
 })
 
+test('generates, reviews, and freezes a task-scoped Simulator scenario', async ({ page }) => {
+  await page.goto('/?workspace=empty&contract=ios&device=iphone')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('장보기 항목 추가')
+  await dialog
+    .getByLabel('목표와 완료 조건')
+    .fill('장보기 목록에서 우유를 입력하고 추가하면 목록에 우유가 표시되게 해줘.')
+  await dialog.getByRole('button', { name: '검증 시나리오 만들기' }).click()
+
+  await expect(dialog.getByText('승인 전 검토')).toBeVisible()
+  await expect(dialog.getByLabel('조작 1 식별자')).toHaveValue('item-input')
+  await dialog.getByLabel('조작 1 식별자').fill('shopping-item-input')
+  await expect(dialog.getByText(/등록하면 이 조건이 작업에 고정됩니다/)).toBeVisible()
+  await dialog.getByRole('button', { name: '검증 조건 승인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('승인된 Simulator 검증')).toBeVisible()
+  await expect(drawer.getByText('입력한 항목을 추가하고 목록에 표시되는지 확인합니다.')).toBeVisible()
+  await expect(drawer.getByText('iPhone', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('조작 2단계', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('검증 4개', { exact: true })).toBeVisible()
+  await expect(drawer.getByText(/조건 고정/)).toBeVisible()
+})
+
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

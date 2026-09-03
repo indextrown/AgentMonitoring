@@ -133,18 +133,20 @@ const runtimeAcceptanceAssertionSchema = z.union([
     .strict()
 ])
 
+export const iosRuntimeAdapterSchema = z
+  .object({
+    kind: z.literal('ios-simulator'),
+    container: relativeXcodeContainerSchema,
+    scheme: z.string().trim().min(1).max(128),
+    configuration: z.literal('Debug').default('Debug'),
+    deviceFamily: z.enum(['ipad', 'iphone']).default('ipad')
+  })
+  .strict()
+
 export const projectCapabilityManifestSchema = z
   .object({
     version: z.literal(1),
-    adapter: z
-      .object({
-        kind: z.literal('ios-simulator'),
-        container: relativeXcodeContainerSchema,
-        scheme: z.string().trim().min(1).max(128),
-        configuration: z.literal('Debug').default('Debug'),
-        deviceFamily: z.enum(['ipad', 'iphone']).default('ipad')
-      })
-      .strict(),
+    adapter: iosRuntimeAdapterSchema,
     capabilities: z
       .object({
         build: z.boolean(),
@@ -347,6 +349,27 @@ export async function inspectProjectCapabilities(
   const verifyFromCommand: ProjectCapability | null = project.testCommand.trim()
     ? { key: 'verify', status: 'ready', detail: `검증 명령: ${project.testCommand.trim()}` }
     : null
+
+  if (result.state === 'missing' && project.runtimeAdapter) {
+    const adapter = project.runtimeAdapter
+    const deviceFamilyLabel = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
+    return {
+      manifest: {
+        path: 'AgentMonitoring 내부 설정',
+        state: 'valid',
+        adapterKind: adapter.kind,
+        message: `${adapter.container} · ${adapter.scheme} · ${adapter.configuration} · ${deviceFamilyLabel}`
+      },
+      capabilities: [
+        code,
+        readyCapability('build', `${adapter.scheme} Debug 빌드 adapter 사용 가능`),
+        readyCapability('run', `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능`),
+        readyCapability('observe', 'Simulator 화면 캡처 · 접근성 트리 수집 사용 가능'),
+        readyCapability('act', '작업 등록 시 identifier UI 조작 시나리오 생성 가능'),
+        verifyFromCommand ?? missingCapability('verify', '프로젝트 검증 명령이 설정되지 않았습니다.')
+      ]
+    }
+  }
 
   if (result.state === 'missing') {
     return {
