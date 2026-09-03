@@ -91,7 +91,11 @@ const runtimeEvidenceColumns = `
   id,
   task_id AS taskId,
   project_id AS projectId,
+  run_id AS runId,
+  attempt,
   kind,
+  outcome,
+  summary,
   path,
   mime_type AS mimeType,
   size_bytes AS sizeBytes,
@@ -183,7 +187,11 @@ function runtimeEvidenceFromRow(row: Row): RuntimeEvidenceRecord {
     id: String(row.id),
     taskId: String(row.taskId),
     projectId: String(row.projectId),
+    runId: String(row.runId),
+    attempt: Math.max(1, Number(row.attempt) || 1),
     kind: String(row.kind) as RuntimeEvidenceRecord['kind'],
+    outcome: String(row.outcome) as RuntimeEvidenceRecord['outcome'],
+    summary: row.summary ? String(row.summary) : null,
     path: String(row.path),
     mimeType: String(row.mimeType) as RuntimeEvidenceRecord['mimeType'],
     sizeBytes: Number(row.sizeBytes),
@@ -279,7 +287,11 @@ export class AppStore {
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL DEFAULT 'legacy',
+        attempt INTEGER NOT NULL DEFAULT 1,
         kind TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'captured',
+        summary TEXT,
         path TEXT NOT NULL UNIQUE,
         mime_type TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
@@ -297,6 +309,24 @@ export class AppStore {
       CREATE INDEX IF NOT EXISTS idx_runtime_evidence_task_created
         ON runtime_evidence(task_id, created_at DESC);
     `)
+
+    const runtimeEvidenceColumnNames = new Set(
+      (this.database.prepare('PRAGMA table_info(runtime_evidence)').all() as Row[]).map((row) =>
+        String(row.name)
+      )
+    )
+    if (!runtimeEvidenceColumnNames.has('run_id')) {
+      this.database.exec("ALTER TABLE runtime_evidence ADD COLUMN run_id TEXT NOT NULL DEFAULT 'legacy'")
+    }
+    if (!runtimeEvidenceColumnNames.has('attempt')) {
+      this.database.exec('ALTER TABLE runtime_evidence ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+    }
+    if (!runtimeEvidenceColumnNames.has('outcome')) {
+      this.database.exec("ALTER TABLE runtime_evidence ADD COLUMN outcome TEXT NOT NULL DEFAULT 'captured'")
+    }
+    if (!runtimeEvidenceColumnNames.has('summary')) {
+      this.database.exec('ALTER TABLE runtime_evidence ADD COLUMN summary TEXT')
+    }
   }
 
   private removeLegacyDemoData(): void {
@@ -519,26 +549,40 @@ export class AppStore {
 
   addRuntimeEvidence(
     taskId: string,
-    input: Pick<RuntimeEvidenceRecord, 'kind' | 'path' | 'mimeType' | 'sizeBytes' | 'createdAt'>
+    input: Pick<RuntimeEvidenceRecord, 'kind' | 'path' | 'mimeType' | 'sizeBytes' | 'createdAt'> &
+      Partial<Pick<RuntimeEvidenceRecord, 'runId' | 'outcome' | 'summary'>>
   ): RuntimeEvidenceRecord {
     const task = this.getTask(taskId)
     const evidence: RuntimeEvidenceRecord = {
       id: randomUUID(),
       taskId,
       projectId: task.projectId,
-      ...input
+      runId: input.runId ?? 'legacy',
+      attempt: Math.max(1, task.attempt),
+      outcome: input.outcome ?? 'captured',
+      summary: input.summary?.trim().slice(0, 1_000) || null,
+      kind: input.kind,
+      path: input.path,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      createdAt: input.createdAt
     }
     this.database
       .prepare(`
         INSERT INTO runtime_evidence (
-          id, task_id, project_id, kind, path, mime_type, size_bytes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          id, task_id, project_id, run_id, attempt, kind, outcome, summary,
+          path, mime_type, size_bytes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         evidence.id,
         evidence.taskId,
         evidence.projectId,
+        evidence.runId,
+        evidence.attempt,
         evidence.kind,
+        evidence.outcome,
+        evidence.summary,
         evidence.path,
         evidence.mimeType,
         evidence.sizeBytes,

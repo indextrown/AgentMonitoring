@@ -31,6 +31,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | 작업 등록 | 구현 목표, 완료 조건, 최대 자가 수정 횟수를 작업별로 저장해요. |
 | 다중 역할 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 정해진 순서로 실행해요. |
 | 테스트와 자가 수정 | 프로젝트 테스트 또는 runtime assertion이 실패하면 로그·JSON·화면 증거를 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
+| 시도별 실행 보고서 | 각 실행과 자가 수정 시도별 화면·접근성·조작·상태·판정 증거, 통과·실패·복구 결과를 작업 상세에서 한눈에 확인해요. |
 | 격리된 코드 변경 | 작업마다 Git worktree와 `agentmonitor/*` 브랜치를 만들고 역할별 읽기·쓰기 권한을 제한해요. |
 | 실시간 모니터링 | 진행 상태, 역할별 로그, 테스트 결과, 최근 활동을 대시보드와 작업 상세 화면에서 확인해요. |
 | 변경 검토 | 변경 파일, 줄 증감, Git patch, Reviewer finding을 확인하고 작업 폴더를 외부 IDE로 열 수 있어요. |
@@ -237,6 +238,8 @@ runtime assertion은 최대 50개까지 선언할 수 있어요. `state`는 Debu
 
 Repair 중에도 합격 조건은 매번 원본 checkout의 manifest에서 다시 읽어요. Implementer가 worktree 안의 assertion을 수정하거나 약화해 통과할 수는 없어요. 빌드·설치·관찰 자체의 실패는 잘못된 자동 수정을 반복하지 않도록 Repair 대상에 포함하지 않고 즉시 진단해요.
 
+작업 상세의 실행 보고서는 증거를 실행 ID와 시도 번호로 묶어요. 위쪽 요약에서 전체 실행·시도·복구·증거 수와 최신 판정을 보여주고, 각 시도를 펼치면 당시 화면 PNG와 접근성·UI 조작·Debug state·runtime 판정 JSON을 바로 열 수 있어요. 실패 뒤 다음 시도가 통과하면 `복구 후 통과`로 표시하고 이전 실패 증거도 삭제하지 않아요. Report 기능을 추가하기 전에 저장된 기존 증거는 `legacy` 실행의 첫 번째 시도로 안전하게 표시해요.
+
 ## 실제 앱과 브라우저 미리보기 구분하기
 
 | 명령 | 용도 | 실제 Git·Codex 연결 |
@@ -366,7 +369,7 @@ pnpm test:package
 
 Electron의 `userData` 아래에 다음 데이터를 저장해요.
 
-- `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모, runtime session과 화면 증거 메타데이터
+- `agent-monitoring.sqlite`: 프로젝트, 작업, 이벤트, 버그, 메모, runtime session과 실행 ID·시도·판정 요약이 포함된 증거 메타데이터
 - `worktrees/<project-id>/<task-id>`: 작업별 Git worktree
 - `runtime-sessions/<task-id>/DerivedData`: Swift 작업별 빌드 산출물
 - `runtime-sessions/<task-id>/evidence/*.png`: 작업별 Simulator 화면 증거

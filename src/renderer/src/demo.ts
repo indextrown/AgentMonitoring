@@ -20,6 +20,7 @@ function atOffset(days: number, hours: number, minutes = 0): string {
 }
 
 function buildSnapshot(): DashboardSnapshot {
+  const runtimeRunning = searchParams.get('runtime') === 'running'
   const runtimeDeviceName = searchParams.get('device') === 'iphone'
     ? 'iPhone 16 Pro'
     : 'iPad Pro 13-inch'
@@ -57,7 +58,7 @@ function buildSnapshot(): DashboardSnapshot {
       status: 'completed' as const,
       provider: 'codex' as const,
       maxAttempts: 3,
-      attempt: 1,
+      attempt: index === 31 && runtimeRunning ? 2 : 1,
       branchName: null,
       worktreePath: null,
       createdAt,
@@ -125,7 +126,19 @@ function buildSnapshot(): DashboardSnapshot {
     severity: kinds[index % kinds.length].includes('finding') ? 'medium' : null,
     createdAt: new Date(Date.now() - index * 38 * 60 * 1000).toISOString()
   }))
-  const runtimeSessions = searchParams.get('runtime') === 'running'
+  if (runtimeRunning) {
+    events.unshift({
+      id: 100,
+      projectId,
+      taskId: tasks[0].id,
+      kind: 'runtime_repair_started',
+      actor: 'orchestrator',
+      message: 'runtime 실패 증거를 Implementer에 전달 · 다음 시도 2/3',
+      severity: null,
+      createdAt: atOffset(0, 8, 46)
+    })
+  }
+  const runtimeSessions = runtimeRunning
     ? [
         {
           taskId: tasks[0].id,
@@ -142,13 +155,17 @@ function buildSnapshot(): DashboardSnapshot {
         }
       ]
     : []
-  const runtimeEvidence = searchParams.get('runtime') === 'running'
+  const runtimeEvidence = runtimeRunning
     ? [
         {
           id: '00000000-0000-4000-8000-000000000101',
           taskId: tasks[0].id,
           projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
           kind: 'screen' as const,
+          outcome: 'captured' as const,
+          summary: '최종 Simulator 화면 캡처',
           path: 'demo://runtime/evidence/screen-latest.png',
           mimeType: 'image/png' as const,
           sizeBytes: 1_284_192,
@@ -158,7 +175,11 @@ function buildSnapshot(): DashboardSnapshot {
           id: '00000000-0000-4000-8000-000000000102',
           taskId: tasks[0].id,
           projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
           kind: 'accessibility' as const,
+          outcome: 'captured' as const,
+          summary: '접근성 요소 42개',
           path: 'demo://runtime/evidence/accessibility-latest.json',
           mimeType: 'application/json' as const,
           sizeBytes: 42_816,
@@ -168,7 +189,11 @@ function buildSnapshot(): DashboardSnapshot {
           id: '00000000-0000-4000-8000-000000000103',
           taskId: tasks[0].id,
           projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
           kind: 'ui-actions' as const,
+          outcome: 'captured' as const,
+          summary: 'identifier UI 조작 2단계 성공',
           path: 'demo://runtime/evidence/ui-actions-latest.json',
           mimeType: 'application/json' as const,
           sizeBytes: 3_584,
@@ -178,7 +203,11 @@ function buildSnapshot(): DashboardSnapshot {
           id: '00000000-0000-4000-8000-000000000104',
           taskId: tasks[0].id,
           projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
           kind: 'debug-state' as const,
+          outcome: 'captured' as const,
+          summary: 'fixture signed-in-home 적용 · 최종 Debug 상태 수집',
           path: 'demo://runtime/evidence/debug-state-latest.json',
           mimeType: 'application/json' as const,
           sizeBytes: 8_192,
@@ -188,11 +217,43 @@ function buildSnapshot(): DashboardSnapshot {
           id: '00000000-0000-4000-8000-000000000105',
           taskId: tasks[0].id,
           projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
           kind: 'runtime-verification' as const,
+          outcome: 'passed' as const,
+          summary: 'runtime acceptance 3/3 통과',
           path: 'demo://runtime/evidence/runtime-verification-latest.json',
           mimeType: 'application/json' as const,
           sizeBytes: 2_048,
           createdAt: atOffset(0, 9, 0)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000106',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 1,
+          kind: 'screen' as const,
+          outcome: 'captured' as const,
+          summary: '실패 시점 Simulator 화면 캡처',
+          path: 'demo://runtime/evidence/screen-attempt-1.png',
+          mimeType: 'image/png' as const,
+          sizeBytes: 1_192_640,
+          createdAt: atOffset(0, 8, 44)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000107',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 1,
+          kind: 'runtime-verification' as const,
+          outcome: 'failed' as const,
+          summary: 'runtime acceptance 2/3 통과 · 실패: 홈 탭 유지',
+          path: 'demo://runtime/evidence/runtime-verification-attempt-1.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 2_304,
+          createdAt: atOffset(0, 8, 45)
         }
       ]
     : []

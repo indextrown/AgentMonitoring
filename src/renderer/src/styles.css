@@ -2319,6 +2319,7 @@ kbd {
   flex-direction: column;
   width: min(520px, 48vw);
   height: 100%;
+  overflow-y: auto;
   border-left: 1px solid #2b3137;
   background: #111519;
   box-shadow: -16px 0 54px rgba(0, 0, 0, 0.4);
@@ -2452,6 +2453,172 @@ kbd {
 .runtime-session > small {
   color: #505c66;
   font-size: 7px;
+}
+
+.runtime-report {
+  margin: 12px 0 9px;
+  padding-top: 12px;
+  border-top: 1px solid #273139;
+}
+
+.runtime-report-heading,
+.runtime-report-heading > div,
+.runtime-report-heading strong,
+.runtime-report-heading small {
+  display: block;
+}
+
+.runtime-report-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.runtime-report-heading strong {
+  color: #c5d0d8;
+  font-size: 9px;
+}
+
+.runtime-report-heading small {
+  margin-top: 3px;
+  color: #65727d;
+  font-size: 7px;
+}
+
+.runtime-report-outcome {
+  padding: 4px 7px;
+  border: 1px solid #3e505e;
+  border-radius: 999px;
+  color: #87a3ba;
+  font-size: 7px;
+  font-weight: 700;
+  background: #14202a;
+}
+
+.runtime-report-outcome.outcome-passed {
+  border-color: #35664c;
+  color: #7dcea3;
+  background: #13251b;
+}
+
+.runtime-report-outcome.outcome-failed {
+  border-color: #673d40;
+  color: #dd858a;
+  background: #2a181a;
+}
+
+.runtime-report-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.runtime-report-stats span {
+  padding: 7px 6px;
+  border: 1px solid #29353e;
+  border-radius: 5px;
+  color: #64727d;
+  font-size: 7px;
+  text-align: center;
+  background: #11191f;
+}
+
+.runtime-report-stats strong {
+  display: block;
+  margin-bottom: 2px;
+  color: #b8c5cf;
+  font-size: 11px;
+}
+
+.runtime-report-attempts {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.runtime-report-attempt {
+  border: 1px solid #2b3943;
+  border-radius: 6px;
+  background: #10181e;
+}
+
+.runtime-report-attempt.outcome-passed {
+  border-color: #315441;
+}
+
+.runtime-report-attempt.outcome-failed {
+  border-color: #58373a;
+}
+
+.runtime-report-attempt > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 13px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.runtime-report-attempt > summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-report-attempt > summary span,
+.runtime-report-attempt > summary strong,
+.runtime-report-attempt > summary small {
+  display: block;
+}
+
+.runtime-report-attempt > summary strong {
+  color: #b6c2cb;
+  font-size: 8px;
+}
+
+.runtime-report-attempt > summary small {
+  margin-top: 3px;
+  color: #5f6d78;
+  font-size: 7px;
+}
+
+.runtime-report-attempt > summary em {
+  color: #8299ab;
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.runtime-report-attempt.outcome-passed > summary em {
+  color: #72c297;
+}
+
+.runtime-report-attempt.outcome-failed > summary em {
+  color: #d67c81;
+}
+
+.runtime-report-attempt > summary svg {
+  color: #647682;
+  transition: transform 120ms ease;
+}
+
+.runtime-report-attempt[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.runtime-report-attempt > p {
+  margin: 0 10px;
+  padding: 8px 0;
+  border-top: 1px solid #273139;
+  color: #82919c;
+  font-size: 7px;
+  line-height: 1.5;
+}
+
+.runtime-report-attempt .runtime-evidence-list {
+  margin: 0;
+  padding: 0 8px 8px;
 }
 
 .runtime-evidence-list {

@@ -1,4 +1,10 @@
-import type { EventRecord, FindingRecord, TaskRecord, TaskStatus } from './types'
+import type {
+  EventRecord,
+  FindingRecord,
+  RuntimeEvidenceRecord,
+  TaskRecord,
+  TaskStatus
+} from './types'
 
 export const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'testing']
 
@@ -104,4 +110,96 @@ export function buildHourlyActivity(events: EventRecord[], now = new Date()): nu
   }
 
   return buckets
+}
+
+export interface RuntimeAttemptReport {
+  runId: string
+  executionNumber: number
+  attempt: number
+  outcome: RuntimeEvidenceRecord['outcome']
+  summary: string | null
+  repaired: boolean
+  createdAt: string
+  evidence: RuntimeEvidenceRecord[]
+}
+
+export interface RuntimeTaskReport {
+  runCount: number
+  repairCount: number
+  evidenceCount: number
+  passedCount: number
+  failedCount: number
+  latestOutcome: RuntimeEvidenceRecord['outcome']
+  recovered: boolean
+  attempts: RuntimeAttemptReport[]
+}
+
+export function buildRuntimeTaskReport(
+  evidence: RuntimeEvidenceRecord[],
+  events: EventRecord[]
+): RuntimeTaskReport | null {
+  if (evidence.length === 0) return null
+
+  const runs = new Map<string, Map<number, RuntimeEvidenceRecord[]>>()
+  for (const item of evidence) {
+    const attempts = runs.get(item.runId) ?? new Map<number, RuntimeEvidenceRecord[]>()
+    const items = attempts.get(item.attempt) ?? []
+    items.push(item)
+    attempts.set(item.attempt, items)
+    runs.set(item.runId, attempts)
+  }
+
+  const orderedRuns = [...runs.entries()]
+    .map(([runId, attempts]) => ({
+      runId,
+      attempts,
+      latestTime: Math.max(
+        ...[...attempts.values()].flat().map((item) => new Date(item.createdAt).getTime())
+      )
+    }))
+    .sort((left, right) => right.latestTime - left.latestTime)
+  const attempts: RuntimeAttemptReport[] = []
+  orderedRuns.forEach((run, runIndex) => {
+    const executionNumber = orderedRuns.length - runIndex
+    const highestAttempt = Math.max(...run.attempts.keys())
+    for (const [attempt, items] of [...run.attempts.entries()].sort(
+      ([left], [right]) => right - left
+    )) {
+      const orderedEvidence = [...items].sort(
+        (left, right) =>
+          new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+      )
+      const verification = orderedEvidence.find(
+        (item) => item.kind === 'runtime-verification'
+      )
+      attempts.push({
+        runId: run.runId,
+        executionNumber,
+        attempt,
+        outcome: verification?.outcome ?? 'captured',
+        summary: verification?.summary ?? null,
+        repaired: verification?.outcome === 'failed' && attempt < highestAttempt,
+        createdAt: orderedEvidence[0].createdAt,
+        evidence: orderedEvidence
+      })
+    }
+  })
+
+  const latest = attempts[0]
+  const latestRunAttempts = attempts.filter((attempt) => attempt.runId === latest.runId)
+  return {
+    runCount: orderedRuns.length,
+    repairCount: Math.max(
+      events.filter((event) => event.kind === 'runtime_repair_started').length,
+      attempts.filter((attempt) => attempt.repaired).length
+    ),
+    evidenceCount: evidence.length,
+    passedCount: attempts.filter((attempt) => attempt.outcome === 'passed').length,
+    failedCount: attempts.filter((attempt) => attempt.outcome === 'failed').length,
+    latestOutcome: latest.outcome,
+    recovered:
+      latest.outcome === 'passed' &&
+      latestRunAttempts.some((attempt) => attempt.outcome === 'failed'),
+    attempts
+  }
 }

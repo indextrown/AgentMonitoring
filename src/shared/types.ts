@@ -160,7 +160,11 @@ export interface RuntimeEvidenceRecord {
   id: string
   taskId: string
   projectId: string
+  runId: string
+  attempt: number
   kind: 'screen' | 'accessibility' | 'ui-actions' | 'debug-state' | 'runtime-verification'
+  outcome: 'captured' | 'passed' | 'failed'
+  summary: string | null
   path: string
   mimeType: 'image/png' | 'application/json'
   sizeBytes: number

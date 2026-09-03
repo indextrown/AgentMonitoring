@@ -107,6 +107,10 @@ runtime assertion이 실패하면 모든 판정과 raw 증거를 먼저 보존�
 
 runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `acting`, `observing`, `verifying`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다. 화면·접근성·UI action·Debug state·fixture·runtime verification 증거 메타데이터는 별도 레코드로 보존해 작업 상세에서 파일을 열 수 있다.
 
+각 Runner 실행은 UUID `run_id`를 하나 만들고 Repair를 포함한 모든 runtime 시도에서 유지한다. 증거 레코드에는 `run_id`, 1부터 시작하는 task `attempt`, `captured|passed|failed` outcome과 최대 1,000자의 요약을 함께 저장한다. Renderer의 순수 집계 함수는 먼저 실행 ID, 그 안에서 시도 번호로 증거를 묶고 최신 판정, 실행·시도·복구·증거 수, 복구 후 통과 여부를 계산한다. 실제 JSON·PNG 내용은 IPC로 읽어 Renderer에 주입하지 않고 기존의 제한된 `openPath` 동작으로만 연다.
+
+기존 SQLite의 `runtime_evidence`에는 앱 시작 시 `run_id`, `attempt`, `outcome`, `summary` 컬럼을 추가한다. 기존 행은 `legacy`, 시도 1, `captured`, 요약 없음으로 보존하므로 이전 증거를 삭제하거나 재해석하지 않는다.
+
 선택한 기기군에 사용 가능한 Simulator가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면 캡처나 접근성 observer가 실패해도 runtime 실패로 처리하며 단계와 원인을 기록한다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다. 프로젝트 연결을 삭제하면 해당 프로젝트 작업의 정확한 runtime session 경로도 함께 제거한다.
 
 ## Git 격리
@@ -132,7 +136,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
 | `runtime_sessions` | 작업별 Simulator 단계, 기기, 앱, PID와 진단 |
-| `runtime_evidence` | 작업별 화면·접근성·UI action·Debug state·fixture·runtime verification 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
+| `runtime_evidence` | 작업별 실행 ID·시도·판정 결과와 화면·접근성·UI action·Debug state·fixture·runtime verification 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
 
 대시보드의 수치와 최근 활동은 `events`, `tasks`, `findings`에서 계산한다. JSONL 원문 전체 대신 UI에 필요한 redacted 메시지만 최대 길이를 제한해 저장한다.
 

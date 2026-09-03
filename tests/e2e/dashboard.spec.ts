@@ -42,6 +42,10 @@ test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await expect(runtime.getByText('iPhone 16 Pro', { exact: true })).toBeVisible()
   await expect(runtime.getByText('com.example.ElmwoodOnline', { exact: true })).toBeVisible()
   await expect(runtime.getByText('PID 43120', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('실행 보고서', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('복구 후 통과', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('판정 통과 1 · 실패 1', { exact: true })).toBeVisible()
+  await expect(runtime.locator('.runtime-report-attempt')).toHaveCount(2)
   await expect(runtime.getByRole('button', { name: /Simulator 화면 증거/ })).toContainText('1.2 MB')
   await expect(runtime.getByRole('button', { name: /Simulator 접근성 트리/ })).toContainText(
     '41.8 KB'
@@ -52,6 +56,21 @@ test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await expect(runtime.getByRole('button', { name: /Simulator Debug state·fixture/ })).toContainText(
     '8.0 KB'
   )
+  await expect(runtime.getByRole('button', { name: /Runtime 인수 검증 결과/ })).toContainText(
+    'runtime acceptance 3/3 통과'
+  )
+
+  const repairedAttempt = runtime.locator('.runtime-report-attempt').nth(1)
+  await repairedAttempt.locator('summary').click()
+  await expect(repairedAttempt.getByText('실패 · 복구됨', { exact: true })).toBeVisible()
+  await expect(repairedAttempt.getByRole('button', { name: /Runtime 인수 검증 결과/ })).toContainText(
+    'runtime acceptance 2/3 통과'
+  )
+  await expect(page).toHaveScreenshot('runtime-report.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
 })
 
 test('shows repository readiness when selecting a project without tasks', async ({ page }) => {

@@ -561,6 +561,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         expect.objectContaining({
           taskId: task.id,
           kind: 'runtime-verification',
+          attempt: 1,
+          outcome: 'passed',
+          summary: 'runtime acceptance 2/2 통과',
           mimeType: 'application/json'
         })
       ])
@@ -649,6 +652,11 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(task.status).toBe('failed')
     expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({ status: 'failed' })
     expect(verification).toBeDefined()
+    expect(verification).toMatchObject({
+      attempt: 1,
+      outcome: 'failed',
+      summary: expect.stringContaining('runtime acceptance 0/1 통과')
+    })
     expect(JSON.parse(await readFile(verification!.path, 'utf8'))).toMatchObject({
       passed: false,
       assertionCount: 1,
@@ -744,14 +752,21 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     const task = fixture.store.getTask(fixture.taskId)
     const snapshot = fixture.store.getSnapshot(task.projectId)
+    const verificationRecords = snapshot.runtimeEvidence.filter(
+      (item) => item.kind === 'runtime-verification'
+    )
     const reports = await Promise.all(
-      snapshot.runtimeEvidence
-        .filter((item) => item.kind === 'runtime-verification')
+      verificationRecords
         .map(async (item) => JSON.parse(await readFile(item.path, 'utf8')) as { passed: boolean })
     )
     expect(task).toMatchObject({ status: 'awaiting_approval', attempt: 2 })
     expect(launchCount).toBe(2)
     expect(reports.map((report) => report.passed).sort()).toEqual([false, true])
+    expect(new Set(verificationRecords.map((item) => item.runId)).size).toBe(1)
+    expect(verificationRecords.map(({ attempt, outcome }) => ({ attempt, outcome }))).toEqual([
+      { attempt: 2, outcome: 'passed' },
+      { attempt: 1, outcome: 'failed' }
+    ])
     expect(snapshot.events.some((event) => event.kind === 'runtime_repair_started')).toBe(true)
     expect(snapshot.events.filter((event) => event.kind === 'runtime_verified')).toHaveLength(2)
     expect(snapshot.findings).toEqual([])

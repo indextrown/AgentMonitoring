@@ -46,7 +46,12 @@ import {
   XAxis,
   YAxis
 } from 'recharts'
-import { buildDailySeries, buildHourlyActivity, isActiveTask } from '../../shared/domain'
+import {
+  buildDailySeries,
+  buildHourlyActivity,
+  buildRuntimeTaskReport,
+  isActiveTask
+} from '../../shared/domain'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -139,6 +144,20 @@ const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
   running: '실행 중',
   failed: '실패',
   stopped: '종료됨'
+}
+
+const RUNTIME_EVIDENCE_LABELS: Record<RuntimeEvidenceRecord['kind'], string> = {
+  screen: 'Simulator 화면 증거',
+  accessibility: 'Simulator 접근성 트리',
+  'ui-actions': 'Simulator UI 조작 결과',
+  'debug-state': 'Simulator Debug state·fixture',
+  'runtime-verification': 'Runtime 인수 검증 결과'
+}
+
+const RUNTIME_REPORT_OUTCOME_LABELS: Record<RuntimeEvidenceRecord['outcome'], string> = {
+  captured: '증거 수집',
+  passed: '통과',
+  failed: '실패'
 }
 
 const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard }> = [
@@ -1522,6 +1541,12 @@ function TaskDrawer({
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
+  const runtimeReport = buildRuntimeTaskReport(evidence, events)
+  const runtimeReportOutcome = runtimeReport?.recovered
+    ? '복구 후 통과'
+    : runtimeReport
+      ? RUNTIME_REPORT_OUTCOME_LABELS[runtimeReport.latestOutcome]
+      : null
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
@@ -1542,32 +1567,65 @@ function TaskDrawer({
               {runtime.processId && <code>PID {runtime.processId}</code>}
             </div>
             <p>{runtime.message}</p>
-            {evidence.length > 0 && (
-              <div className="runtime-evidence-list">
-                {evidence.slice(0, 5).map((item) => {
-                  const isJsonEvidence = item.kind !== 'screen'
-                  const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
-                  const evidenceLabel = item.kind === 'accessibility'
-                    ? 'Simulator 접근성 트리'
-                    : item.kind === 'ui-actions'
-                      ? 'Simulator UI 조작 결과'
-                      : item.kind === 'debug-state'
-                        ? 'Simulator Debug state·fixture'
-                        : item.kind === 'runtime-verification'
-                          ? 'Runtime 인수 검증 결과'
-                        : 'Simulator 화면 증거'
-                  return (
-                    <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
-                      <EvidenceIcon size={14} />
-                      <span>
-                        <strong>{evidenceLabel}</strong>
-                        <small>{isJsonEvidence ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
-                      </span>
-                      <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
-                    </button>
-                  )
-                })}
-                {evidence.length > 5 && <small>최근 5개 표시 · 전체 {evidence.length}개 저장</small>}
+            {runtimeReport && (
+              <div className="runtime-report">
+                <div className="runtime-report-heading">
+                  <div>
+                    <strong>실행 보고서</strong>
+                    <small>판정 통과 {runtimeReport.passedCount} · 실패 {runtimeReport.failedCount}</small>
+                  </div>
+                  <span className={`runtime-report-outcome outcome-${runtimeReport.latestOutcome}`}>
+                    {runtimeReportOutcome}
+                  </span>
+                </div>
+                <div className="runtime-report-stats">
+                  <span><strong>{runtimeReport.runCount}</strong>실행</span>
+                  <span><strong>{runtimeReport.attempts.length}</strong>시도</span>
+                  <span><strong>{runtimeReport.repairCount}</strong>복구</span>
+                  <span><strong>{runtimeReport.evidenceCount}</strong>증거</span>
+                </div>
+                <div className="runtime-report-attempts">
+                  {runtimeReport.attempts.map((attempt, index) => (
+                    <details
+                      className={`runtime-report-attempt outcome-${attempt.outcome}`}
+                      open={index === 0 || undefined}
+                      key={`${attempt.runId}-${attempt.attempt}`}
+                    >
+                      <summary>
+                        <span>
+                          <strong>실행 {attempt.executionNumber} · 시도 {attempt.attempt}</strong>
+                          <small>{timeAgo(attempt.createdAt)} · 증거 {attempt.evidence.length}개</small>
+                        </span>
+                        <em>
+                          {attempt.repaired
+                            ? '실패 · 복구됨'
+                            : RUNTIME_REPORT_OUTCOME_LABELS[attempt.outcome]}
+                        </em>
+                        <ChevronDown size={13} />
+                      </summary>
+                      {attempt.summary && <p>{attempt.summary}</p>}
+                      <div className="runtime-evidence-list">
+                        {attempt.evidence.map((item) => {
+                          const isJsonEvidence = item.kind !== 'screen'
+                          const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
+                          return (
+                            <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
+                              <EvidenceIcon size={14} />
+                              <span>
+                                <strong>{RUNTIME_EVIDENCE_LABELS[item.kind]}</strong>
+                                <small>
+                                  {item.summary ? `${item.summary} · ` : ''}
+                                  {isJsonEvidence ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)}
+                                </small>
+                              </span>
+                              <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </details>
+                  ))}
+                </div>
               </div>
             )}
             <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>

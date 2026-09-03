@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { buildDailySeries, buildHourlyActivity, canTransition } from '../../src/shared/domain'
-import type { EventRecord, TaskRecord } from '../../src/shared/types'
+import {
+  buildDailySeries,
+  buildHourlyActivity,
+  buildRuntimeTaskReport,
+  canTransition
+} from '../../src/shared/domain'
+import type { EventRecord, RuntimeEvidenceRecord, TaskRecord } from '../../src/shared/types'
 
 describe('task state machine', () => {
   it('allows the guarded implementation and approval flow', () => {
@@ -64,5 +69,64 @@ describe('activity aggregation', () => {
     expect(series.at(-1)?.started).toBe(32)
     expect(series.at(-1)?.completed).toBe(32)
     expect(series.every((point, index) => index === 0 || point.started >= series[index - 1].started)).toBe(true)
+  })
+})
+
+describe('runtime report aggregation', () => {
+  it('groups evidence by execution and attempt while preserving repair outcomes', () => {
+    const evidence = (
+      [
+        ['run-1', 1, 'screen', 'captured', null, '2026-09-01T00:00:00.000Z'],
+        ['run-1', 1, 'runtime-verification', 'failed', '2/3 통과', '2026-09-01T00:00:01.000Z'],
+        ['run-1', 2, 'screen', 'captured', null, '2026-09-01T00:01:00.000Z'],
+        ['run-1', 2, 'runtime-verification', 'passed', '3/3 통과', '2026-09-01T00:01:01.000Z'],
+        ['run-2', 1, 'runtime-verification', 'passed', '3/3 통과', '2026-09-02T00:00:00.000Z']
+      ] as const
+    ).map<RuntimeEvidenceRecord>(([runId, attempt, kind, outcome, summary, createdAt], index) => ({
+      id: `evidence-${index}`,
+      taskId: 'task',
+      projectId: 'project',
+      runId,
+      attempt,
+      kind,
+      outcome,
+      summary,
+      path: `/tmp/evidence-${index}.json`,
+      mimeType: kind === 'screen' ? 'image/png' : 'application/json',
+      sizeBytes: 100,
+      createdAt
+    }))
+    const repairEvent: EventRecord = {
+      id: 1,
+      projectId: 'project',
+      taskId: 'task',
+      kind: 'runtime_repair_started',
+      actor: 'orchestrator',
+      message: 'repair',
+      severity: null,
+      createdAt: '2026-09-01T00:00:02.000Z'
+    }
+
+    const report = buildRuntimeTaskReport(evidence, [repairEvent])
+
+    expect(report).toMatchObject({
+      runCount: 2,
+      repairCount: 1,
+      evidenceCount: 5,
+      passedCount: 2,
+      failedCount: 1,
+      latestOutcome: 'passed',
+      recovered: false
+    })
+    expect(report?.attempts.map(({ executionNumber, attempt, outcome, repaired }) => ({
+      executionNumber,
+      attempt,
+      outcome,
+      repaired
+    }))).toEqual([
+      { executionNumber: 2, attempt: 1, outcome: 'passed', repaired: false },
+      { executionNumber: 1, attempt: 2, outcome: 'passed', repaired: false },
+      { executionNumber: 1, attempt: 1, outcome: 'failed', repaired: true }
+    ])
   })
 })

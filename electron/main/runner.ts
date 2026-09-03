@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
@@ -327,6 +328,7 @@ export class AgentRunner {
       resolveDone = resolvePromise
     })
     const control: ActiveRun = { child: null, stopped: false, termination: null, done, resolveDone }
+    const runId = randomUUID()
     this.activeRuns.set(taskId, control)
 
     try {
@@ -406,7 +408,8 @@ export class AgentRunner {
               this.store.getTask(taskId),
               project,
               worktreePath,
-              control
+              control,
+              runId
             )
             automationPassed = true
             break
@@ -771,7 +774,8 @@ export class AgentRunner {
     task: TaskRecord,
     project: ProjectRecord,
     worktreePath: string,
-    control: ActiveRun
+    control: ActiveRun,
+    runId: string
   ): Promise<RuntimeRunResult | null> {
     const manifest = await readProjectCapabilityManifest(project.path)
     if (manifest.state === 'missing') return null
@@ -853,11 +857,13 @@ export class AgentRunner {
       const imagePaths: string[] = []
       if (result.screenEvidence) {
         const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
           kind: 'screen',
           path: result.screenEvidence.path,
           mimeType: result.screenEvidence.mimeType,
           sizeBytes: result.screenEvidence.sizeBytes,
-          createdAt: result.screenEvidence.capturedAt
+          createdAt: result.screenEvidence.capturedAt,
+          summary: '최종 Simulator 화면 캡처'
         })
         imagePaths.push(evidence.path)
         this.emit(
@@ -871,11 +877,16 @@ export class AgentRunner {
       if (result.debugStateEvidence) {
         const debugState = result.debugStateEvidence
         const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
           kind: 'debug-state',
           path: debugState.path,
           mimeType: debugState.mimeType,
           sizeBytes: debugState.sizeBytes,
-          createdAt: debugState.capturedAt
+          createdAt: debugState.capturedAt,
+          summary: [
+            debugState.fixtureId ? `fixture ${debugState.fixtureId} 적용` : '',
+            debugState.hasState ? '최종 Debug 상태 수집' : ''
+          ].filter(Boolean).join(' · ')
         })
         if (debugState.fixtureId) {
           this.emit(
@@ -905,11 +916,13 @@ export class AgentRunner {
       if (result.uiActionEvidence) {
         const actions = result.uiActionEvidence
         const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
           kind: 'ui-actions',
           path: actions.path,
           mimeType: actions.mimeType,
           sizeBytes: actions.sizeBytes,
-          createdAt: actions.executedAt
+          createdAt: actions.executedAt,
+          summary: `identifier UI 조작 ${actions.actionCount.toLocaleString('ko-KR')}단계 성공`
         })
         this.emit(
           task,
@@ -929,11 +942,13 @@ export class AgentRunner {
       if (result.accessibilityEvidence) {
         const accessibility = result.accessibilityEvidence
         const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
           kind: 'accessibility',
           path: accessibility.path,
           mimeType: accessibility.mimeType,
           sizeBytes: accessibility.sizeBytes,
-          createdAt: accessibility.capturedAt
+          createdAt: accessibility.capturedAt,
+          summary: `접근성 요소 ${accessibility.nodeCount.toLocaleString('ko-KR')}개${accessibility.truncated ? ' · 일부 생략' : ''}`
         })
         this.emit(
           task,
@@ -979,14 +994,17 @@ export class AgentRunner {
             `runtime acceptance 결과를 안전하게 저장하지 못했습니다. ${redact(String(error))}`
           )
         }
+        verificationSummary = summarizeRuntimeAcceptance(report)
         const storedEvidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
           kind: 'runtime-verification',
           path: verificationEvidence.path,
           mimeType: verificationEvidence.mimeType,
           sizeBytes: verificationEvidence.sizeBytes,
-          createdAt: verificationEvidence.createdAt
+          createdAt: verificationEvidence.createdAt,
+          outcome: report.passed ? 'passed' : 'failed',
+          summary: verificationSummary
         })
-        verificationSummary = summarizeRuntimeAcceptance(report)
         this.emit(
           task,
           'runtime_verified',

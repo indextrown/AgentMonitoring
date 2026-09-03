@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -142,6 +143,16 @@ describe('AppStore', () => {
       sizeBytes: 4_096,
       createdAt: new Date(Date.now() + 3_000).toISOString()
     })
+    store.addRuntimeEvidence(task.id, {
+      runId: 'runtime-run-1',
+      kind: 'runtime-verification',
+      outcome: 'passed',
+      summary: 'runtime acceptance 3/3 통과',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'runtime-verification.json'),
+      mimeType: 'application/json',
+      sizeBytes: 5_120,
+      createdAt: new Date(Date.now() + 4_000).toISOString()
+    })
     store.close()
 
     const reopened = new AppStore(databasePath)
@@ -157,7 +168,20 @@ describe('AppStore', () => {
     expect(reopened.getSnapshot(project.id).runtimeEvidence).toMatchObject([
       {
         taskId: task.id,
+        runId: 'runtime-run-1',
+        attempt: 1,
+        kind: 'runtime-verification',
+        outcome: 'passed',
+        summary: 'runtime acceptance 3/3 통과',
+        mimeType: 'application/json',
+        sizeBytes: 5_120
+      },
+      {
+        taskId: task.id,
+        runId: 'legacy',
+        attempt: 1,
         kind: 'debug-state',
+        outcome: 'captured',
         mimeType: 'application/json',
         sizeBytes: 4_096
       },
@@ -189,5 +213,50 @@ describe('AppStore', () => {
     })
     expect(reopened.getSnapshot(project.id).events.some((event) => event.kind === 'runtime_stopped')).toBe(true)
     reopened.close()
+  })
+
+  it('adds runtime report columns to databases created before report metadata', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'legacy.sqlite')
+    const legacy = new DatabaseSync(databasePath)
+    legacy.exec(`
+      CREATE TABLE runtime_evidence (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_evidence (
+        id, task_id, project_id, kind, path, mime_type, size_bytes, created_at
+      ) VALUES (
+        'legacy-evidence', 'legacy-task', 'legacy-project', 'screen',
+        '/tmp/legacy-screen.png', 'image/png', 100, '2026-09-03T00:00:00.000Z'
+      );
+    `)
+    legacy.close()
+
+    const store = new AppStore(databasePath)
+    const columns = store.database
+      .prepare('PRAGMA table_info(runtime_evidence)')
+      .all()
+      .map((row) => String((row as Record<string, unknown>).name))
+    expect(columns).toEqual(
+      expect.arrayContaining(['run_id', 'attempt', 'outcome', 'summary'])
+    )
+    expect(store.listRuntimeEvidence()).toMatchObject([
+      {
+        id: 'legacy-evidence',
+        runId: 'legacy',
+        attempt: 1,
+        outcome: 'captured',
+        summary: null
+      }
+    ])
+    store.close()
   })
 })
