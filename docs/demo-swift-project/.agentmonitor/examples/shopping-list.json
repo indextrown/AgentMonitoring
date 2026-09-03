@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "adapter": {
+    "kind": "ios-simulator",
+    "container": "AgentMonitoringDemo.xcodeproj",
+    "scheme": "AgentMonitoringDemo",
+    "configuration": "Debug",
+    "deviceFamily": "iphone"
+  },
+  "capabilities": {
+    "build": true,
+    "run": true,
+    "observe": ["screen", "accessibility"],
+    "act": ["ui"],
+    "verify": ["test-command", "runtime-scenario"]
+  },
+  "runtimeScenario": {
+    "actions": [
+      {
+        "kind": "type-text",
+        "identifier": "shopping-item-input",
+        "text": "우유",
+        "timeoutSeconds": 10
+      },
+      {
+        "kind": "tap",
+        "identifier": "add-shopping-item",
+        "timeoutSeconds": 10
+      },
+      {
+        "kind": "tap",
+        "identifier": "shopping-item-toggle",
+        "timeoutSeconds": 10
+      }
+    ],
+    "assertions": [
+      {
+        "kind": "accessibility",
+        "name": "장보기 목록 화면 표시",
+        "identifier": "shopping-list-screen",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "accessibility",
+        "name": "추가한 항목 표시",
+        "identifier": "shopping-item-row",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "accessibility",
+        "name": "항목 이름 표시",
+        "identifier": "shopping-item-name",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "accessibility",
+        "name": "구매 완료 상태 표시",
+        "identifier": "shopping-item-completed",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "evidence",
+        "name": "장보기 목록 화면 저장",
+        "target": "screen"
+      },
+      {
+        "kind": "evidence",
+        "name": "접근성 트리 저장",
+        "target": "accessibility"
+      },
+      {
+        "kind": "evidence",
+        "name": "UI 조작 결과 저장",
+        "target": "ui-actions"
+      }
+    ]
+  }
+}
