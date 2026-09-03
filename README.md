@@ -186,7 +186,9 @@ Swift 앱이 아니거나 Simulator 검증이 필요하지 않다면 코드와 �
 
 ## Swift 앱은 어떻게 검증하나요?
 
-Swift 저장소를 연결하면 AgentMonitoring이 Git 추적 파일에서 `.xcworkspace`와 `.xcodeproj`를 찾아요. 이어서 `xcodebuild -list -json`으로 Scheme을 확인하고 iPhone을 기본 실행 기기로 설정해요. 프로젝트 설정에서 iPad로 바꾸거나 감지 결과를 직접 수정할 수 있어요.
+Swift 저장소를 연결하면 AgentMonitoring이 `.xcworkspace`와 `.xcodeproj`를 찾아요. Git 추적 파일을 먼저 확인하고, Tuist처럼 생성 결과를 Git에 올리지 않는 프로젝트는 저장소 안의 실제 파일도 제한된 범위에서 찾아요. 이어서 `xcodebuild -list -json`으로 Scheme을 확인하고 iPhone을 기본 실행 기기로 설정해요.
+
+Build, Run, Observe, Act가 회색이면 **iOS 자동 연결**을 누르세요. Xcode 프로젝트와 Scheme을 다시 찾아 네 영역을 한 번에 연결해요. 찾지 못하면 프로젝트 설정에서 container와 Scheme을 직접 입력할 수 있어요. 실행 기기는 iPhone과 iPad 중에서 선택할 수 있어요.
 
 새 작업에서는 Codex가 자연어 목표를 다음 두 종류의 조건으로 바꿔요.
 
@@ -205,7 +207,7 @@ Swift 저장소를 연결하면 AgentMonitoring이 Git 추적 파일에서 `.xcw
 | Repair | 실패 로그와 화면 증거를 다음 구현 시도에 전달해요. |
 | Report | 시도별 화면, 조작, 판정과 복구 이력을 보여줘요. |
 
-대상 Git 저장소에 설정 파일을 자동으로 만들지는 않아요. 자동 감지한 프로젝트 설정은 AgentMonitoring의 로컬 SQLite에 저장해요.
+이 과정은 대상 Git 저장소를 수정하거나 `.agentmonitor/project.json`을 만들지 않아요. 자동 감지한 프로젝트 설정은 AgentMonitoring의 로컬 SQLite에 저장해요.
 
 팀이 실행 설정을 Git으로 공유하거나 Debug state·fixture가 필요하다면 `.agentmonitor/project.json`을 사용할 수 있어요. 형식과 실제 예제는 다음 문서에서 확인하세요.
 

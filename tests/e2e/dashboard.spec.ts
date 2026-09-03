@@ -13,6 +13,7 @@ test('matches the dense monitoring dashboard structure', async ({ page }) => {
   await expect(page.getByText('시작 대비 완료 누적 추이')).toBeVisible()
   await expect(page.getByText('등록 대비 해결 누적 추이')).toBeVisible()
   await expect(page.locator('.activity-row')).toHaveCount(15)
+  await expect(page.locator('.capability-summary').getByRole('button', { name: 'iOS 자동 연결' })).toBeVisible()
   await expect(page).toHaveScreenshot('dashboard.png', {
     animations: 'disabled',
     fullPage: true,
@@ -89,6 +90,29 @@ test('shows repository readiness when selecting a project without tasks', async 
   await expect(page.getByText('최근 24시간')).toBeVisible()
 })
 
+test('automatically connects missing iOS access areas without changing repository files', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  const capabilities = page.locator('.capability-panel')
+  await expect(capabilities.getByText('iOS 앱 실행 영역을 한 번에 연결하세요')).toBeVisible()
+  await capabilities.getByRole('button', { name: 'iOS 자동 연결' }).click()
+
+  await expect(capabilities.getByText('AgentMonitoring 내부 설정')).toBeVisible()
+  await expect(capabilities.locator('.capability-item.ready')).toHaveCount(5)
+  await expect(capabilities.getByRole('button', { name: 'iOS 자동 연결' })).not.toBeVisible()
+  await expect(capabilities.getByText('저장소 파일은 바꾸지 않습니다.', { exact: false })).not.toBeVisible()
+})
+
+test('explains the manual fallback when iOS automatic connection cannot find Xcode', async ({ page }) => {
+  await page.goto('/?workspace=empty&runtime-discovery=missing')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: 'iOS 자동 연결' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('Xcode 프로젝트 또는 Workspace를 찾지 못했습니다')
+  await expect(page.getByRole('alert')).toContainText('프로젝트 설정에서 직접 입력하세요')
+})
+
 test('keeps AI access visible after a project has tasks', async ({ page }) => {
   await page.goto('/')
 
@@ -96,6 +120,7 @@ test('keeps AI access visible after a project has tasks', async ({ page }) => {
   await expect(summary.getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
   await expect(summary.getByText('Code', { exact: true })).toBeVisible()
   await expect(summary.getByText('Verify', { exact: true })).toBeVisible()
+  await expect(summary.getByRole('button', { name: 'iOS 자동 연결' })).toBeVisible()
 
   await summary.getByRole('button', { name: '전체 보기' }).click()
   await expect(page.getByRole('heading', { name: '프로젝트 설정' })).toBeVisible()
@@ -249,7 +274,7 @@ test('distinguishes supported iOS runtime capabilities from planned access', asy
   await expect(page.getByText('현재 5개 사용 가능 · 1개는 프로젝트 선언 후 연결 대기')).toBeVisible()
   await expect(page.locator('.capability-item.ready')).toHaveCount(5)
   await expect(page.locator('.capability-item.declared')).toHaveCount(1)
-  await expect(page.getByText('Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.')).toBeVisible()
+  await expect(page.getByText('연결된 Build·Run·관찰·조작 항목은 작업별 Swift runtime에서 사용합니다. Debug state·fixture는 project.json 고급 설정입니다.')).toBeVisible()
 })
 
 test('generates, reviews, and freezes a task-scoped Simulator scenario', async ({ page }) => {

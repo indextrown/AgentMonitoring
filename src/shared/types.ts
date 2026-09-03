@@ -362,7 +362,7 @@ export interface GenerateRuntimeScenarioInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 1
+export const AGENT_MONITORING_BRIDGE_VERSION = 2
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -374,6 +374,7 @@ export interface AgentMonitoringBridge {
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
   inspectProject: (projectId: string) => Promise<ProjectInspection>
+  autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>

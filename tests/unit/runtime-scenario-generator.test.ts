@@ -1,7 +1,12 @@
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  findXcodeContainersOnDisk,
   findTrackedXcodeContainers,
-  parseXcodeSchemes
+  parseXcodeSchemes,
+  selectXcodeContainer
 } from '../../electron/main/project-runtime-config'
 import { buildApprovedRuntimeContract } from '../../electron/main/runtime-scenario-generator'
 
@@ -20,6 +25,36 @@ describe('runtime scenario generation', () => {
       'Demo.xcodeproj/project.xcworkspace/contents.xcworkspacedata',
       'AppWorkspace.xcworkspace/contents.xcworkspacedata'
     ])).toEqual(['AppWorkspace.xcworkspace', 'Demo.xcodeproj'])
+  })
+
+  it('finds generated Xcode containers without traversing build dependencies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-xcode-discovery-'))
+    try {
+      await mkdir(join(root, 'Generated', 'Demo.xcodeproj'), { recursive: true })
+      await writeFile(join(root, 'Generated', 'Demo.xcodeproj', 'project.pbxproj'), '// generated')
+      await mkdir(join(root, 'Demo.xcworkspace'), { recursive: true })
+      await writeFile(join(root, 'Demo.xcworkspace', 'contents.xcworkspacedata'), '<Workspace />')
+      await mkdir(join(root, 'Pods', 'Ignored.xcodeproj'), { recursive: true })
+      await writeFile(join(root, 'Pods', 'Ignored.xcodeproj', 'project.pbxproj'), '// dependency')
+
+      await expect(findXcodeContainersOnDisk(root)).resolves.toEqual([
+        'Demo.xcworkspace',
+        'Generated/Demo.xcodeproj'
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers Git-tracked containers over generated disk candidates', () => {
+    expect(selectXcodeContainer(
+      ['TrackedApp.xcodeproj'],
+      ['GeneratedApp.xcworkspace']
+    )).toBe('TrackedApp.xcodeproj')
+    expect(selectXcodeContainer(
+      [],
+      ['GeneratedApp.xcodeproj', 'GeneratedApp.xcworkspace']
+    )).toBe('GeneratedApp.xcworkspace')
   })
 
   it('parses schemes from Xcode project and workspace output', () => {

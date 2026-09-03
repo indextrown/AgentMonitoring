@@ -19,6 +19,8 @@ const bridge: AgentMonitoringBridge = {
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
   inspectProject: (projectId: string) => ipcRenderer.invoke('project:inspect', projectId),
+  autoConfigureProjectRuntime: (projectId: string) =>
+    ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
     ipcRenderer.invoke('runtime-scenario:generate', input),
   removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
