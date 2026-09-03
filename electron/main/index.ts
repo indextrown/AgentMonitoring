@@ -10,6 +10,8 @@ import type {
   CreateTaskInput,
   EventRecord,
   GenerateRuntimeScenarioInput,
+  StorageCleanupInput,
+  StoragePolicy,
   UpdateProjectInput
 } from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
@@ -61,6 +63,14 @@ const updateNoteSchema = z.object({
 const findingStateSchema = z.object({
   findingId: z.string().uuid(),
   resolved: z.boolean()
+})
+
+const storagePolicySchema = z.object({
+  runtimeArtifactRetentionDays: z.union([z.literal(0), z.literal(7), z.literal(30), z.literal(90)])
+})
+
+const storageCleanupSchema = z.object({
+  removeLocalBranches: z.boolean()
 })
 
 let mainWindow: BrowserWindow | null = null
@@ -288,6 +298,18 @@ function registerIpc(): void {
     await requireRunner().discard(taskId)
   })
 
+  ipcMain.handle('storage:overview', () => requireRunner().getStorageOverview())
+
+  ipcMain.handle('storage:set-policy', (_event, rawPolicy: StoragePolicy) => {
+    const policy = storagePolicySchema.parse(rawPolicy)
+    return requireRunner().setStoragePolicy(policy)
+  })
+
+  ipcMain.handle('storage:cleanup', (_event, rawInput: StorageCleanupInput) => {
+    const input = storageCleanupSchema.parse(rawInput)
+    return requireRunner().cleanupStorage(input)
+  })
+
   ipcMain.handle('finding:set-resolved', (_event, rawInput: unknown) => {
     const input = findingStateSchema.parse(rawInput)
     return requireStore().setFindingResolved(input.findingId, input.resolved)
@@ -332,6 +354,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()
   await createWindow()
+  void runner.reconcileStorage().catch((error) => console.error('저장 공간 시작 정리 실패', error))
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) await createWindow()

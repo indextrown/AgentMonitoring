@@ -215,6 +215,39 @@ describe('AppStore', () => {
     reopened.close()
   })
 
+  it('persists storage retention and clears task-owned runtime metadata', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Storage project', join(directory, 'storage-project'))
+    const task = store.createTask(project.id, '저장 공간 정리', '작업별 실행 기록을 안전하게 정리한다.', 1)
+
+    expect(store.getRuntimeArtifactRetentionDays()).toBe(30)
+    expect(store.setRuntimeArtifactRetentionDays(7)).toBe(7)
+    expect(store.listAllTasks().map((item) => item.id)).toContain(task.id)
+
+    store.setTaskWorkspace(task.id, 'agentmonitor/storage-test', join(directory, 'worktrees', task.id))
+    store.setRuntimeSession(task.id, 'stopped', { message: '정리 대기' })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'screen',
+      path: join(directory, 'runtime-sessions', task.id, 'screen.png'),
+      mimeType: 'image/png',
+      sizeBytes: 12,
+      createdAt: new Date().toISOString()
+    })
+    store.deleteRuntimeData(task.id)
+    expect(store.getRuntimeSession(task.id)).toBeNull()
+    expect(store.listRuntimeEvidence(project.id)).toEqual([])
+    expect(store.clearTaskWorktree(task.id).worktreePath).toBeNull()
+    expect(store.clearTaskBranch(task.id).branchName).toBeNull()
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getRuntimeArtifactRetentionDays()).toBe(7)
+    reopened.close()
+  })
+
   it('adds runtime report columns to databases created before report metadata', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
     temporaryDirectories.push(directory)

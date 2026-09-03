@@ -14,6 +14,7 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  HardDrive,
   GitCompareArrows,
   GitBranch,
   Image as ImageIcon,
@@ -52,6 +53,7 @@ import {
   buildRuntimeTaskReport,
   isActiveTask
 } from '../../shared/domain'
+import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -70,6 +72,9 @@ import type {
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   RuntimeUiAction,
+  RuntimeArtifactRetentionDays,
+  StorageCleanupResult,
+  StorageOverview,
   TaskChanges,
   TaskRecord,
   TaskStatus,
@@ -79,9 +84,27 @@ import { demoBridge } from './demo'
 
 type Page = 'dashboard' | 'tasks' | 'findings' | 'notes' | 'projects'
 type Range = 7 | 30 | 'all'
+type BridgeConnectionIssue = 'missing' | 'outdated'
 
-const electronBridgeUnavailable = !window.agentMonitoring && navigator.userAgent.toLowerCase().includes('electron')
-const bridge: AgentMonitoringBridge = window.agentMonitoring ?? demoBridge
+const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
+const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
+const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
+  'getStorageOverview',
+  'setStoragePolicy',
+  'cleanupStorage'
+]
+const bridgeConnectionIssue: BridgeConnectionIssue | null = !electronRuntime
+  ? null
+  : !runtimeBridge
+    ? 'missing'
+    : runtimeBridge.apiVersion !== AGENT_MONITORING_BRIDGE_VERSION ||
+        requiredBridgeMethods.some((method) => typeof runtimeBridge[method] !== 'function')
+      ? 'outdated'
+      : null
+const electronBridgeUnavailable = bridgeConnectionIssue !== null
+const bridge: AgentMonitoringBridge = electronBridgeUnavailable
+  ? demoBridge
+  : (runtimeBridge as AgentMonitoringBridge | undefined) ?? demoBridge
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   queued: '대기',
@@ -189,6 +212,7 @@ function shortDate(value: string): string {
 function formatBytes(value: number): string {
   if (value < 1_024) return `${value} B`
   if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KB`
+  if (value >= 1_024 * 1_024 * 1_024) return `${(value / (1_024 * 1_024 * 1_024)).toFixed(1)} GB`
   return `${(value / (1_024 * 1_024)).toFixed(1)} MB`
 }
 
@@ -231,6 +255,7 @@ export function App(): React.JSX.Element {
   const [noteModal, setNoteModal] = useState(false)
   const [editingNote, setEditingNote] = useState<NoteRecord | null>(null)
   const [searchModal, setSearchModal] = useState(false)
+  const [storageModal, setStorageModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
   const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
   const [inspection, setInspection] = useState<ProjectInspection | null>(null)
@@ -308,6 +333,7 @@ export function App(): React.JSX.Element {
       }
       if (event.key === 'Escape') {
         setSearchModal(false)
+        setStorageModal(false)
         setTaskModal(false)
         setNoteModal(false)
         setEditingNote(null)
@@ -485,7 +511,7 @@ export function App(): React.JSX.Element {
   }
 
   if (electronBridgeUnavailable) {
-    return <RuntimeErrorScreen />
+    return <RuntimeErrorScreen issue={bridgeConnectionIssue ?? 'missing'} />
   }
 
   if (!snapshot || !codexAuth) {
@@ -525,6 +551,7 @@ export function App(): React.JSX.Element {
         onProject={selectProject}
         onAddProject={addProject}
         onSearch={() => setSearchModal(true)}
+        onStorage={() => setStorageModal(true)}
         onFeedback={() => void bridge.openFeedback().catch((feedbackError) => setError(String(feedbackError)))}
       />
 
@@ -571,11 +598,14 @@ export function App(): React.JSX.Element {
         {selectedProject && page === 'dashboard' && snapshot.tasks.length > 0 && (
           <DashboardPage
             snapshot={snapshot}
+            inspection={inspection}
+            inspectionLoading={inspectionLoading}
             activeTask={activeTask}
             awaitingTask={awaitingTask}
             unresolvedCount={unresolved.length}
             range={range}
             onRange={setRange}
+            onRefreshInspection={() => void refreshInspection(selectedProject.id)}
             onPage={setPage}
             onOpenTask={setSelectedTask}
             onNewTask={() => setTaskModal(true)}
@@ -608,11 +638,19 @@ export function App(): React.JSX.Element {
           />
         )}
         {selectedProject && page === 'projects' && (
-          <ProjectsPage project={selectedProject} onSave={async (project) => {
-            await bridge.updateProject(project)
-            await load(project.projectId)
-            await refreshInspection(project.projectId)
-          }} onOpen={() => void bridge.openPath(selectedProject.path)} onRemove={() => void removeProject(selectedProject)} />
+          <ProjectsPage
+            project={selectedProject}
+            inspection={inspection}
+            inspectionLoading={inspectionLoading}
+            onRefreshInspection={() => void refreshInspection(selectedProject.id)}
+            onSave={async (project) => {
+              await bridge.updateProject(project)
+              await load(project.projectId)
+              await refreshInspection(project.projectId)
+            }}
+            onOpen={() => void bridge.openPath(selectedProject.path)}
+            onRemove={() => void removeProject(selectedProject)}
+          />
         )}
       </main>
 
@@ -661,6 +699,9 @@ export function App(): React.JSX.Element {
           }}
         />
       )}
+      {storageModal && (
+        <StorageModal onClose={() => setStorageModal(false)} />
+      )}
       {selectedTask && (
         <TaskDrawer
           task={selectedTask}
@@ -686,7 +727,8 @@ export function App(): React.JSX.Element {
   )
 }
 
-function RuntimeErrorScreen(): React.JSX.Element {
+function RuntimeErrorScreen({ issue }: { issue: BridgeConnectionIssue }): React.JSX.Element {
+  const outdated = issue === 'outdated'
   return (
     <main className="auth-shell">
       <div className="auth-titlebar">
@@ -696,15 +738,18 @@ function RuntimeErrorScreen(): React.JSX.Element {
       <section className="auth-card" role="alert">
         <div className="auth-icon error"><Octagon size={25} /></div>
         <p className="eyebrow">RUNTIME CONNECTION</p>
-        <h1>앱 연결을 불러오지 못했습니다</h1>
+        <h1>{outdated ? '앱 연결을 업데이트해야 합니다' : '앱 연결을 불러오지 못했습니다'}</h1>
         <p className="auth-description">
-          Electron preload가 연결되지 않아 실제 프로젝트와 로컬 데이터에 접근할 수 없습니다.
-          안전을 위해 데모 화면으로 전환하지 않았습니다.
+          {outdated
+            ? '화면은 새 버전이지만 Electron preload는 이전 버전입니다. 일부 기능만 실행하면 오류가 나므로 작업을 시작하기 전에 연결을 다시 불러옵니다.'
+            : 'Electron preload가 연결되지 않아 실제 프로젝트와 로컬 데이터에 접근할 수 없습니다. 안전을 위해 데모 화면으로 전환하지 않았습니다.'}
         </p>
         <button className="auth-primary" onClick={() => window.location.reload()}>
-          다시 불러오기
+          {outdated ? '새 연결 다시 불러오기' : '다시 불러오기'}
         </button>
-        <p className="auth-footnote">문제가 계속되면 터미널에서 앱을 종료한 뒤 `pnpm dev`로 다시 실행하세요.</p>
+        <p className="auth-footnote">
+          다시 불러와도 같다면 터미널에서 실행 중인 앱을 `Ctrl+C`로 완전히 종료한 뒤 `pnpm dev`를 다시 실행하세요.
+        </p>
       </section>
     </main>
   )
@@ -779,8 +824,6 @@ function ProjectStartPage({
 }): React.JSX.Element {
   const hasTestCommand = Boolean(project.testCommand.trim())
   const ready = hasTestCommand && inspection?.clean
-  const readyCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'ready').length ?? 0
-  const declaredCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'declared').length ?? 0
 
   return (
     <section className="project-start-page">
@@ -835,43 +878,7 @@ function ProjectStartPage({
         </article>
       )}
 
-      {inspection && (
-        <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
-          <header className="capability-header">
-            <div>
-              <p className="eyebrow">AI ACCESS CONTRACT</p>
-              <h3>AI가 접근할 수 있는 영역</h3>
-              <p>
-                현재 {readyCapabilityCount}개 사용 가능
-                {declaredCapabilityCount > 0 ? ` · ${declaredCapabilityCount}개는 프로젝트 선언 후 연결 대기` : ''}
-              </p>
-            </div>
-            <span className="manifest-state">
-              {inspection.capabilityManifest.state === 'valid'
-                ? '계약 확인됨'
-                : inspection.capabilityManifest.state === 'invalid'
-                  ? '계약 오류'
-                  : '코드 작업 모드'}
-            </span>
-          </header>
-          <div className="capability-grid">
-            {inspection.capabilities.map((capability) => (
-              <div className={`capability-item ${capability.status}`} key={capability.key}>
-                <span>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</span>
-                <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
-                <small>{capability.detail}</small>
-              </div>
-            ))}
-          </div>
-          <footer className="capability-manifest-note">
-            <code>{inspection.capabilityManifest.path}</code>
-            <span>{inspection.capabilityManifest.message}</span>
-            {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
-            )}
-          </footer>
-        </article>
-      )}
+      {inspection && <ProjectCapabilityPanel inspection={inspection} />}
 
       {inspection && !inspection.clean && (
         <div className="readiness-warning" role="status">
@@ -929,6 +936,122 @@ function ProjectStartPage({
         </div>
       </article>
     </section>
+  )
+}
+
+function capabilityManifestLabel(inspection: ProjectInspection): string {
+  if (inspection.capabilityManifest.state === 'valid') return '계약 확인됨'
+  if (inspection.capabilityManifest.state === 'invalid') return '계약 오류'
+  return '코드 작업 모드'
+}
+
+function ProjectCapabilityPanel({
+  inspection,
+  onRefresh
+}: {
+  inspection: ProjectInspection
+  onRefresh?: () => void
+}): React.JSX.Element {
+  const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
+  const declaredCount = inspection.capabilities.filter((capability) => capability.status === 'declared').length
+
+  return (
+    <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
+      <header className="capability-header">
+        <div>
+          <p className="eyebrow">AI ACCESS CONTRACT</p>
+          <h3>AI가 접근할 수 있는 영역</h3>
+          <p>
+            현재 {readyCount}개 사용 가능
+            {declaredCount > 0 ? ` · ${declaredCount}개는 프로젝트 선언 후 연결 대기` : ''}
+          </p>
+        </div>
+        <div className="capability-header-actions">
+          <span className="manifest-state">{capabilityManifestLabel(inspection)}</span>
+          {onRefresh && (
+            <button className="secondary-button" type="button" onClick={onRefresh}>
+              <Activity size={13} /> 다시 검사
+            </button>
+          )}
+        </div>
+      </header>
+      <div className="capability-grid">
+        {inspection.capabilities.map((capability) => (
+          <div className={`capability-item ${capability.status}`} key={capability.key}>
+            <span>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</span>
+            <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
+            <small>{capability.detail}</small>
+          </div>
+        ))}
+      </div>
+      <footer className="capability-manifest-note">
+        <code>{inspection.capabilityManifest.path}</code>
+        <span>{inspection.capabilityManifest.message}</span>
+        {inspection.capabilityManifest.state === 'valid' && (
+          <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
+        )}
+      </footer>
+    </article>
+  )
+}
+
+function ProjectCapabilityEmpty({
+  loading,
+  onRefresh
+}: {
+  loading: boolean
+  onRefresh: () => void
+}): React.JSX.Element {
+  return (
+    <article className="panel capability-empty" aria-live="polite">
+      {loading ? <LoaderCircle className="spin" size={17} /> : <AlertTriangle size={17} />}
+      <div>
+        <strong>{loading ? 'AI 접근 영역을 검사하고 있습니다' : 'AI 접근 영역을 불러오지 못했습니다'}</strong>
+        <span>{loading ? '저장소 구성과 프로젝트 선언을 확인하는 중입니다.' : '저장소를 다시 검사해 접근 가능한 기능을 확인하세요.'}</span>
+      </div>
+      {!loading && <button className="secondary-button" onClick={onRefresh}><Activity size={13} /> 다시 검사</button>}
+    </article>
+  )
+}
+
+function ProjectCapabilitySummary({
+  inspection,
+  loading,
+  onRefresh,
+  onDetails
+}: {
+  inspection: ProjectInspection | null
+  loading: boolean
+  onRefresh: () => void
+  onDetails: () => void
+}): React.JSX.Element {
+  if (!inspection) return <ProjectCapabilityEmpty loading={loading} onRefresh={onRefresh} />
+
+  const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
+
+  return (
+    <article className={`panel capability-summary manifest-${inspection.capabilityManifest.state}`}>
+      <header>
+        <div>
+          <p className="eyebrow">AI ACCESS</p>
+          <h3>AI가 접근할 수 있는 영역</h3>
+          <p>코드 작업부터 실행·관찰·조작·검증까지 현재 연결 상태입니다.</p>
+        </div>
+        <div className="capability-summary-actions">
+          <span className="manifest-state">{capabilityManifestLabel(inspection)}</span>
+          <button className="secondary-button" onClick={onDetails}><Settings2 size={13} /> 전체 보기</button>
+        </div>
+      </header>
+      <div className="capability-summary-status" aria-label={`AI 접근 영역 ${readyCount}개 사용 가능`}>
+        {inspection.capabilities.map((capability) => (
+          <div className={capability.status} key={capability.key} title={capability.detail}>
+            <span />
+            <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
+            <small>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</small>
+          </div>
+        ))}
+      </div>
+    </article>
   )
 }
 
@@ -1007,6 +1130,7 @@ function Sidebar({
   onProject,
   onAddProject,
   onSearch,
+  onStorage,
   onFeedback
 }: {
   snapshot: DashboardSnapshot
@@ -1018,6 +1142,7 @@ function Sidebar({
   onProject: (id: string) => void
   onAddProject: () => void
   onSearch: () => void
+  onStorage: () => void
   onFeedback: () => void
 }): React.JSX.Element {
   const activeCount = snapshot.tasks.filter(isActiveTask).length
@@ -1092,6 +1217,10 @@ function Sidebar({
         실제 Git 프로젝트 추가
       </button>
 
+      <button className="storage-button" onClick={onStorage}>
+        <HardDrive size={14} />
+        저장 공간
+      </button>
       <button className="feedback-button" onClick={onFeedback}>
         <MessageSquare size={14} />
         앱 피드백
@@ -1102,21 +1231,27 @@ function Sidebar({
 
 function DashboardPage({
   snapshot,
+  inspection,
+  inspectionLoading,
   activeTask,
   awaitingTask,
   unresolvedCount,
   range,
   onRange,
+  onRefreshInspection,
   onPage,
   onOpenTask,
   onNewTask
 }: {
   snapshot: DashboardSnapshot
+  inspection: ProjectInspection | null
+  inspectionLoading: boolean
   activeTask: TaskRecord | null
   awaitingTask: TaskRecord | null
   unresolvedCount: number
   range: Range
   onRange: (range: Range) => void
+  onRefreshInspection: () => void
   onPage: (page: Page) => void
   onOpenTask: (task: TaskRecord) => void
   onNewTask: () => void
@@ -1180,6 +1315,13 @@ function DashboardPage({
           </p>
         </article>
       </div>
+
+      <ProjectCapabilitySummary
+        inspection={inspection}
+        loading={inspectionLoading}
+        onRefresh={onRefreshInspection}
+        onDetails={() => onPage('projects')}
+      />
 
       <article className="panel timeline-card">
         <div className="timeline-summary">
@@ -1374,11 +1516,17 @@ function NotesPage({
 
 function ProjectsPage({
   project,
+  inspection,
+  inspectionLoading,
+  onRefreshInspection,
   onSave,
   onOpen,
   onRemove
 }: {
   project: ProjectRecord
+  inspection: ProjectInspection | null
+  inspectionLoading: boolean
+  onRefreshInspection: () => void
   onSave: (input: UpdateProjectInput) => Promise<void>
   onOpen: () => void
   onRemove: () => void
@@ -1394,6 +1542,11 @@ function ProjectsPage({
   return (
     <section className="workspace-page">
       <PageHeading title="프로젝트 설정" description="에이전트가 접근할 저장소와 검증 명령을 명시한다." />
+      {inspection ? (
+        <ProjectCapabilityPanel inspection={inspection} onRefresh={onRefreshInspection} />
+      ) : (
+        <ProjectCapabilityEmpty loading={inspectionLoading} onRefresh={onRefreshInspection} />
+      )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
         void onSave({ projectId: project.id, name, testCommand, runtimeAdapter })
@@ -1478,6 +1631,154 @@ function Modal({ title, description, onClose, children, wide = false }: { title:
         {children}
       </section>
     </div>
+  )
+}
+
+function StorageModal({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const [overview, setOverview] = useState<StorageOverview | null>(null)
+  const [retentionDays, setRetentionDays] = useState<RuntimeArtifactRetentionDays>(30)
+  const [removeLocalBranches, setRemoveLocalBranches] = useState(false)
+  const [result, setResult] = useState<StorageCleanupResult | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
+
+  const refresh = useCallback(async (): Promise<void> => {
+    setLoading(true)
+    setStorageError(null)
+    try {
+      const next = await bridge.getStorageOverview()
+      setOverview(next)
+      setRetentionDays(next.policy.runtimeArtifactRetentionDays)
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const savePolicy = async (): Promise<void> => {
+    setBusy(true)
+    setStorageError(null)
+    setResult(null)
+    try {
+      setOverview(await bridge.setStoragePolicy({ runtimeArtifactRetentionDays: retentionDays }))
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const cleanup = async (): Promise<void> => {
+    const warning = removeLocalBranches
+      ? '완료·폐기 작업의 agentmonitor 로컬 브랜치도 삭제합니다. 폐기한 변경은 복구할 수 없습니다. 계속할까요?'
+      : '현재 보관 정책이 지난 실행 증거와 사용하지 않는 격리 작업공간을 정리할까요?'
+    if (!window.confirm(warning)) return
+    setBusy(true)
+    setStorageError(null)
+    setResult(null)
+    try {
+      await bridge.setStoragePolicy({ runtimeArtifactRetentionDays: retentionDays })
+      const cleanupResult = await bridge.cleanupStorage({ removeLocalBranches })
+      setResult(cleanupResult)
+      setOverview(cleanupResult.overview)
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      wide
+      title="저장 공간 관리"
+      description="격리 작업공간은 작업 상태에 맞춰 정리하고, 실행 증거는 선택한 기간 동안 보관합니다."
+      onClose={onClose}
+    >
+      <div className="storage-manager">
+        {loading && <div className="storage-loading"><LoaderCircle className="spin" size={16} />사용량 계산 중</div>}
+        {!loading && overview && (
+          <>
+            <div className="storage-summary">
+              <article>
+                <span>전체 사용량</span>
+                <strong>{formatBytes(overview.totalBytes)}</strong>
+                <small>{timeAgo(overview.scannedAt)} 확인</small>
+              </article>
+              <article>
+                <span>격리 작업공간</span>
+                <strong>{formatBytes(overview.worktreeBytes)}</strong>
+                <small>{overview.worktreeCount}개 · 승인·폐기 시 즉시 정리</small>
+              </article>
+              <article>
+                <span>실행 증거 · 진행 중 빌드</span>
+                <strong>{formatBytes(overview.runtimeArtifactBytes)}</strong>
+                <small>{overview.runtimeArtifactCount}개 작업 기록 · 완료·폐기 시 빌드 정리</small>
+              </article>
+            </div>
+
+            <section className="storage-policy">
+              <div>
+                <strong>Simulator 실행 기록 보관</strong>
+                <p>화면 캡처, 접근성 트리와 UI 조작 결과를 보관합니다. DerivedData는 완료·폐기 시 바로 삭제합니다.</p>
+              </div>
+              <select
+                aria-label="Simulator 실행 기록 보관 기간"
+                value={retentionDays}
+                onChange={(event) => setRetentionDays(Number(event.target.value) as RuntimeArtifactRetentionDays)}
+              >
+                <option value={0}>완료·폐기 후 바로 삭제</option>
+                <option value={7}>7일</option>
+                <option value={30}>30일 (기본값)</option>
+                <option value={90}>90일</option>
+              </select>
+              <button className="secondary-button" disabled={busy} onClick={() => void savePolicy()}>
+                {busy ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}정책 저장
+              </button>
+            </section>
+
+            <label className="branch-cleanup-option">
+              <input
+                type="checkbox"
+                checked={removeLocalBranches}
+                onChange={(event) => setRemoveLocalBranches(event.target.checked)}
+              />
+              <span>
+                <strong>완료·폐기된 로컬 작업 브랜치도 삭제</strong>
+                <small>대상 {overview.branchCandidateCount}개 · 폐기 작업의 미병합 변경은 복구할 수 없습니다.</small>
+              </span>
+            </label>
+
+            <div className="storage-cleanup-row">
+              <div>
+                <strong>지금 정리할 항목 {overview.cleanupCandidateCount}개</strong>
+                <p>실행 중이거나 다시 실행할 수 있는 실패·중단 작업은 자동으로 삭제하지 않습니다.</p>
+              </div>
+              <button className="primary-button" disabled={busy} onClick={() => void cleanup()}>
+                {busy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}지금 정리
+              </button>
+            </div>
+          </>
+        )}
+        {result && (
+          <div className={`storage-result${result.warnings.length > 0 ? ' warning' : ''}`} role="status">
+            <CheckCircle2 size={15} />
+            <div>
+              <strong>{formatBytes(result.bytesReclaimed)} 확보했습니다.</strong>
+              <p>작업공간 {result.worktreesRemoved}개 · 실행 기록 {result.runtimeArtifactsRemoved}개 · 브랜치 {result.branchesRemoved}개 정리</p>
+              {result.warnings.map((warning) => <small key={warning}>{warning}</small>)}
+            </div>
+          </div>
+        )}
+        {storageError && <div className="storage-error" role="alert"><AlertTriangle size={14} />{storageError}</div>}
+      </div>
+    </Modal>
   )
 }
 
@@ -1612,7 +1913,7 @@ function TaskModal({
           </section>
         )}
         {!project.runtimeAdapter && <p className="scenario-unavailable"><FileJson size={13} />iOS 프로젝트가 아니거나 실행 설정이 없습니다. 코드와 테스트만 검증합니다.</p>}
-        <label><span>최대 자가 수정 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /></label>
+        <label><span>최대 구현 시도 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /><small>최초 구현을 포함합니다. 테스트·Simulator 검증이나 Reviewer 검토에서 문제가 발견되면 남은 횟수만큼 다시 수정합니다.</small></label>
         <div className="workflow-preview"><span><FileText size={13} />테스트 설계</span><i /><span><Search size={13} />비평</span><i /><span><Bot size={13} />구현</span><i /><span><CheckCircle2 size={13} />검증</span></div>
         <button className="primary-button" disabled={submitting || generating || project.isDemo || (includeRuntime && Boolean(project.runtimeAdapter) && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : includeRuntime && generated ? '검증 조건 승인하고 작업 등록' : '작업 등록'}</button>
       </form>
@@ -1731,7 +2032,7 @@ function TaskDrawer({
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
-        <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
         {task.runtimeContract && (
           <section className="approved-scenario">
             <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>
@@ -1851,6 +2152,7 @@ function TaskDrawer({
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
+          {['failed', 'stopped'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
           {task.status === 'awaiting_approval' && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />원본에 적용</button></>}
         </footer>

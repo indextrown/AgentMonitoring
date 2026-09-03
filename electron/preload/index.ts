@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { AGENT_MONITORING_BRIDGE_VERSION } from '../../src/shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -9,6 +10,7 @@ import type {
 } from '../../src/shared/types'
 
 const bridge: AgentMonitoringBridge = {
+  apiVersion: AGENT_MONITORING_BRIDGE_VERSION,
   getCodexAuth: () => ipcRenderer.invoke('codex-auth:status'),
   loginCodex: () => ipcRenderer.invoke('codex-auth:login'),
   cancelCodexLogin: () => ipcRenderer.invoke('codex-auth:cancel'),
@@ -26,6 +28,9 @@ const bridge: AgentMonitoringBridge = {
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),
   discardTask: (taskId: string) => ipcRenderer.invoke('task:discard', taskId),
+  getStorageOverview: () => ipcRenderer.invoke('storage:overview'),
+  setStoragePolicy: (policy) => ipcRenderer.invoke('storage:set-policy', policy),
+  cleanupStorage: (input) => ipcRenderer.invoke('storage:cleanup', input),
   setFindingResolved: (findingId: string, resolved: boolean) =>
     ipcRenderer.invoke('finding:set-resolved', { findingId, resolved }),
   addNote: (projectId: string, title: string, body: string) =>

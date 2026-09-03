@@ -298,6 +298,37 @@ export interface TaskChanges {
   truncated: boolean
 }
 
+export type RuntimeArtifactRetentionDays = 0 | 7 | 30 | 90
+
+export interface StoragePolicy {
+  runtimeArtifactRetentionDays: RuntimeArtifactRetentionDays
+}
+
+export interface StorageOverview {
+  policy: StoragePolicy
+  worktreeBytes: number
+  runtimeArtifactBytes: number
+  totalBytes: number
+  worktreeCount: number
+  runtimeArtifactCount: number
+  cleanupCandidateCount: number
+  branchCandidateCount: number
+  scannedAt: string
+}
+
+export interface StorageCleanupInput {
+  removeLocalBranches: boolean
+}
+
+export interface StorageCleanupResult {
+  worktreesRemoved: number
+  runtimeArtifactsRemoved: number
+  branchesRemoved: number
+  bytesReclaimed: number
+  warnings: string[]
+  overview: StorageOverview
+}
+
 export interface DashboardSnapshot {
   projects: ProjectRecord[]
   selectedProject: ProjectRecord | null
@@ -331,7 +362,10 @@ export interface GenerateRuntimeScenarioInput {
   prompt: string
 }
 
+export const AGENT_MONITORING_BRIDGE_VERSION = 1
+
 export interface AgentMonitoringBridge {
+  apiVersion: number
   getCodexAuth: () => Promise<CodexAuthStatus>
   loginCodex: () => Promise<CodexAuthStatus>
   cancelCodexLogin: () => Promise<CodexAuthStatus>
@@ -348,6 +382,9 @@ export interface AgentMonitoringBridge {
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<void>
   discardTask: (taskId: string) => Promise<void>
+  getStorageOverview: () => Promise<StorageOverview>
+  setStoragePolicy: (policy: StoragePolicy) => Promise<StorageOverview>
+  cleanupStorage: (input: StorageCleanupInput) => Promise<StorageCleanupResult>
   setFindingResolved: (findingId: string, resolved: boolean) => Promise<FindingRecord>
   addNote: (projectId: string, title: string, body: string) => Promise<NoteRecord>
   updateNote: (noteId: string, title: string, body: string) => Promise<NoteRecord>

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -401,7 +401,7 @@ setInterval(() => undefined, 1_000)
     fixture.store.close()
   })
 
-  it('runs role-separated stages inside a git worktree and stops for approval', async () => {
+  it('feeds Reviewer findings back to the Implementer before stopping for approval', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runner-'))
     temporaryDirectories.push(directory)
     const repository = join(directory, 'repository')
@@ -419,14 +419,17 @@ setInterval(() => undefined, 1_000)
     await writeFile(
       fakeCodex,
       `#!/usr/bin/env node
-import { writeFileSync } from 'node:fs'
-const prompt = process.argv.at(-1) ?? ''
-console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
-if (prompt.includes('구현 담당자')) {
-  writeFileSync('agent-output.txt', 'implemented\\n')
-  writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
-}
-const message = prompt.includes('최종 읽기 전용 Reviewer') ? '[medium] 빈 입력 회귀 검토 필요' : 'stage complete'
+  import { existsSync, writeFileSync } from 'node:fs'
+  const prompt = process.argv.at(-1) ?? ''
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
+  if (prompt.includes('구현 담당자')) {
+    writeFileSync('agent-output.txt', 'implemented\\n')
+    writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
+    if (prompt.includes('직전 Reviewer')) writeFileSync('review-fix.txt', 'reviewed\\n')
+  }
+  const message = prompt.includes('최종 읽기 전용 Reviewer')
+    ? existsSync('review-fix.txt') ? 'VERDICT: PASS' : '[medium] 빈 입력 회귀 검토 필요'
+    : 'stage complete'
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `
@@ -437,9 +440,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const project = store.addProject('Fixture', repository)
     store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
-    const published: string[] = []
+    const published: Array<{ actor: string; message: string }> = []
     const codexHome = join(directory, 'codex-home')
-    const runner = new AgentRunner(store, worktrees, (event) => published.push(event.actor), fakeCodex, codexHome)
+    const runner = new AgentRunner(store, worktrees, (event) => published.push(event), fakeCodex, codexHome)
 
     await runner.run(task.id)
 
@@ -448,11 +451,15 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(awaitingApproval.worktreePath).toBeTruthy()
     expect(await readFile(join(awaitingApproval.worktreePath!, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(awaitingApproval.worktreePath!, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
-    expect(published).toContain('test-designer')
-    expect(published).toContain('critic')
-    expect(published).toContain('reviewer')
+    expect(await readFile(join(awaitingApproval.worktreePath!, 'review-fix.txt'), 'utf8')).toBe('reviewed\n')
+    expect(awaitingApproval.attempt).toBe(2)
+    expect(published.some((event) => event.actor === 'test-designer')).toBe(true)
+    expect(published.some((event) => event.actor === 'critic')).toBe(true)
+    expect(
+      published.filter((event) => event.actor === 'reviewer' && event.message === 'reviewer 단계 시작')
+    ).toHaveLength(2)
     expect(store.getSnapshot(project.id).findings).toMatchObject([
-      { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: false }
+      { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: true }
     ])
 
     const changes = await runner.getChanges(task.id)
@@ -469,6 +476,37 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(await readFile(join(repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(repository, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
     store.close()
+  })
+
+  it('keeps final Reviewer findings for human judgment after the implementation limit', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer')
+  ? '[high] 사용자 승인 전에 확인할 회귀 위험'
+  : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      maxAttempts: 1
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const snapshot = fixture.store.getSnapshot(task.projectId)
+    expect(task).toMatchObject({ status: 'awaiting_approval', attempt: 1 })
+    expect(snapshot.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: '사용자 승인 전에 확인할 회귀 위험',
+          severity: 'high',
+          resolved: false
+        })
+      ])
+    )
+    expect(snapshot.events.some((event) => event.message.includes('사람의 판단을 기다립니다.'))).toBe(true)
+    fixture.store.close()
   })
 
   it('launches an iPad runtime and gives UI action, screen, and accessibility evidence to the reviewer', async () => {
@@ -909,6 +947,28 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('removes DerivedData immediately after approval and keeps runtime evidence', async () => {
+    const fixture = await createApprovalFixture()
+    const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    const appDerivedDataPath = join(runtimeSessionPath, 'DerivedData')
+    const observerDerivedDataPath = join(runtimeSessionPath, 'accessibility-observer', 'DerivedData')
+    const evidencePath = join(runtimeSessionPath, 'evidence', 'screen.png')
+    await mkdir(appDerivedDataPath, { recursive: true })
+    await mkdir(observerDerivedDataPath, { recursive: true })
+    await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(join(appDerivedDataPath, 'App.app'), 'build-output')
+    await writeFile(join(observerDerivedDataPath, 'Observer.xctest'), 'observer-output')
+    await writeFile(evidencePath, 'runtime-evidence')
+
+    await fixture.runner.approve(fixture.taskId)
+
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('completed')
+    await expect(stat(appDerivedDataPath)).rejects.toThrow()
+    await expect(stat(observerDerivedDataPath)).rejects.toThrow()
+    expect((await stat(evidencePath)).isFile()).toBe(true)
+    fixture.store.close()
+  })
+
   it('refuses a non-fast-forward approval without changing the original branch', async () => {
     const fixture = await createApprovalFixture()
     await writeFile(join(fixture.repository, 'main-change.txt'), 'advanced\n')
@@ -944,6 +1004,89 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     await expect(stat(runtimeSessionPath)).rejects.toThrow()
     expect((await stat(fixture.repository)).isDirectory()).toBe(true)
     expect(fixture.store.getSnapshot().projects).toEqual([])
+    fixture.store.close()
+  })
+
+  it('discards worktree and DerivedData immediately while keeping evidence until retention expires', async () => {
+    const fixture = await createApprovalFixture()
+    const task = fixture.store.getTask(fixture.taskId)
+    const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    const appDerivedDataPath = join(runtimeSessionPath, 'DerivedData')
+    const observerDerivedDataPath = join(runtimeSessionPath, 'accessibility-observer', 'DerivedData')
+    const evidencePath = join(runtimeSessionPath, 'evidence', 'screen.png')
+    await mkdir(appDerivedDataPath, { recursive: true })
+    await mkdir(observerDerivedDataPath, { recursive: true })
+    await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(join(appDerivedDataPath, 'App.app'), 'build-output')
+    await writeFile(join(observerDerivedDataPath, 'Observer.xctest'), 'observer-output')
+    await writeFile(evidencePath, 'runtime-evidence')
+    fixture.store.setRuntimeSession(task.id, 'stopped', { message: '검증 증거 보관 중' })
+    fixture.store.addRuntimeEvidence(task.id, {
+      kind: 'screen',
+      path: evidencePath,
+      mimeType: 'image/png',
+      sizeBytes: 16,
+      createdAt: new Date().toISOString()
+    })
+
+    await fixture.runner.discard(task.id)
+
+    expect(fixture.store.getTask(task.id)).toMatchObject({ status: 'discarded', worktreePath: null })
+    await expect(stat(fixture.worktreePath)).rejects.toThrow()
+    await expect(stat(appDerivedDataPath)).rejects.toThrow()
+    await expect(stat(observerDerivedDataPath)).rejects.toThrow()
+    expect((await stat(evidencePath)).isFile()).toBe(true)
+    expect(fixture.store.getRuntimeSession(task.id)).not.toBeNull()
+
+    const branchBeforeCleanup = await execFileAsync(
+      'git',
+      ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`],
+      { cwd: fixture.repository }
+    )
+    expect(branchBeforeCleanup.stderr).toBe('')
+
+    await fixture.runner.setStoragePolicy({ runtimeArtifactRetentionDays: 0 })
+    const cleanup = await fixture.runner.cleanupStorage({ removeLocalBranches: true })
+
+    expect(cleanup.runtimeArtifactsRemoved).toBe(1)
+    expect(cleanup.branchesRemoved).toBe(1)
+    expect(cleanup.bytesReclaimed).toBeGreaterThan(0)
+    await expect(stat(runtimeSessionPath)).rejects.toThrow()
+    expect(fixture.store.getRuntimeSession(task.id)).toBeNull()
+    expect(fixture.store.listRuntimeEvidence(task.projectId)).toEqual([])
+    expect(fixture.store.getTask(task.id).branchName).toBeNull()
+    await expect(
+      execFileAsync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`], {
+        cwd: fixture.repository
+      })
+    ).rejects.toThrow()
+    fixture.store.close()
+  })
+
+  it('reconciles missing database pointers and unreferenced managed worktrees', async () => {
+    const fixture = await createApprovalFixture()
+    const worktreesRoot = dirname(fixture.worktreePath)
+    const missingTask = fixture.store.createTask(
+      fixture.store.getTask(fixture.taskId).projectId,
+      '사라진 작업공간',
+      '앱 재시작 시 남은 경로 정보를 안전하게 복구한다.',
+      1
+    )
+    fixture.store.setTaskWorkspace(
+      missingTask.id,
+      'agentmonitor/missing-worktree',
+      join(worktreesRoot, 'missing-worktree')
+    )
+    const orphanPath = join(worktreesRoot, 'orphan-project', 'orphan-task')
+    await mkdir(orphanPath, { recursive: true })
+    await writeFile(join(orphanPath, 'orphan.txt'), 'orphan')
+
+    const cleanup = await fixture.runner.reconcileStorage()
+
+    expect(cleanup.worktreesRemoved).toBe(1)
+    expect(fixture.store.getTask(missingTask.id).worktreePath).toBeNull()
+    await expect(stat(orphanPath)).rejects.toThrow()
+    expect((await stat(fixture.worktreePath)).isDirectory()).toBe(true)
     fixture.store.close()
   })
 })

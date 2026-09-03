@@ -89,6 +89,20 @@ test('shows repository readiness when selecting a project without tasks', async 
   await expect(page.getByText('최근 24시간')).toBeVisible()
 })
 
+test('keeps AI access visible after a project has tasks', async ({ page }) => {
+  await page.goto('/')
+
+  const summary = page.locator('.capability-summary')
+  await expect(summary.getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
+  await expect(summary.getByText('Code', { exact: true })).toBeVisible()
+  await expect(summary.getByText('Verify', { exact: true })).toBeVisible()
+
+  await summary.getByRole('button', { name: '전체 보기' }).click()
+  await expect(page.getByRole('heading', { name: '프로젝트 설정' })).toBeVisible()
+  await expect(page.locator('.capability-panel').getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
+  await expect(page.locator('.capability-panel').getByRole('button', { name: '다시 검사' })).toBeVisible()
+})
+
 test('uses dashboard chart links and expands the complete activity history', async ({ page }) => {
   await page.goto('/')
   const activity = page.locator('.activity-card')
@@ -163,6 +177,22 @@ test('gates the workspace behind the dedicated Codex login', async ({ page }) =>
   await page.getByRole('button', { name: 'ChatGPT로 계속' }).click()
   await expect(page.getByRole('heading', { name: '브라우저에서 로그인을 완료하세요' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'ElmwoodOnline' })).toBeVisible()
+})
+
+test('blocks an outdated Electron preload before unsupported features run', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 Electron/44.1.0'
+    })
+    ;(window as unknown as { agentMonitoring: unknown }).agentMonitoring = { apiVersion: 1 }
+  })
+  await page.goto('/')
+
+  await expect(page.getByRole('heading', { name: '앱 연결을 업데이트해야 합니다' })).toBeVisible()
+  await expect(page.getByText('Electron preload는 이전 버전입니다', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: '새 연결 다시 불러오기' })).toBeVisible()
+  await expect(page.getByText(/Ctrl\+C.*pnpm dev/)).toBeVisible()
 })
 
 test('starts from a real-project onboarding state without seeded data', async ({ page }) => {
@@ -291,4 +321,25 @@ test('removes monitoring data while preserving the source-repository boundary', 
   })
   await page.getByRole('button', { name: '연결 삭제' }).click()
   await expect(page.getByRole('heading', { name: '첫 Git 프로젝트를 연결하세요' })).toBeVisible()
+})
+
+test('shows storage usage and runs retention-based cleanup', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '저장 공간' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: '저장 공간 관리' })).toBeVisible()
+  await expect(dialog.getByText('610.0 MB')).toBeVisible()
+  await expect(dialog.getByText('승인·폐기 시 즉시 정리')).toBeVisible()
+  await expect(dialog.getByText(/DerivedData는 완료·폐기 시 바로 삭제합니다/)).toBeVisible()
+  await dialog.getByLabel('Simulator 실행 기록 보관 기간').selectOption('7')
+  await dialog.getByRole('button', { name: '정책 저장' }).click()
+
+  page.once('dialog', async (confirmation) => {
+    expect(confirmation.message()).toContain('현재 보관 정책')
+    await confirmation.accept()
+  })
+  await dialog.getByRole('button', { name: '지금 정리' }).click()
+  await expect(dialog.getByText('256.0 MB 확보했습니다.')).toBeVisible()
+  await expect(dialog.getByText('작업공간 1개 · 실행 기록 2개 · 브랜치 0개 정리')).toBeVisible()
 })

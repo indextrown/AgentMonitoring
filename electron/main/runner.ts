@@ -1,9 +1,20 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, rm, stat } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
-import type { EventRecord, ProjectRecord, RuntimeSessionStatus, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
+import type {
+  EventRecord,
+  ProjectRecord,
+  RuntimeSessionStatus,
+  Severity,
+  StorageCleanupInput,
+  StorageCleanupResult,
+  StorageOverview,
+  StoragePolicy,
+  TaskChanges,
+  TaskRecord
+} from '../../src/shared/types'
 import { isActiveTask } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
@@ -72,6 +83,37 @@ const MAX_UI_ACTION_REVIEW_CHARS = 20_000
 const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
 const MAX_RUNTIME_VERIFICATION_REVIEW_CHARS = 40_000
 const MAX_RUNTIME_REPAIR_CONTEXT_CHARS = 120_000
+const TERMINAL_TASK_STATUSES = new Set<TaskRecord['status']>(['completed', 'discarded'])
+
+function isPathInside(root: string, candidate: string): boolean {
+  const pathFromRoot = relative(resolve(root), resolve(candidate))
+  return pathFromRoot !== '' && pathFromRoot !== '..' && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot)
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function directorySize(path: string): Promise<number> {
+  let stats: Awaited<ReturnType<typeof lstat>>
+  try {
+    stats = await lstat(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+    throw error
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) return stats.size
+  const entries = await readdir(path, { withFileTypes: true })
+  let total = 0
+  for (const entry of entries) total += await directorySize(join(path, entry.name))
+  return total
+}
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -425,8 +467,6 @@ export class AgentRunner {
               control,
               runId
             )
-            automationPassed = true
-            break
           } catch (error) {
             if (!(error instanceof RuntimeAcceptanceStageError) || attempt >= task.maxAttempts) {
               throw error
@@ -450,7 +490,56 @@ export class AgentRunner {
               'orchestrator',
               `runtime 실패 증거를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
             )
+            continue
           }
+
+          const review = await this.runReviewer(
+            this.store.getTask(taskId),
+            worktreePath,
+            approvedRuntimeContract,
+            runtimeResult
+          )
+          const reviewerFindings = parseReviewerFindings(review.finalMessage)
+          this.store.resolveTaskFindings(task.id)
+          for (const finding of reviewerFindings) {
+            this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
+          }
+
+          if (reviewerFindings.length === 0) {
+            automationPassed = true
+            break
+          }
+
+          if (attempt >= task.maxAttempts) {
+            automationPassed = true
+            this.emit(
+              this.store.getTask(taskId),
+              'agent',
+              'orchestrator',
+              `Reviewer finding ${reviewerFindings.length}개가 남은 채 최대 구현 시도 횟수에 도달했습니다. 사람의 판단을 기다립니다.`,
+              'low'
+            )
+            break
+          }
+
+          const currentTask = this.store.getTask(taskId)
+          await this.stopRuntimeSession(
+            currentTask,
+            'stopped',
+            'Reviewer 수정 요청을 다음 구현 시도에 전달하기 위해 Simulator 앱을 정리했습니다.'
+          )
+          repairContext = [
+            '직전 Reviewer가 자동 검증을 통과한 변경에서 다음 문제를 찾았습니다.',
+            'Reviewer 보고를 근거로 제품 코드와 테스트를 수정하세요. finding을 숨기거나 검토 기준을 약화하지 마세요.',
+            review.finalMessage || reviewerFindings.map((finding) => `[${finding.severity}] ${finding.title}`).join('\n')
+          ].join('\n\n')
+          repairImagePaths = runtimeResult?.imagePaths ?? []
+          this.emit(
+            currentTask,
+            'agent',
+            'orchestrator',
+            `Reviewer finding ${reviewerFindings.length}개를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
+          )
           continue
         }
 
@@ -470,39 +559,8 @@ export class AgentRunner {
 
       if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
-        this.store.addFinding(task.projectId, task.id, `${task.title} 테스트가 재시도 한도를 초과했습니다.`, 'high')
+        this.store.addFinding(task.projectId, task.id, `${task.title} 자동 검증이 최대 구현 시도 횟수를 초과했습니다.`, 'high')
         return
-      }
-
-      this.store.resolveTaskFindings(task.id)
-      const review = await this.runCodexStage(
-        this.store.getTask(taskId),
-        worktreePath,
-        'reviewer',
-        'read-only',
-        [
-          `작업 목표: ${task.prompt}`,
-          '당신은 최종 읽기 전용 Reviewer입니다.',
-          '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
-          approvedRuntimeContract,
-          runtimeResult
-            ? [
-                `Swift runtime 결과:\n${runtimeResult.summary}`,
-                runtimeResult.reviewContext
-              ].filter(Boolean).join('\n\n')
-            : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
-          runtimeResult?.imagePaths.length
-            ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
-            : '',
-          '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
-          '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
-          '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
-          '코드는 수정하지 마세요.'
-        ].filter(Boolean).join('\n\n'),
-        runtimeResult?.imagePaths ?? []
-      )
-      for (const finding of parseReviewerFindings(review.finalMessage)) {
-        this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
       }
 
       if (control.stopped) throw new StoppedError()
@@ -561,6 +619,150 @@ export class AgentRunner {
         'AgentMonitoring 종료로 Simulator 앱을 정리했습니다.'
       )
     }
+  }
+
+  async getStorageOverview(): Promise<StorageOverview> {
+    const tasks = this.store.listAllTasks()
+    const runtimePaths = await this.listChildren(this.runtimeRoot)
+    const runtimeRecordTaskIds = new Set([
+      ...this.store.listRuntimeSessions().map((session) => session.taskId),
+      ...this.store.listRuntimeEvidence().map((evidence) => evidence.taskId)
+    ])
+    const runtimeArtifactTaskIds = new Set([
+      ...runtimePaths.map((path) => basename(path)),
+      ...runtimeRecordTaskIds
+    ])
+    const orphanWorktrees = await this.findOrphanWorktrees(tasks)
+    const existingWorktrees = await Promise.all(
+      tasks.map(async (task) => {
+        if (!task.worktreePath) return null
+        return await pathExists(task.worktreePath) ? task.worktreePath : null
+      })
+    )
+    const cleanupCandidateCount = orphanWorktrees.length + tasks.filter((task) =>
+      Boolean(task.worktreePath) && TERMINAL_TASK_STATUSES.has(task.status)
+    ).length + [...runtimeArtifactTaskIds].filter((taskId) => {
+      const task = tasks.find((candidate) => candidate.id === taskId)
+      return !task || this.shouldRemoveRuntimeArtifacts(task)
+    }).length
+    const branchCandidateCount = tasks.filter((task) =>
+      TERMINAL_TASK_STATUSES.has(task.status) &&
+      !task.worktreePath &&
+      task.branchName?.startsWith('agentmonitor/')
+    ).length
+    const [worktreeBytes, runtimeArtifactBytes] = await Promise.all([
+      directorySize(this.worktreesRoot),
+      directorySize(this.runtimeRoot)
+    ])
+
+    return {
+      policy: { runtimeArtifactRetentionDays: this.store.getRuntimeArtifactRetentionDays() },
+      worktreeBytes,
+      runtimeArtifactBytes,
+      totalBytes: worktreeBytes + runtimeArtifactBytes,
+      worktreeCount: existingWorktrees.filter(Boolean).length + orphanWorktrees.length,
+      runtimeArtifactCount: runtimeArtifactTaskIds.size,
+      cleanupCandidateCount,
+      branchCandidateCount,
+      scannedAt: new Date().toISOString()
+    }
+  }
+
+  async setStoragePolicy(policy: StoragePolicy): Promise<StorageOverview> {
+    this.store.setRuntimeArtifactRetentionDays(policy.runtimeArtifactRetentionDays)
+    return this.getStorageOverview()
+  }
+
+  async cleanupStorage(input: StorageCleanupInput): Promise<StorageCleanupResult> {
+    const before = await this.getStorageOverview()
+    const warnings: string[] = []
+    let worktreesRemoved = 0
+    let runtimeArtifactsRemoved = 0
+    let branchesRemoved = 0
+    const tasks = this.store.listAllTasks()
+
+    for (const task of tasks) {
+      if (task.worktreePath && !(await pathExists(task.worktreePath))) {
+        this.store.clearTaskWorktree(task.id)
+        continue
+      }
+      if (task.worktreePath && TERMINAL_TASK_STATUSES.has(task.status)) {
+        try {
+          await this.cleanupTaskWorktree(task, true)
+          worktreesRemoved += 1
+        } catch (error) {
+          warnings.push(`${task.title}: ${String(error).replace(/^Error:\s*/, '')}`)
+        }
+      }
+    }
+
+    for (const orphanPath of await this.findOrphanWorktrees(this.store.listAllTasks())) {
+      try {
+        await this.removeManagedPath(orphanPath, this.worktreesRoot)
+        worktreesRemoved += 1
+      } catch (error) {
+        warnings.push(`연결이 끊긴 작업공간: ${String(error).replace(/^Error:\s*/, '')}`)
+      }
+    }
+
+    const refreshedTasks = this.store.listAllTasks()
+    const taskById = new Map(refreshedTasks.map((task) => [task.id, task]))
+    const runtimePaths = await this.listChildren(this.runtimeRoot)
+    const runtimePathTaskIds = new Set(runtimePaths.map((path) => basename(path)))
+    for (const runtimePath of runtimePaths) {
+      const task = taskById.get(basename(runtimePath))
+      if (task && !this.shouldRemoveRuntimeArtifacts(task)) continue
+      try {
+        await this.removeManagedPath(runtimePath, this.runtimeRoot)
+        if (task) this.store.deleteRuntimeData(task.id)
+        runtimeArtifactsRemoved += 1
+      } catch (error) {
+        warnings.push(`실행 증거 ${basename(runtimePath)}: ${String(error).replace(/^Error:\s*/, '')}`)
+      }
+    }
+    const recordedRuntimeTaskIds = new Set([
+      ...this.store.listRuntimeSessions().map((session) => session.taskId),
+      ...this.store.listRuntimeEvidence().map((evidence) => evidence.taskId)
+    ])
+    for (const task of refreshedTasks) {
+      if (!this.shouldRemoveRuntimeArtifacts(task) || runtimePathTaskIds.has(task.id) || !recordedRuntimeTaskIds.has(task.id)) {
+        continue
+      }
+      this.store.deleteRuntimeData(task.id)
+      runtimeArtifactsRemoved += 1
+    }
+
+    if (input.removeLocalBranches) {
+      for (const task of this.store.listAllTasks()) {
+        if (!TERMINAL_TASK_STATUSES.has(task.status) || task.worktreePath || !task.branchName?.startsWith('agentmonitor/')) {
+          continue
+        }
+        try {
+          if (await this.cleanupTaskBranch(task)) branchesRemoved += 1
+        } catch (error) {
+          warnings.push(`${task.title} 브랜치: ${String(error).replace(/^Error:\s*/, '')}`)
+        }
+      }
+    }
+
+    for (const project of this.store.listProjects()) {
+      if (!(await pathExists(project.path))) continue
+      await this.runProcess('git', ['worktree', 'prune'], project.path, null)
+    }
+
+    const overview = await this.getStorageOverview()
+    return {
+      worktreesRemoved,
+      runtimeArtifactsRemoved,
+      branchesRemoved,
+      bytesReclaimed: Math.max(0, before.totalBytes - overview.totalBytes),
+      warnings,
+      overview
+    }
+  }
+
+  async reconcileStorage(): Promise<StorageCleanupResult> {
+    return this.cleanupStorage({ removeLocalBranches: false })
   }
 
   async approve(taskId: string): Promise<void> {
@@ -625,63 +827,46 @@ export class AgentRunner {
     const completed = this.store.transitionTask(taskId, 'completed')
     this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원본 ${targetBranch.output.trim()} 브랜치에 적용`)
 
-    const cleanupResult = await this.runProcess('git', ['worktree', 'remove', worktreePath], projectRoot, null)
-    if (cleanupResult.code === 0) {
-      this.store.clearTaskWorktree(taskId)
+    try {
+      await this.cleanupTaskWorktree(completed, false)
       this.emit(completed, 'agent', 'git', '승인된 격리 작업공간 정리 완료')
-    } else {
-      this.emit(completed, 'agent', 'git', `격리 작업공간 정리 실패 · ${cleanupResult.output.slice(-1_000)}`, 'low')
+    } catch (error) {
+      this.emit(completed, 'agent', 'git', `격리 작업공간 정리 실패 · ${String(error).slice(-1_000)}`, 'low')
     }
+    await this.cleanupTerminalDerivedData(completed)
+    await this.removeRuntimeArtifactsWhenExpired(this.store.getTask(taskId))
   }
 
   async discard(taskId: string): Promise<void> {
     const task = this.store.getTask(taskId)
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
     await this.stopRuntimeSession(task, 'stopped', '작업 폐기로 Simulator 앱을 정리했습니다.')
+    await this.cleanupTaskWorktree(task, true)
     const discarded = this.store.transitionTask(taskId, 'discarded')
     this.emit(discarded, 'task_discarded', 'human', `${task.title} 변경 폐기`)
-
-    if (task.worktreePath) {
-      const project = this.store.getProject(task.projectId)
-      await this.runProcess('git', ['worktree', 'remove', '--force', task.worktreePath], project.path, null)
-    }
+    await this.cleanupTerminalDerivedData(discarded)
+    await this.removeRuntimeArtifactsWhenExpired(discarded)
   }
 
   async removeProject(projectId: string): Promise<void> {
-    const project = this.store.getProject(projectId)
+    this.store.getProject(projectId)
     const tasks = this.store.listTasks(projectId)
     if (tasks.some((task) => this.activeRuns.has(task.id))) {
       throw new Error('실행 중인 작업이 있는 프로젝트는 제거할 수 없습니다.')
-    }
-
-    let projectAvailable = true
-    try {
-      await stat(project.path)
-    } catch {
-      projectAvailable = false
     }
 
     for (const task of tasks) {
       await this.stopRuntimeSession(task, 'stopped', '프로젝트 연결 삭제로 Simulator 앱을 정리했습니다.')
     }
 
-    if (projectAvailable) {
-      for (const task of tasks) {
-        if (!task.worktreePath) continue
-        try {
-          await stat(task.worktreePath)
-        } catch {
-          continue
-        }
-        const result = await this.runProcess('git', ['worktree', 'remove', '--force', task.worktreePath], project.path, null)
-        if (result.code !== 0) {
-          throw new Error(`격리 작업공간을 정리하지 못해 프로젝트 제거를 중단했습니다.\n${result.output.slice(-2_000)}`)
-        }
-      }
+    for (const task of tasks) {
+      if (!task.worktreePath) continue
+      await this.cleanupTaskWorktree(task, true)
     }
 
     for (const task of tasks) {
       await this.removeRuntimeArtifacts(task.id)
+      this.store.deleteRuntimeData(task.id)
     }
 
     this.store.deleteProject(projectId)
@@ -690,7 +875,7 @@ export class AgentRunner {
   private async removeRuntimeArtifacts(taskId: string): Promise<void> {
     const runtimeRoot = resolve(this.runtimeRoot)
     const sessionPath = resolve(runtimeRoot, taskId)
-    if (!sessionPath.startsWith(`${runtimeRoot}/`)) {
+    if (!isPathInside(runtimeRoot, sessionPath)) {
       throw new Error('안전하지 않은 runtime session 정리 경로입니다.')
     }
     let stats: Awaited<ReturnType<typeof lstat>>
@@ -704,6 +889,157 @@ export class AgentRunner {
       recursive: stats.isDirectory() && !stats.isSymbolicLink(),
       force: true
     })
+  }
+
+  private async removeTaskDerivedData(taskId: string): Promise<number> {
+    const runtimeRoot = resolve(this.runtimeRoot)
+    const sessionPath = resolve(runtimeRoot, taskId)
+    if (!isPathInside(runtimeRoot, sessionPath)) {
+      throw new Error('안전하지 않은 DerivedData 정리 경로입니다.')
+    }
+
+    const sessionStats = await lstat(sessionPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (!sessionStats || !sessionStats.isDirectory() || sessionStats.isSymbolicLink()) return 0
+
+    const targets = [resolve(sessionPath, 'DerivedData')]
+    const observerPath = resolve(sessionPath, 'accessibility-observer')
+    const observerStats = await lstat(observerPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (observerStats?.isDirectory() && !observerStats.isSymbolicLink()) {
+      targets.push(resolve(observerPath, 'DerivedData'))
+    }
+
+    let removed = 0
+    for (const target of targets) {
+      if (!isPathInside(sessionPath, target)) throw new Error('작업 경로 밖의 DerivedData는 정리할 수 없습니다.')
+      const stats = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
+      if (!stats) continue
+      await rm(target, {
+        recursive: stats.isDirectory() && !stats.isSymbolicLink(),
+        force: true
+      })
+      removed += 1
+    }
+    return removed
+  }
+
+  private async cleanupTerminalDerivedData(task: TaskRecord): Promise<void> {
+    try {
+      const removed = await this.removeTaskDerivedData(task.id)
+      if (removed > 0) {
+        const reason = task.status === 'completed' ? '작업 완료' : '작업 폐기'
+        this.emit(task, 'agent', 'runtime', `${reason} 후 DerivedData ${removed}곳 즉시 정리`)
+      }
+    } catch (error) {
+      this.emit(task, 'agent', 'runtime', `DerivedData 정리 실패 · ${String(error).slice(-1_000)}`, 'low')
+    }
+  }
+
+  private shouldRemoveRuntimeArtifacts(task: TaskRecord): boolean {
+    if (!TERMINAL_TASK_STATUSES.has(task.status)) return false
+    const retentionDays = this.store.getRuntimeArtifactRetentionDays()
+    if (retentionDays === 0) return true
+    return new Date(task.updatedAt).getTime() <= Date.now() - retentionDays * 86_400_000
+  }
+
+  private async removeRuntimeArtifactsWhenExpired(task: TaskRecord): Promise<void> {
+    if (!this.shouldRemoveRuntimeArtifacts(task)) return
+    await this.removeRuntimeArtifacts(task.id)
+    this.store.deleteRuntimeData(task.id)
+  }
+
+  private async cleanupTaskWorktree(task: TaskRecord, force: boolean): Promise<void> {
+    if (!task.worktreePath) return
+    const worktreePath = resolve(task.worktreePath)
+    if (!isPathInside(this.worktreesRoot, worktreePath)) {
+      throw new Error('안전하지 않은 격리 작업공간 정리 경로입니다.')
+    }
+    if (!(await pathExists(worktreePath))) {
+      this.store.clearTaskWorktree(task.id)
+      return
+    }
+
+    const project = this.store.getProject(task.projectId)
+    if (await pathExists(project.path)) {
+      const args = ['worktree', 'remove', ...(force ? ['--force'] : []), worktreePath]
+      const result = await this.runProcess('git', args, project.path, null)
+      if (result.code !== 0) {
+        throw new Error(`격리 작업공간을 정리하지 못했습니다.\n${result.output.slice(-2_000)}`)
+      }
+    } else {
+      await this.removeManagedPath(worktreePath, this.worktreesRoot)
+    }
+
+    if (await pathExists(worktreePath)) throw new Error('격리 작업공간이 디스크에 남아 있습니다.')
+    this.store.clearTaskWorktree(task.id)
+  }
+
+  private async cleanupTaskBranch(task: TaskRecord): Promise<boolean> {
+    if (!task.branchName?.startsWith('agentmonitor/')) return false
+    const project = this.store.getProject(task.projectId)
+    if (!(await pathExists(project.path))) throw new Error('원본 저장소를 찾을 수 없습니다.')
+    const exists = await this.runProcess(
+      'git',
+      ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`],
+      project.path,
+      null
+    )
+    if (exists.code !== 0) {
+      this.store.clearTaskBranch(task.id)
+      return false
+    }
+    const result = await this.runProcess(
+      'git',
+      ['branch', task.status === 'discarded' ? '-D' : '-d', task.branchName],
+      project.path,
+      null
+    )
+    if (result.code !== 0) throw new Error(result.output.slice(-2_000) || '로컬 브랜치를 삭제하지 못했습니다.')
+    this.store.clearTaskBranch(task.id)
+    return true
+  }
+
+  private async listChildren(root: string): Promise<string[]> {
+    try {
+      return (await readdir(root, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+        .map((entry) => resolve(root, entry.name))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+  }
+
+  private async findOrphanWorktrees(tasks: TaskRecord[]): Promise<string[]> {
+    const referenced = new Set(tasks.flatMap((task) => task.worktreePath ? [resolve(task.worktreePath)] : []))
+    const orphans: string[] = []
+    for (const topLevelPath of await this.listChildren(this.worktreesRoot)) {
+      if (referenced.has(topLevelPath)) continue
+      const descendants = [...referenced].filter((path) => isPathInside(topLevelPath, path))
+      if (descendants.length === 0) {
+        orphans.push(topLevelPath)
+        continue
+      }
+      for (const childPath of await this.listChildren(topLevelPath)) {
+        if (!referenced.has(childPath)) orphans.push(childPath)
+      }
+    }
+    return orphans
+  }
+
+  private async removeManagedPath(path: string, root: string): Promise<void> {
+    const resolvedPath = resolve(path)
+    if (!isPathInside(root, resolvedPath)) throw new Error('안전하지 않은 저장 공간 정리 경로입니다.')
+    const stats = await lstat(resolvedPath)
+    await rm(resolvedPath, { recursive: stats.isDirectory() && !stats.isSymbolicLink(), force: true })
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {
@@ -729,6 +1065,40 @@ export class AgentRunner {
     this.store.setTaskWorkspace(task.id, branchName, worktreePath)
     this.emit(task, 'agent', 'git', `격리 작업공간 생성 · ${basename(worktreePath)} · ${branchName}`)
     return worktreePath
+  }
+
+  private runReviewer(
+    task: TaskRecord,
+    worktreePath: string,
+    approvedRuntimeContract: string,
+    runtimeResult: RuntimeRunResult | null
+  ): Promise<ProcessResult> {
+    return this.runCodexStage(
+      task,
+      worktreePath,
+      'reviewer',
+      'read-only',
+      [
+        `작업 목표: ${task.prompt}`,
+        '당신은 최종 읽기 전용 Reviewer입니다.',
+        '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+        approvedRuntimeContract,
+        runtimeResult
+          ? [
+              `Swift runtime 결과:\n${runtimeResult.summary}`,
+              runtimeResult.reviewContext
+            ].filter(Boolean).join('\n\n')
+          : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
+        runtimeResult?.imagePaths.length
+          ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
+          : '',
+        '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
+        '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
+        '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
+        '코드는 수정하지 마세요.'
+      ].filter(Boolean).join('\n\n'),
+      runtimeResult?.imagePaths ?? []
+    )
   }
 
   private async runCodexStage(
