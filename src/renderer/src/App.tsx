@@ -837,7 +837,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run, 화면·접근성 관찰과 identifier UI 조작은 작업별 Swift runtime에서 사용합니다. 상태·fixture 조작은 다음 단계에서 연결합니다.</small>
+              <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
             )}
           </footer>
         </article>
@@ -1543,14 +1543,16 @@ function TaskDrawer({
             <p>{runtime.message}</p>
             {evidence.length > 0 && (
               <div className="runtime-evidence-list">
-                {evidence.slice(0, 3).map((item) => {
+                {evidence.slice(0, 4).map((item) => {
                   const isJsonEvidence = item.kind !== 'screen'
                   const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
                   const evidenceLabel = item.kind === 'accessibility'
                     ? 'Simulator 접근성 트리'
                     : item.kind === 'ui-actions'
                       ? 'Simulator UI 조작 결과'
-                      : 'Simulator 화면 증거'
+                      : item.kind === 'debug-state'
+                        ? 'Simulator Debug state·fixture'
+                        : 'Simulator 화면 증거'
                   return (
                     <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
                       <EvidenceIcon size={14} />
@@ -1562,7 +1564,7 @@ function TaskDrawer({
                     </button>
                   )
                 })}
-                {evidence.length > 3 && <small>최근 3개 표시 · 전체 {evidence.length}개 저장</small>}
+                {evidence.length > 4 && <small>최근 4개 표시 · 전체 {evidence.length}개 저장</small>}
               </div>
             )}
             <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>

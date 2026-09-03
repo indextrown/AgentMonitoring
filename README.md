@@ -10,7 +10,7 @@ AgentMonitoring은 코드를 직접 편집하는 IDE가 아니에요. 개발자�
 로컬 Git 저장소 연결
   → 작업 목표와 완료 조건 입력
   → 테스트 설계 → 비평 → 구현 → 검증
-  → Swift 계약이 있으면 iOS Simulator에서 앱 실행·identifier UI 조작·증거 수집
+  → Swift 계약이 있으면 iOS Simulator에서 앱 실행·fixture/UI 조작·화면·접근성·내부 상태 수집
   → 코드와 runtime 결과 리뷰
   → 변경 파일과 테스트 결과 확인
   → 사람의 승인 후 현재 로컬 브랜치에 적용
@@ -27,7 +27,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | ChatGPT 로그인 | Codex app-server로 로그인하고 앱 전용 인증 상태를 관리해요. OpenAI API 키는 필요하지 않아요. |
 | 로컬 프로젝트 연결 | 실제 Git 저장소를 등록하고 브랜치, 변경 파일, 언어, 빌드 도구, 테스트 파일을 검사해요. |
 | AI 접근성 진단 | 프로젝트가 Code, Build, Run, Observe, Act, Verify 중 어느 영역을 제공하도록 구성됐는지 확인해요. |
-| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad·iPhone Simulator에 실행하고, identifier 기반 UI 조작과 화면·접근성 증거 수집을 수행해요. |
+| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad·iPhone Simulator에 실행하고, Debug fixture·identifier UI 조작과 화면·접근성·앱 상태 증거 수집을 수행해요. |
 | 작업 등록 | 구현 목표, 완료 조건, 최대 자가 수정 횟수를 작업별로 저장해요. |
 | 다중 역할 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 정해진 순서로 실행해요. |
 | 테스트와 자가 수정 | 프로젝트 검증 명령을 실행하고, 실패 원인을 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
@@ -46,7 +46,7 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | 사용자와 장비 | 단일 사용자, 단일 Mac |
 | AI 작업자 | Codex만 지원 |
 | 대상 코드 | 사용자가 연결한 로컬 Git 저장소 |
-| 앱 실행·관찰·조작 | iPad 또는 iPhone Simulator 빌드·실행, 화면 캡처, XCTest 접근성 트리 수집, identifier 기반 tap·text 입력을 지원하며 내부 상태 관찰은 아직 지원하지 않음 |
+| 앱 실행·관찰·조작 | iPad 또는 iPhone Simulator 빌드·실행, 화면 캡처, XCTest 접근성 트리, identifier 기반 tap·text 입력, Debug bridge 상태·fixture를 지원 |
 | 변경 반영 | 사람 승인 후 현재 로컬 브랜치에만 적용 |
 | 데이터 저장 | 로컬 SQLite와 Git worktree |
 
@@ -130,8 +130,8 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 | Code | Git이 추적하는 코드를 읽고 수정해요. | 프로젝트를 연결하면 사용 가능 |
 | Build | Swift 앱을 빌드해요. | iOS 계약에서 활성화하면 사용 가능 |
 | Run | 앱을 Simulator에서 실행해요. | Build와 Run을 활성화하고 선택한 iPad·iPhone Simulator가 있으면 사용 가능 |
-| Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | `screen`·`accessibility`는 사용 가능하며 상태 연결은 준비 중 |
-| Act | UI를 조작하거나 Debug fixture를 적용해요. | `runtimeScenario.actions`의 identifier 기반 `tap`·`type-text`는 사용 가능하며 fixture 연결은 준비 중 |
+| Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | `screen`·`accessibility`와 `debugBridge` 기반 `state` 사용 가능 |
+| Act | UI를 조작하거나 Debug fixture를 적용해요. | identifier 기반 `tap`·`type-text`와 `debugBridge` 기반 fixture 사용 가능 |
 | Verify | 등록한 명령으로 테스트를 실행해요. | 검증 명령을 저장하면 사용 가능 |
 
 앱 실행 자동화를 준비하는 Swift 프로젝트는 저장소 루트에 `.agentmonitor/project.json`을 둘 수 있어요.
@@ -153,6 +153,10 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
     "act": ["ui", "fixture"],
     "verify": ["test-command", "runtime-scenario"]
   },
+  "debugBridge": {
+    "protocol": "file-v1",
+    "responseTimeoutSeconds": 10
+  },
   "runtimeScenario": {
     "actions": [
       {
@@ -166,7 +170,14 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
         "text": "부산항",
         "timeoutSeconds": 10
       }
-    ]
+    ],
+    "fixture": {
+      "id": "signed-in-home",
+      "payload": {
+        "accountID": "fixture-user",
+        "selectedTab": "home"
+      }
+    }
   }
 }
 ```
@@ -175,7 +186,7 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 
 `deviceFamily`에는 `"ipad"` 또는 `"iphone"`을 선택할 수 있어요. 기존 manifest와의 호환을 위해 이 필드를 생략하면 `"ipad"`로 동작해요.
 
-Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 순서로 실행해요. `act`에 `ui`가 있고 `runtimeScenario.actions`가 있으면 순서대로 조작해요. `observe`에 `screen`이 있으면 조작 후 화면을, `accessibility`가 있으면 조작 후 접근성 트리를 수집해요.
+Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 순서로 실행해요. `debugBridge`와 fixture가 있으면 먼저 적용하고, identifier UI action을 실행한 뒤 최종 Debug 상태·접근성 트리·화면을 수집해요.
 
 ```text
 격리 worktree의 Xcode container 확인
@@ -183,15 +194,20 @@ Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 
   → 작업 전용 DerivedData에 Debug 앱 빌드
   → bundle identifier와 .app 산출물 검증
   → Simulator 설치·실행
+  → Debug bridge로 fixture 적용·확인
   → 번들된 XCTest driver로 identifier 기반 tap·text 입력 실행
-  → action 결과와 최종 접근성 트리를 JSON으로 저장·전달
+  → 최종 Debug 상태·action 결과·접근성 트리를 JSON으로 저장·전달
   → 최종 화면을 PNG로 캡처해 Reviewer에 첨부
   → 기기, bundle identifier, PID를 작업 runtime session에 기록
 ```
 
 UI action은 최대 20단계이며 `tap`과 `type-text`만 허용해요. 각 단계는 1~30초 안에 정확히 같은 accessibility identifier를 가진 요소가 하나일 때만 실행해요. label·title·화면 좌표나 임의 XCTest 코드는 selector로 받지 않아요. action 실패, 요소 누락, identifier 중복은 runtime 실패로 기록해 잘못된 화면 조작을 중단해요.
 
-선택한 기기군에 사용 가능한 Simulator가 없으면 자동으로 기기를 만들지 않고 작업을 실패 상태로 전환해요. Xcode에서 해당 iPad 또는 iPhone Simulator를 만든 뒤 작업을 다시 실행하세요. 접근성 증거는 identifier, label, title, value, frame, enabled·selected 상태, 하위 요소를 담아요. 내부 Debug 상태 관찰과 fixture 조작은 아직 수행하지 않아요.
+대상 앱에는 [`AgentMonitoringDebugBridge.swift`](./resources/swift-debug-bridge/AgentMonitoringDebugBridge.swift)를 추가하고 상태 제공자와 fixture 적용자를 연결해야 해요. bridge는 [iOS 앱 sandbox 내 Application Support 디렉터리](https://developer.apple.com/documentation/foundation/url/applicationsupportdirectory)에서 UUID 요청·응답 JSON을 교환해요. Release 빌드에서는 `start` 호출이 아무 작업도 하지 않아요. 연결 예시는 [Swift Debug bridge 안내](./resources/swift-debug-bridge/README.md)를 참고하세요.
+
+fixture payload와 state는 JSON dictionary여야 해요. 요청은 64KB, 응답은 512KB, 대기 시간은 1~30초로 제한해요. request ID와 fixture ID가 다르거나 상태가 빠졌거나 시간을 넘기면 runtime을 실패로 처리해요. 상태 제공자에는 화면·항해·선택 상태처럼 검증에 필요한 값만 넣고 인증 토큰·고객 데이터는 제외하세요.
+
+선택한 기기군에 사용 가능한 Simulator가 없으면 자동으로 기기를 만들지 않고 작업을 실패 상태로 전환해요. Xcode에서 해당 iPad 또는 iPhone Simulator를 만든 뒤 작업을 다시 실행하세요. 접근성 증거는 identifier, label, title, value, frame, enabled·selected 상태, 하위 요소를 담아요.
 
 접근성 계층은 Apple의 공개 [`XCUIElementSnapshotProviding.snapshot()` API](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding/snapshot())로 수집해요. 이 앱이 대상 프로젝트의 UI-test target을 임의로 수정하지는 않아요.
 
@@ -214,8 +230,9 @@ UI action은 최대 20단계이며 `tap`과 `type-text`만 허용해요. 각 단
   → 프로젝트 검증 명령 실행
       ├─ 실패: 원인을 전달하고 정해진 횟수 안에서 다시 구현
       └─ 성공: Build·Run 계약이 있으면 선택한 iOS Simulator에 앱 실행
+          ├─ Act fixture 계약이 있으면 Debug fixture 적용
           ├─ Act ui 시나리오가 있으면 identifier 기반 UI 조작
-          ├─ Observe accessibility 계약이 있으면 최종 접근성 트리 저장
+          ├─ Observe state·accessibility 계약이 있으면 최종 내부 상태·접근성 트리 저장
           └─ Observe screen 계약이 있으면 최종 화면 증거 저장
   → 읽기 전용 Reviewer가 코드, runtime 결과, 첨부 화면 검토
   → 사람의 최종 승인 대기
@@ -227,7 +244,7 @@ UI action은 최대 20단계이며 `tap`과 `type-text`만 허용해요. 각 단
 | Critic | 테스트가 요구사항과 실패 경로를 충분히 검증하는지 평가해요. | 수정하지 않음 |
 | Implementer | 테스트와 프로젝트 규칙을 지키며 기능을 구현해요. | 수정함 |
 | Test Runner | 프로젝트에 등록된 검증 명령을 실행해요. | 수정하지 않음 |
-| Swift Runtime | worktree 앱을 iPad·iPhone Simulator에 실행하고 선언된 identifier UI 조작과 화면·접근성 증거 수집을 수행해요. | 수정하지 않음 |
+| Swift Runtime | worktree 앱을 iPad·iPhone Simulator에 실행하고 Debug fixture·identifier UI 조작과 화면·접근성·앱 상태 증거 수집을 수행해요. | 수정하지 않음 |
 | Reviewer | 최종 diff와 테스트 결과를 검토하고 심각도별 finding을 남겨요. | 수정하지 않음 |
 
 오케스트레이터는 대규모 언어 모델(LLM)이 아니라 코드로 작성한 상태 머신이에요. AI는 역할별 결과를 만들지만, 허용 상태 전이, 재시도 횟수, sandbox, 최종 승인 여부는 앱이 통제해요. 자세한 경계와 상태 전이는 [아키텍처 문서](./docs/architecture.md)에서 확인할 수 있어요.
@@ -286,7 +303,7 @@ Codex CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.co
 | `pnpm typecheck` | TypeScript 타입 오류 |
 | `pnpm test` | 상태 전이, 저장소, 프로젝트 검사, Runner 단위·통합 동작 |
 | `pnpm test:e2e` | 대시보드 시각 회귀와 주요 사용자 흐름 |
-| `pnpm test:package` | macOS 패키지의 preload bridge·XCTest observer·UI action driver |
+| `pnpm test:package` | macOS 패키지의 preload bridge·XCTest observer·UI action driver·Swift Debug bridge |
 | `pnpm check` | 타입 검사, 단위 테스트, 웹 프로덕션 빌드 |
 
 시각 기준 이미지를 의도적으로 바꿀 때만 스냅샷을 갱신하세요.
@@ -303,7 +320,7 @@ pnpm package
 pnpm test:package
 ```
 
-`pnpm test:package`는 macOS 앱을 실제로 시작해 sandboxed preload bridge가 연결되는지 확인해요. 접근성 observer와 identifier UI action driver가 앱 번들에 함께 들어갔는지도 검사해요. preload는 Electron 패키지 실행 방식에 맞춰 CommonJS로 따로 빌드해요.
+`pnpm test:package`는 macOS 앱을 실제로 시작해 sandboxed preload bridge가 연결되는지 확인해요. 접근성 observer, identifier UI action driver, 대상 앱에 연결할 Swift Debug bridge가 앱 번들에 함께 들어갔는지도 검사해요. preload는 Electron 패키지 실행 방식에 맞춰 CommonJS로 따로 빌드해요.
 
 ## 기술 구성
 
@@ -324,9 +341,9 @@ Electron의 `userData` 아래에 다음 데이터를 저장해요.
 - `worktrees/<project-id>/<task-id>`: 작업별 Git worktree
 - `runtime-sessions/<task-id>/DerivedData`: Swift 작업별 빌드 산출물
 - `runtime-sessions/<task-id>/evidence/*.png`: 작업별 Simulator 화면 증거
-- `runtime-sessions/<task-id>/evidence/*.json`: 작업별 Simulator 접근성 트리와 UI 조작 결과
+- `runtime-sessions/<task-id>/evidence/*.json`: 작업별 Simulator 접근성 트리, UI 조작 결과, Debug state·fixture 증거
 
-AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. `observe`에 `screen`을 선언하면 캡처한 화면을 Reviewer의 이미지 입력으로, `accessibility`를 선언하면 구조화한 JSON을 Reviewer 프롬프트로 전송해요. UI action 결과에는 입력한 text를 다시 기록하지 않고 kind·identifier·순서·실행 시간만 남겨요. 저장소 코드와 runtime 증거를 포함해 Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
+AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. 화면은 Reviewer의 이미지 입력으로, 접근성·Debug 상태·fixture 결과 JSON은 길이를 제한한 Reviewer 프롬프트로 전송해요. UI action 결과에는 입력한 text를 다시 기록하지 않고 kind·identifier·순서·실행 시간만 남겨요. 앱이 내보낸 Debug 상태는 로컬 증거에 저장되고 Codex가 처리하므로 상태 제공자에 비밀값을 넣지 마세요. 저장소 코드와 runtime 증거를 포함해 Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
 
 ## 아직 지원하지 않는 기능
 
@@ -338,7 +355,6 @@ AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우�
 - 원격 팀 협업
 - 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
-- Simulator Debug 상태 수집과 fixture 조작
 - runtime 시나리오 기반 자가 수정 루프
 - 앱 자동 업데이트와 코드 서명
 

@@ -52,6 +52,17 @@ const runtimeUiActionSchema = z.discriminatedUnion('kind', [
     .strict()
 ])
 
+const runtimeFixtureSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._-]+$/, 'fixture id는 영문·숫자·점·밑줄·하이픈만 사용할 수 있습니다.'),
+    payload: z.record(z.string(), z.json())
+  })
+  .strict()
+
 export const projectCapabilityManifestSchema = z
   .object({
     version: z.literal(1),
@@ -73,9 +84,17 @@ export const projectCapabilityManifestSchema = z
         verify: z.array(z.enum(['test-command', 'runtime-scenario'])).max(2)
       })
       .strict(),
+    debugBridge: z
+      .object({
+        protocol: z.literal('file-v1'),
+        responseTimeoutSeconds: z.number().int().min(1).max(30).default(10)
+      })
+      .strict()
+      .optional(),
     runtimeScenario: z
       .object({
-        actions: z.array(runtimeUiActionSchema).max(20)
+        actions: z.array(runtimeUiActionSchema).max(20).default([]),
+        fixture: runtimeFixtureSchema.optional()
       })
       .strict()
       .optional()
@@ -107,6 +126,20 @@ export const projectCapabilityManifestSchema = z
         code: 'custom',
         path: ['capabilities', 'act'],
         message: 'runtimeScenario.actions를 실행하려면 act에 ui가 필요합니다.'
+      })
+    }
+    if (manifest.runtimeScenario?.fixture && !manifest.capabilities.act.includes('fixture')) {
+      context.addIssue({
+        code: 'custom',
+        path: ['capabilities', 'act'],
+        message: 'runtimeScenario.fixture를 적용하려면 act에 fixture가 필요합니다.'
+      })
+    }
+    if (manifest.runtimeScenario?.fixture && !manifest.debugBridge) {
+      context.addIssue({
+        code: 'custom',
+        path: ['debugBridge'],
+        message: 'runtimeScenario.fixture를 적용하려면 debugBridge 계약이 필요합니다.'
       })
     }
   })
@@ -234,16 +267,30 @@ export async function inspectProjectCapabilities(
   const verifyLabels = { 'test-command': '검증 명령', 'runtime-scenario': '실행 시나리오' } as const
   const readyObserveLabels = [
     capabilities.observe.includes('screen') ? 'Simulator 화면 캡처' : '',
-    capabilities.observe.includes('accessibility') ? 'XCTest 접근성 트리 수집' : ''
+    capabilities.observe.includes('accessibility') ? 'XCTest 접근성 트리 수집' : '',
+    capabilities.observe.includes('state') && result.value.debugBridge
+      ? 'Debug bridge 앱 상태 수집'
+      : ''
   ].filter(Boolean)
   const declaredObserveLabels = capabilities.observe
-    .filter((item) => !['screen', 'accessibility'].includes(item))
+    .filter((item) => !['screen', 'accessibility'].includes(item) && !(item === 'state' && result.value.debugBridge))
     .map((item) => observeLabels[item])
   const uiActionCount = capabilities.act.includes('ui')
     ? result.value.runtimeScenario?.actions.length ?? 0
     : 0
+  const fixtureReady = Boolean(
+    capabilities.act.includes('fixture') &&
+    result.value.debugBridge &&
+    result.value.runtimeScenario?.fixture
+  )
+  const readyActLabels = [
+    uiActionCount > 0
+      ? `accessibility identifier UI 조작 ${uiActionCount.toLocaleString('ko-KR')}단계`
+      : '',
+    fixtureReady ? `Debug fixture ${result.value.runtimeScenario?.fixture?.id} 적용` : ''
+  ].filter(Boolean)
   const declaredActLabels = capabilities.act
-    .filter((item) => item === 'fixture' || (item === 'ui' && uiActionCount === 0))
+    .filter((item) => (item === 'fixture' && !fixtureReady) || (item === 'ui' && uiActionCount === 0))
     .map((item) => actLabels[item])
 
   return {
@@ -273,11 +320,11 @@ export async function inspectProjectCapabilities(
         : capabilities.observe.length
           ? declaredCapability('observe', `${capabilities.observe.map((item) => observeLabels[item]).join(' · ')} 관찰 계약 선언`)
         : missingCapability('observe', '관찰 채널이 선언되지 않았습니다.'),
-      uiActionCount > 0
+      readyActLabels.length > 0
         ? readyCapability(
             'act',
             [
-              `accessibility identifier UI 조작 ${uiActionCount.toLocaleString('ko-KR')}단계 사용 가능`,
+              `${readyActLabels.join(' · ')} 사용 가능`,
               declaredActLabels.join(' · '),
               declaredActLabels.length ? '연결 예정' : ''
             ].filter(Boolean).join(' · ')

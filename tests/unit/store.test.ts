@@ -135,6 +135,13 @@ describe('AppStore', () => {
       sizeBytes: 3_072,
       createdAt: new Date(Date.now() + 2_000).toISOString()
     })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'debug-state',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'debug-state.json'),
+      mimeType: 'application/json',
+      sizeBytes: 4_096,
+      createdAt: new Date(Date.now() + 3_000).toISOString()
+    })
     store.close()
 
     const reopened = new AppStore(databasePath)
@@ -148,6 +155,12 @@ describe('AppStore', () => {
       }
     ])
     expect(reopened.getSnapshot(project.id).runtimeEvidence).toMatchObject([
+      {
+        taskId: task.id,
+        kind: 'debug-state',
+        mimeType: 'application/json',
+        sizeBytes: 4_096
+      },
       {
         taskId: task.id,
         kind: 'ui-actions',

@@ -36,6 +36,16 @@ const packagedRuntimeUiDriver = join(
   'AgentMonitoringAccessibilityTests',
   'AccessibilitySnapshotTests.swift'
 )
+const packagedSwiftDebugBridge = join(
+  process.cwd(),
+  'dist',
+  outputDirectory,
+  'AgentMonitoring.app',
+  'Contents',
+  'Resources',
+  'swift-debug-bridge',
+  'AgentMonitoringDebugBridge.swift'
+)
 
 try {
   const observerStats = await stat(packagedAccessibilityObserver)
@@ -45,6 +55,10 @@ try {
   const runtimeUiDriverStats = await stat(packagedRuntimeUiDriver)
   if (!runtimeUiDriverStats.isFile()) {
     throw new Error('패키지에 XCTest UI 조작 driver가 포함되지 않았습니다.')
+  }
+  const swiftDebugBridgeStats = await stat(packagedSwiftDebugBridge)
+  if (!swiftDebugBridgeStats.isFile()) {
+    throw new Error('패키지에 Swift Debug state·fixture bridge가 포함되지 않았습니다.')
   }
   await new Promise((resolvePromise, reject) => {
     const child = spawn(executable, [], {
@@ -82,7 +96,7 @@ try {
     })
   })
   console.log(
-    'Package smoke test passed: PRELOAD_BRIDGE_READY + ACCESSIBILITY_OBSERVER_READY + UI_ACTION_DRIVER_READY'
+    'Package smoke test passed: PRELOAD_BRIDGE_READY + ACCESSIBILITY_OBSERVER_READY + UI_ACTION_DRIVER_READY + DEBUG_STATE_BRIDGE_READY'
   )
 } finally {
   await rm(smokeUserData, { recursive: true, force: true })

@@ -4,6 +4,12 @@ import { resolve } from 'node:path'
 import { z } from 'zod'
 import type { ProjectCapabilityManifest } from './project-capabilities'
 import type { RuntimeSessionRecord, RuntimeSessionStatus } from '../../src/shared/types'
+import {
+  IosDebugBridgeError,
+  requestIosDebugBridge,
+  type RuntimeDebugBridgeResponse,
+  type RuntimeDebugFixture
+} from './ios-debug-bridge'
 
 export interface RuntimeCommandRequest {
   command: string
@@ -27,6 +33,8 @@ export type RuntimeUiAction = NonNullable<
   ProjectCapabilityManifest['runtimeScenario']
 >['actions'][number]
 
+export type RuntimeDebugBridgeContract = NonNullable<ProjectCapabilityManifest['debugBridge']>
+
 export interface IosSimulatorLaunchInput {
   taskId: string
   worktreePath: string
@@ -34,7 +42,10 @@ export interface IosSimulatorLaunchInput {
   contract: ProjectCapabilityManifest['adapter']
   captureScreen: boolean
   captureAccessibility: boolean
+  captureState: boolean
   uiActions: RuntimeUiAction[]
+  debugBridge: RuntimeDebugBridgeContract | null
+  debugFixture: RuntimeDebugFixture | null
   accessibilityObserverTemplateRoot?: string
   execute: RuntimeCommandExecutor
   wait?: (milliseconds: number) => Promise<void>
@@ -71,6 +82,16 @@ export interface RuntimeUiActionEvidence {
   content: string
 }
 
+export interface RuntimeDebugStateEvidence {
+  path: string
+  mimeType: 'application/json'
+  sizeBytes: number
+  capturedAt: string
+  hasState: boolean
+  fixtureId: string | null
+  content: string
+}
+
 export interface IosSimulatorLaunchResult {
   deviceId: string
   deviceName: string
@@ -80,6 +101,7 @@ export interface IosSimulatorLaunchResult {
   screenEvidence: RuntimeScreenEvidence | null
   accessibilityEvidence: RuntimeAccessibilityEvidence | null
   uiActionEvidence: RuntimeUiActionEvidence | null
+  debugStateEvidence: RuntimeDebugStateEvidence | null
 }
 
 export interface IosSimulatorStopInput {
@@ -128,6 +150,7 @@ const MAX_ACCESSIBILITY_JSON_BYTES = 512 * 1024
 const MAX_ACCESSIBILITY_EVIDENCE_BYTES = 1024 * 1024
 const MAX_UI_ACTION_JSON_BYTES = 128 * 1024
 const MAX_UI_ACTION_EVIDENCE_BYTES = 256 * 1024
+const MAX_DEBUG_STATE_EVIDENCE_BYTES = 1024 * 1024
 const ACCESSIBILITY_BEGIN_MARKER = 'AGENTMONITOR_ACCESSIBILITY_BEGIN'
 const ACCESSIBILITY_END_MARKER = 'AGENTMONITOR_ACCESSIBILITY_END'
 const UI_ACTIONS_BEGIN_MARKER = 'AGENTMONITOR_UI_ACTIONS_BEGIN'
@@ -790,6 +813,32 @@ export async function launchIosSimulatorRuntime(
     'launching'
   )
 
+  let fixtureResponse: RuntimeDebugBridgeResponse | null = null
+  if (input.debugBridge && input.debugFixture) {
+    input.onProgress(
+      'acting',
+      `${device.name}의 Debug bridge에 fixture ${input.debugFixture.id}를 적용하고 있습니다.`,
+      { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+    )
+    try {
+      fixtureResponse = await requestIosDebugBridge({
+        deviceId: device.udid,
+        bundleIdentifier: product.bundleIdentifier,
+        cwd: worktreePath,
+        fixture: input.debugFixture,
+        captureState: false,
+        timeoutSeconds: input.debugBridge.responseTimeoutSeconds,
+        execute: input.execute,
+        wait: input.wait
+      })
+    } catch (error) {
+      throw new IosRuntimeStageError(
+        'acting',
+        error instanceof IosDebugBridgeError ? error.message : String(error)
+      )
+    }
+  }
+
   let accessibilityEvidence: RuntimeAccessibilityEvidence | null = null
   let uiActionEvidence: RuntimeUiActionEvidence | null = null
   if (input.captureAccessibility || input.uiActions.length > 0) {
@@ -889,6 +938,61 @@ export async function launchIosSimulatorRuntime(
     }
   }
 
+  let stateResponse: RuntimeDebugBridgeResponse | null = null
+  if (input.debugBridge && input.captureState) {
+    input.onProgress(
+      'observing',
+      `${device.name}의 Debug bridge에서 최종 앱 상태를 수집하고 있습니다.`,
+      { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+    )
+    try {
+      stateResponse = await requestIosDebugBridge({
+        deviceId: device.udid,
+        bundleIdentifier: product.bundleIdentifier,
+        cwd: worktreePath,
+        fixture: null,
+        captureState: true,
+        timeoutSeconds: input.debugBridge.responseTimeoutSeconds,
+        execute: input.execute,
+        wait: input.wait
+      })
+    } catch (error) {
+      throw new IosRuntimeStageError(
+        'observing',
+        error instanceof IosDebugBridgeError ? error.message : String(error)
+      )
+    }
+  }
+
+  let debugStateEvidence: RuntimeDebugStateEvidence | null = null
+  if (fixtureResponse || stateResponse) {
+    const capturedAt = stateResponse?.completedAt ?? fixtureResponse?.completedAt ?? new Date().toISOString()
+    const payload = {
+      schemaVersion: 1,
+      bundleIdentifier: product.bundleIdentifier,
+      capturedAt,
+      fixture: fixtureResponse?.fixture ?? null,
+      ...(stateResponse?.state === undefined ? {} : { state: stateResponse.state })
+    }
+    const evidence = await writeRuntimeJsonEvidence(
+      resolvedSessionRoot,
+      'debug-state',
+      payload,
+      MAX_DEBUG_STATE_EVIDENCE_BYTES,
+      stateResponse ? 'observing' : 'acting',
+      'Debug state·fixture 증거'
+    )
+    debugStateEvidence = {
+      path: evidence.path,
+      mimeType: 'application/json',
+      sizeBytes: evidence.sizeBytes,
+      capturedAt,
+      hasState: stateResponse?.state !== undefined,
+      fixtureId: fixtureResponse?.fixture?.id ?? null,
+      content: evidence.content
+    }
+  }
+
   let screenEvidence: RuntimeScreenEvidence | null = null
   if (input.captureScreen) {
     input.onProgress(
@@ -947,7 +1051,8 @@ export async function launchIosSimulatorRuntime(
     appPath,
     screenEvidence,
     accessibilityEvidence,
-    uiActionEvidence
+    uiActionEvidence,
+    debugStateEvidence
   }
 }
 

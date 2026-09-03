@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -85,8 +85,10 @@ describe('iOS Simulator runtime adapter', () => {
     temporaryDirectories.push(directory)
     const worktree = join(directory, 'worktree')
     const runtimeRoot = join(directory, 'runtime-sessions')
+    const appDataContainer = join(directory, 'simulator-app-data')
     const taskId = '11111111-1111-4111-8111-111111111111'
     await mkdir(join(worktree, 'PopPang.xcworkspace'), { recursive: true })
+    await mkdir(appDataContainer)
 
     const commands: RuntimeCommandRequest[] = []
     const progress: string[] = []
@@ -170,6 +172,9 @@ describe('iOS Simulator runtime adapter', () => {
       if (request.args.includes('launch')) {
         return { code: 0, output: 'com.example.PopPang: 4242\n', stdout: 'com.example.PopPang: 4242\n' }
       }
+      if (request.args[1] === 'get_app_container') {
+        return { code: 0, output: appDataContainer, stdout: `${appDataContainer}\n` }
+      }
       if (request.args.includes('screenshot')) {
         await writeFile(request.args.at(-1)!, 'fixture-png')
         return { code: 0, output: 'Wrote screenshot', stdout: '' }
@@ -190,9 +195,48 @@ describe('iOS Simulator runtime adapter', () => {
       },
       captureScreen: true,
       captureAccessibility: true,
+      captureState: true,
       uiActions,
+      debugBridge: { protocol: 'file-v1', responseTimeoutSeconds: 10 },
+      debugFixture: {
+        id: 'signed-in-home',
+        payload: { accountID: 'fixture-user', selectedTab: 'home' }
+      },
       execute,
-      wait: async () => undefined,
+      wait: async () => {
+        const requests = join(
+          appDataContainer,
+          'Library',
+          'Application Support',
+          'AgentMonitoring',
+          'Requests'
+        )
+        const responses = join(
+          appDataContainer,
+          'Library',
+          'Application Support',
+          'AgentMonitoring',
+          'Responses'
+        )
+        const requestFiles = await readdir(requests).catch(() => [])
+        await Promise.all(requestFiles.map(async (requestFile) => {
+          const request = JSON.parse(await readFile(join(requests, requestFile), 'utf8'))
+          await writeFile(
+            join(responses, `${request.requestId}.json`),
+            JSON.stringify({
+              schemaVersion: 1,
+              requestId: request.requestId,
+              completedAt: '2026-09-03T00:00:00Z',
+              fixture: request.fixture
+                ? { id: request.fixture.id, appliedAt: '2026-09-03T00:00:00Z' }
+                : null,
+              ...(request.captureState
+                ? { state: { route: 'home', selectedTab: 'home', isNavigating: false } }
+                : {})
+            })
+          )
+        }))
+      },
       onProgress: (status, _message, update) => {
         progress.push(status)
         progressUpdates.push(update ?? {})
@@ -216,6 +260,11 @@ describe('iOS Simulator runtime adapter', () => {
       uiActionEvidence: {
         mimeType: 'application/json',
         actionCount: 2
+      },
+      debugStateEvidence: {
+        mimeType: 'application/json',
+        hasState: true,
+        fixtureId: 'signed-in-home'
       }
     })
     expect(result.screenEvidence?.path).toMatch(/runtime-sessions\/.+\/evidence\/screen-.+\.png$/)
@@ -226,12 +275,24 @@ describe('iOS Simulator runtime adapter', () => {
       'installing',
       'launching',
       'acting',
+      'acting',
+      'observing',
       'observing'
     ])
     expect(progressUpdates).toEqual([
       {},
       { deviceId: 'IPHONE-UDID', deviceName: 'iPhone 16 Pro' },
       {},
+      {
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
+        bundleIdentifier: 'com.example.PopPang'
+      },
+      {
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
+        bundleIdentifier: 'com.example.PopPang'
+      },
       {
         deviceId: 'IPHONE-UDID',
         deviceName: 'iPhone 16 Pro',
@@ -262,11 +323,15 @@ describe('iOS Simulator runtime adapter', () => {
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'simctl', 'install', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
+      ['/usr/bin/xcrun', 'simctl', 'get_app_container', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'xcodebuild', '-project', expect.stringContaining('AgentMonitoringAccessibility.xcodeproj')],
+      ['/usr/bin/xcrun', 'simctl', 'get_app_container', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID']
     ])
     expect(result.accessibilityEvidence?.content).toContain('start-navigation')
     expect(result.uiActionEvidence?.content).toContain('destination-search')
+    expect(result.debugStateEvidence?.content).toContain('signed-in-home')
+    expect(result.debugStateEvidence?.content).toContain('selectedTab')
     const testPlan = JSON.parse(
       await readFile(
         join(
@@ -313,7 +378,10 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        captureState: false,
         uiActions: [],
+        debugBridge: null,
+        debugFixture: null,
         execute: async () => ({
           code: 0,
           output: '',
@@ -353,7 +421,10 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        captureState: false,
         uiActions: [],
+        debugBridge: null,
+        debugFixture: null,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -386,7 +457,10 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        captureState: false,
         uiActions: [],
+        debugBridge: null,
+        debugFixture: null,
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })

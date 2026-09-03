@@ -52,6 +52,10 @@
       {
         "from": "resources/ios-accessibility-observer",
         "to": "ios-accessibility-observer"
+      },
+      {
+        "from": "resources/swift-debug-bridge",
+        "to": "swift-debug-bridge"
       }
     ],
     "mac": {

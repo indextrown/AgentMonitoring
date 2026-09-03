@@ -141,6 +141,10 @@ describe('inspectProject', () => {
           act: ['ui', 'fixture'],
           verify: ['test-command', 'runtime-scenario']
         },
+        debugBridge: {
+          protocol: 'file-v1',
+          responseTimeoutSeconds: 15
+        },
         runtimeScenario: {
           actions: [
             { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 12 },
@@ -149,7 +153,11 @@ describe('inspectProject', () => {
               identifier: 'destination-search',
               text: '부산항'
             }
-          ]
+          ],
+          fixture: {
+            id: 'signed-in-home',
+            payload: { accountID: 'fixture-user', selectedTab: 'home' }
+          }
         }
       })
     )
@@ -188,10 +196,10 @@ describe('inspectProject', () => {
       'iPhone Simulator 실행 adapter 사용 가능'
     )
     expect(inspection.capabilities.find(({ key }) => key === 'observe')?.detail).toBe(
-      'Simulator 화면 캡처 · XCTest 접근성 트리 수집 사용 가능 · 앱 상태 · 연결 예정'
+      'Simulator 화면 캡처 · XCTest 접근성 트리 수집 · Debug bridge 앱 상태 수집 사용 가능'
     )
     expect(inspection.capabilities.find(({ key }) => key === 'act')?.detail).toBe(
-      'accessibility identifier UI 조작 2단계 사용 가능 · fixture · 연결 예정'
+      'accessibility identifier UI 조작 2단계 · Debug fixture signed-in-home 적용 사용 가능'
     )
   })
 
@@ -246,6 +254,35 @@ describe('inspectProject', () => {
         }
       })
     ).toThrow('runtimeScenario.actions를 실행하려면 act에 ui가 필요합니다.')
+  })
+
+  it('rejects runtime fixtures without the fixture capability or Debug bridge', () => {
+    const manifest = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'PopPang.xcodeproj',
+        scheme: 'PopPang'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: [],
+        act: [],
+        verify: ['test-command']
+      },
+      runtimeScenario: {
+        fixture: { id: 'signed-in-home', payload: { accountID: 'fixture-user' } }
+      }
+    }
+
+    expect(() => projectCapabilityManifestSchema.parse(manifest)).toThrow(
+      'runtimeScenario.fixture를 적용하려면 act에 fixture가 필요합니다.'
+    )
+    expect(() => projectCapabilityManifestSchema.parse({
+      ...manifest,
+      capabilities: { ...manifest.capabilities, act: ['fixture'] }
+    })).toThrow('runtimeScenario.fixture를 적용하려면 debugBridge 계약이 필요합니다.')
   })
 
   it('rejects capability manifests larger than the inspection boundary', async () => {

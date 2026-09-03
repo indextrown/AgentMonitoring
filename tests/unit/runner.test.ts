@@ -44,6 +44,8 @@ async function createExecutionFixture(options: {
   withScreenObservation?: boolean
   withAccessibilityObservation?: boolean
   withUiActions?: boolean
+  withDebugState?: boolean
+  withDebugFixture?: boolean
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -79,22 +81,37 @@ async function createExecutionFixture(options: {
           run: true,
           observe: [
             ...(options.withScreenObservation ? ['screen'] : []),
-            ...(options.withAccessibilityObservation ? ['accessibility'] : [])
+            ...(options.withAccessibilityObservation ? ['accessibility'] : []),
+            ...(options.withDebugState ? ['state'] : [])
           ],
-          act: options.withUiActions ? ['ui'] : [],
+          act: [
+            ...(options.withUiActions ? ['ui'] : []),
+            ...(options.withDebugFixture ? ['fixture'] : [])
+          ],
           verify: ['test-command']
         },
-        runtimeScenario: options.withUiActions
+        debugBridge: options.withDebugState || options.withDebugFixture
+          ? { protocol: 'file-v1', responseTimeoutSeconds: 10 }
+          : undefined,
+        runtimeScenario: options.withUiActions || options.withDebugFixture
           ? {
-              actions: [
-                { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 10 },
-                {
-                  kind: 'type-text',
-                  identifier: 'destination-search',
-                  text: '부산항',
-                  timeoutSeconds: 12
-                }
-              ]
+              actions: options.withUiActions
+                ? [
+                    { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 10 },
+                    {
+                      kind: 'type-text',
+                      identifier: 'destination-search',
+                      text: '부산항',
+                      timeoutSeconds: 12
+                    }
+                  ]
+                : [],
+              fixture: options.withDebugFixture
+                ? {
+                    id: 'signed-in-home',
+                    payload: { accountID: 'fixture-user', selectedTab: 'home' }
+                  }
+                : undefined
             }
           : undefined
       })
@@ -389,11 +406,18 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     let screenEvidencePath = ''
     let accessibilityEvidencePath = ''
     let uiActionEvidencePath = ''
+    let debugStateEvidencePath = ''
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
         launchedWorktrees.push(input.worktreePath)
         expect(input.captureScreen).toBe(true)
         expect(input.captureAccessibility).toBe(true)
+        expect(input.captureState).toBe(true)
+        expect(input.debugBridge).toEqual({ protocol: 'file-v1', responseTimeoutSeconds: 10 })
+        expect(input.debugFixture).toEqual({
+          id: 'signed-in-home',
+          payload: { accountID: 'fixture-user', selectedTab: 'home' }
+        })
         expect(input.uiActions).toMatchObject([
           { kind: 'tap', identifier: 'start-navigation' },
           { kind: 'type-text', identifier: 'destination-search', text: '부산항' }
@@ -411,6 +435,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         uiActionEvidencePath = join(evidenceDirectory, 'ui-actions-fixture.json')
         const uiActionContent = '{"schemaVersion":1,"actionCount":2,"results":[{"identifier":"start-navigation"},{"identifier":"destination-search"}]}\n'
         await writeFile(uiActionEvidencePath, uiActionContent)
+        debugStateEvidencePath = join(evidenceDirectory, 'debug-state-fixture.json')
+        const debugStateContent = '{"schemaVersion":1,"fixture":{"id":"signed-in-home"},"state":{"route":"home","selectedTab":"home"}}\n'
+        await writeFile(debugStateEvidencePath, debugStateContent)
         return {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',
@@ -439,6 +466,15 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
             executedAt: new Date().toISOString(),
             actionCount: 2,
             content: uiActionContent
+          },
+          debugStateEvidence: {
+            path: debugStateEvidencePath,
+            mimeType: 'application/json',
+            sizeBytes: Buffer.byteLength(debugStateContent),
+            capturedAt: new Date().toISOString(),
+            hasState: true,
+            fixtureId: 'signed-in-home',
+            content: debugStateContent
           }
         }
       },
@@ -457,6 +493,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       withScreenObservation: true,
       withAccessibilityObservation: true,
       withUiActions: true,
+      withDebugState: true,
+      withDebugFixture: true,
       runtimeAdapter
     })
 
@@ -492,6 +530,12 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
           kind: 'ui-actions',
           path: uiActionEvidencePath,
           mimeType: 'application/json'
+        }),
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'debug-state',
+          path: debugStateEvidencePath,
+          mimeType: 'application/json'
         })
       ])
     )
@@ -504,6 +548,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(codexCalls.at(-1)).toEqual(expect.arrayContaining(['--image', screenEvidencePath]))
     expect(codexCalls.at(-1)?.join('\n')).toContain('항해 시작')
     expect(codexCalls.at(-1)?.join('\n')).toContain('destination-search')
+    expect(codexCalls.at(-1)?.join('\n')).toContain('signed-in-home')
+    expect(codexCalls.at(-1)?.join('\n')).toContain('selectedTab')
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App'])
@@ -517,6 +563,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       launch: async (input) => {
         expect(input.captureScreen).toBe(false)
         expect(input.captureAccessibility).toBe(false)
+        expect(input.captureState).toBe(false)
+        expect(input.debugBridge).toBeNull()
+        expect(input.debugFixture).toBeNull()
         expect(input.uiActions).toEqual([])
         input.onProgress('launching', 'fixture 앱 실행 중', {
           deviceId: 'IPAD-UDID',

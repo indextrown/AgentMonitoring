@@ -63,6 +63,7 @@ interface RuntimeRunResult {
 
 const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
 const MAX_UI_ACTION_REVIEW_CHARS = 20_000
+const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -744,6 +745,13 @@ export class AgentRunner {
       const uiActions = manifest.value.capabilities.act.includes('ui')
         ? manifest.value.runtimeScenario?.actions ?? []
         : []
+      const debugBridge = manifest.value.debugBridge ?? null
+      const debugFixture = debugBridge && manifest.value.capabilities.act.includes('fixture')
+        ? manifest.value.runtimeScenario?.fixture ?? null
+        : null
+      const captureState = Boolean(
+        debugBridge && manifest.value.capabilities.observe.includes('state')
+      )
       const result = await this.runtimeAdapter.launch({
         taskId: task.id,
         worktreePath,
@@ -751,7 +759,10 @@ export class AgentRunner {
         contract: manifest.value.adapter,
         captureScreen: manifest.value.capabilities.observe.includes('screen'),
         captureAccessibility: manifest.value.capabilities.observe.includes('accessibility'),
+        captureState,
         uiActions,
+        debugBridge,
+        debugFixture,
         execute: (request) => this.executeRuntimeCommand(request, control),
         onProgress: (status, message, update = {}) => {
           this.store.setRuntimeSession(task.id, status, { ...update, message })
@@ -776,6 +787,12 @@ export class AgentRunner {
           'UI 조작 계약이 활성화됐지만 action 결과가 생성되지 않았습니다.'
         )
       }
+      if ((debugFixture || captureState) && !result.debugStateEvidence) {
+        throw new IosRuntimeStageError(
+          captureState ? 'observing' : 'acting',
+          'Debug state·fixture 계약이 활성화됐지만 bridge 증거가 생성되지 않았습니다.'
+        )
+      }
       const imagePaths: string[] = []
       if (result.screenEvidence) {
         const evidence = this.store.addRuntimeEvidence(task.id, {
@@ -794,6 +811,40 @@ export class AgentRunner {
         )
       }
       const reviewContexts: string[] = []
+      if (result.debugStateEvidence) {
+        const debugState = result.debugStateEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          kind: 'debug-state',
+          path: debugState.path,
+          mimeType: debugState.mimeType,
+          sizeBytes: debugState.sizeBytes,
+          createdAt: debugState.capturedAt
+        })
+        if (debugState.fixtureId) {
+          this.emit(
+            task,
+            'runtime_acted',
+            'runtime',
+            `Simulator Debug fixture 적용 완료 · ${debugState.fixtureId} · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+          )
+        }
+        if (debugState.hasState) {
+          this.emit(
+            task,
+            'runtime_observed',
+            'runtime',
+            `Simulator Debug 앱 상태 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+          )
+        }
+        const content = debugState.content.slice(0, MAX_DEBUG_STATE_REVIEW_CHARS)
+        reviewContexts.push([
+          '다음 JSON은 대상 앱의 Debug bridge가 확인한 fixture 적용 결과와 최종 내부 상태입니다. 코드·UI 증거와 함께 요구사항을 검토하세요.',
+          '```json',
+          content,
+          debugState.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+      }
       if (result.uiActionEvidence) {
         const actions = result.uiActionEvidence
         const evidence = this.store.addRuntimeEvidence(task.id, {
@@ -850,6 +901,12 @@ export class AgentRunner {
           : '',
         result.uiActionEvidence
           ? `identifier UI 조작 ${result.uiActionEvidence.actionCount.toLocaleString('ko-KR')}단계 완료`
+          : '',
+        result.debugStateEvidence?.fixtureId
+          ? `Debug fixture ${result.debugStateEvidence.fixtureId} 적용`
+          : '',
+        result.debugStateEvidence?.hasState
+          ? 'Debug 앱 상태 저장'
           : ''
       ].filter(Boolean).join(' · ')
       this.store.setRuntimeSession(task.id, 'running', {
