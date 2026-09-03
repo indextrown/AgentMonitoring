@@ -89,6 +89,20 @@ test('shows repository readiness when selecting a project without tasks', async 
   await expect(page.getByText('최근 24시간')).toBeVisible()
 })
 
+test('keeps AI access visible after a project has tasks', async ({ page }) => {
+  await page.goto('/')
+
+  const summary = page.locator('.capability-summary')
+  await expect(summary.getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
+  await expect(summary.getByText('Code', { exact: true })).toBeVisible()
+  await expect(summary.getByText('Verify', { exact: true })).toBeVisible()
+
+  await summary.getByRole('button', { name: '전체 보기' }).click()
+  await expect(page.getByRole('heading', { name: '프로젝트 설정' })).toBeVisible()
+  await expect(page.locator('.capability-panel').getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
+  await expect(page.locator('.capability-panel').getByRole('button', { name: '다시 검사' })).toBeVisible()
+})
+
 test('uses dashboard chart links and expands the complete activity history', async ({ page }) => {
   await page.goto('/')
   const activity = page.locator('.activity-card')

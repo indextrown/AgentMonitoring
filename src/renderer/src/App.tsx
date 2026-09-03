@@ -579,11 +579,14 @@ export function App(): React.JSX.Element {
         {selectedProject && page === 'dashboard' && snapshot.tasks.length > 0 && (
           <DashboardPage
             snapshot={snapshot}
+            inspection={inspection}
+            inspectionLoading={inspectionLoading}
             activeTask={activeTask}
             awaitingTask={awaitingTask}
             unresolvedCount={unresolved.length}
             range={range}
             onRange={setRange}
+            onRefreshInspection={() => void refreshInspection(selectedProject.id)}
             onPage={setPage}
             onOpenTask={setSelectedTask}
             onNewTask={() => setTaskModal(true)}
@@ -616,11 +619,19 @@ export function App(): React.JSX.Element {
           />
         )}
         {selectedProject && page === 'projects' && (
-          <ProjectsPage project={selectedProject} onSave={async (project) => {
-            await bridge.updateProject(project)
-            await load(project.projectId)
-            await refreshInspection(project.projectId)
-          }} onOpen={() => void bridge.openPath(selectedProject.path)} onRemove={() => void removeProject(selectedProject)} />
+          <ProjectsPage
+            project={selectedProject}
+            inspection={inspection}
+            inspectionLoading={inspectionLoading}
+            onRefreshInspection={() => void refreshInspection(selectedProject.id)}
+            onSave={async (project) => {
+              await bridge.updateProject(project)
+              await load(project.projectId)
+              await refreshInspection(project.projectId)
+            }}
+            onOpen={() => void bridge.openPath(selectedProject.path)}
+            onRemove={() => void removeProject(selectedProject)}
+          />
         )}
       </main>
 
@@ -790,8 +801,6 @@ function ProjectStartPage({
 }): React.JSX.Element {
   const hasTestCommand = Boolean(project.testCommand.trim())
   const ready = hasTestCommand && inspection?.clean
-  const readyCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'ready').length ?? 0
-  const declaredCapabilityCount = inspection?.capabilities.filter((capability) => capability.status === 'declared').length ?? 0
 
   return (
     <section className="project-start-page">
@@ -846,43 +855,7 @@ function ProjectStartPage({
         </article>
       )}
 
-      {inspection && (
-        <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
-          <header className="capability-header">
-            <div>
-              <p className="eyebrow">AI ACCESS CONTRACT</p>
-              <h3>AI가 접근할 수 있는 영역</h3>
-              <p>
-                현재 {readyCapabilityCount}개 사용 가능
-                {declaredCapabilityCount > 0 ? ` · ${declaredCapabilityCount}개는 프로젝트 선언 후 연결 대기` : ''}
-              </p>
-            </div>
-            <span className="manifest-state">
-              {inspection.capabilityManifest.state === 'valid'
-                ? '계약 확인됨'
-                : inspection.capabilityManifest.state === 'invalid'
-                  ? '계약 오류'
-                  : '코드 작업 모드'}
-            </span>
-          </header>
-          <div className="capability-grid">
-            {inspection.capabilities.map((capability) => (
-              <div className={`capability-item ${capability.status}`} key={capability.key}>
-                <span>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</span>
-                <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
-                <small>{capability.detail}</small>
-              </div>
-            ))}
-          </div>
-          <footer className="capability-manifest-note">
-            <code>{inspection.capabilityManifest.path}</code>
-            <span>{inspection.capabilityManifest.message}</span>
-            {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
-            )}
-          </footer>
-        </article>
-      )}
+      {inspection && <ProjectCapabilityPanel inspection={inspection} />}
 
       {inspection && !inspection.clean && (
         <div className="readiness-warning" role="status">
@@ -940,6 +913,122 @@ function ProjectStartPage({
         </div>
       </article>
     </section>
+  )
+}
+
+function capabilityManifestLabel(inspection: ProjectInspection): string {
+  if (inspection.capabilityManifest.state === 'valid') return '계약 확인됨'
+  if (inspection.capabilityManifest.state === 'invalid') return '계약 오류'
+  return '코드 작업 모드'
+}
+
+function ProjectCapabilityPanel({
+  inspection,
+  onRefresh
+}: {
+  inspection: ProjectInspection
+  onRefresh?: () => void
+}): React.JSX.Element {
+  const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
+  const declaredCount = inspection.capabilities.filter((capability) => capability.status === 'declared').length
+
+  return (
+    <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
+      <header className="capability-header">
+        <div>
+          <p className="eyebrow">AI ACCESS CONTRACT</p>
+          <h3>AI가 접근할 수 있는 영역</h3>
+          <p>
+            현재 {readyCount}개 사용 가능
+            {declaredCount > 0 ? ` · ${declaredCount}개는 프로젝트 선언 후 연결 대기` : ''}
+          </p>
+        </div>
+        <div className="capability-header-actions">
+          <span className="manifest-state">{capabilityManifestLabel(inspection)}</span>
+          {onRefresh && (
+            <button className="secondary-button" type="button" onClick={onRefresh}>
+              <Activity size={13} /> 다시 검사
+            </button>
+          )}
+        </div>
+      </header>
+      <div className="capability-grid">
+        {inspection.capabilities.map((capability) => (
+          <div className={`capability-item ${capability.status}`} key={capability.key}>
+            <span>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</span>
+            <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
+            <small>{capability.detail}</small>
+          </div>
+        ))}
+      </div>
+      <footer className="capability-manifest-note">
+        <code>{inspection.capabilityManifest.path}</code>
+        <span>{inspection.capabilityManifest.message}</span>
+        {inspection.capabilityManifest.state === 'valid' && (
+          <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
+        )}
+      </footer>
+    </article>
+  )
+}
+
+function ProjectCapabilityEmpty({
+  loading,
+  onRefresh
+}: {
+  loading: boolean
+  onRefresh: () => void
+}): React.JSX.Element {
+  return (
+    <article className="panel capability-empty" aria-live="polite">
+      {loading ? <LoaderCircle className="spin" size={17} /> : <AlertTriangle size={17} />}
+      <div>
+        <strong>{loading ? 'AI 접근 영역을 검사하고 있습니다' : 'AI 접근 영역을 불러오지 못했습니다'}</strong>
+        <span>{loading ? '저장소 구성과 프로젝트 선언을 확인하는 중입니다.' : '저장소를 다시 검사해 접근 가능한 기능을 확인하세요.'}</span>
+      </div>
+      {!loading && <button className="secondary-button" onClick={onRefresh}><Activity size={13} /> 다시 검사</button>}
+    </article>
+  )
+}
+
+function ProjectCapabilitySummary({
+  inspection,
+  loading,
+  onRefresh,
+  onDetails
+}: {
+  inspection: ProjectInspection | null
+  loading: boolean
+  onRefresh: () => void
+  onDetails: () => void
+}): React.JSX.Element {
+  if (!inspection) return <ProjectCapabilityEmpty loading={loading} onRefresh={onRefresh} />
+
+  const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
+
+  return (
+    <article className={`panel capability-summary manifest-${inspection.capabilityManifest.state}`}>
+      <header>
+        <div>
+          <p className="eyebrow">AI ACCESS</p>
+          <h3>AI가 접근할 수 있는 영역</h3>
+          <p>코드 작업부터 실행·관찰·조작·검증까지 현재 연결 상태입니다.</p>
+        </div>
+        <div className="capability-summary-actions">
+          <span className="manifest-state">{capabilityManifestLabel(inspection)}</span>
+          <button className="secondary-button" onClick={onDetails}><Settings2 size={13} /> 전체 보기</button>
+        </div>
+      </header>
+      <div className="capability-summary-status" aria-label={`AI 접근 영역 ${readyCount}개 사용 가능`}>
+        {inspection.capabilities.map((capability) => (
+          <div className={capability.status} key={capability.key} title={capability.detail}>
+            <span />
+            <strong>{PROJECT_CAPABILITY_LABELS[capability.key]}</strong>
+            <small>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</small>
+          </div>
+        ))}
+      </div>
+    </article>
   )
 }
 
@@ -1119,21 +1208,27 @@ function Sidebar({
 
 function DashboardPage({
   snapshot,
+  inspection,
+  inspectionLoading,
   activeTask,
   awaitingTask,
   unresolvedCount,
   range,
   onRange,
+  onRefreshInspection,
   onPage,
   onOpenTask,
   onNewTask
 }: {
   snapshot: DashboardSnapshot
+  inspection: ProjectInspection | null
+  inspectionLoading: boolean
   activeTask: TaskRecord | null
   awaitingTask: TaskRecord | null
   unresolvedCount: number
   range: Range
   onRange: (range: Range) => void
+  onRefreshInspection: () => void
   onPage: (page: Page) => void
   onOpenTask: (task: TaskRecord) => void
   onNewTask: () => void
@@ -1197,6 +1292,13 @@ function DashboardPage({
           </p>
         </article>
       </div>
+
+      <ProjectCapabilitySummary
+        inspection={inspection}
+        loading={inspectionLoading}
+        onRefresh={onRefreshInspection}
+        onDetails={() => onPage('projects')}
+      />
 
       <article className="panel timeline-card">
         <div className="timeline-summary">
@@ -1391,11 +1493,17 @@ function NotesPage({
 
 function ProjectsPage({
   project,
+  inspection,
+  inspectionLoading,
+  onRefreshInspection,
   onSave,
   onOpen,
   onRemove
 }: {
   project: ProjectRecord
+  inspection: ProjectInspection | null
+  inspectionLoading: boolean
+  onRefreshInspection: () => void
   onSave: (input: UpdateProjectInput) => Promise<void>
   onOpen: () => void
   onRemove: () => void
@@ -1411,6 +1519,11 @@ function ProjectsPage({
   return (
     <section className="workspace-page">
       <PageHeading title="프로젝트 설정" description="에이전트가 접근할 저장소와 검증 명령을 명시한다." />
+      {inspection ? (
+        <ProjectCapabilityPanel inspection={inspection} onRefresh={onRefreshInspection} />
+      ) : (
+        <ProjectCapabilityEmpty loading={inspectionLoading} onRefresh={onRefreshInspection} />
+      )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
         void onSave({ projectId: project.id, name, testCommand, runtimeAdapter })
