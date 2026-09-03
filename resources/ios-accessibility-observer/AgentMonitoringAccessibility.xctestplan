@@ -7,7 +7,18 @@
         "environmentVariableEntries": [
           {
             "key": "AGENTMONITOR_TARGET_BUNDLE_ID",
-            "value": "com.example.AgentMonitoringTarget"
+            "value": "com.example.AgentMonitoringTarget",
+            "enabled": true
+          },
+          {
+            "key": "AGENTMONITOR_CAPTURE_ACCESSIBILITY",
+            "value": "1",
+            "enabled": true
+          },
+          {
+            "key": "AGENTMONITOR_UI_ACTIONS_BASE64",
+            "value": "W10=",
+            "enabled": true
           }
         ]
       }

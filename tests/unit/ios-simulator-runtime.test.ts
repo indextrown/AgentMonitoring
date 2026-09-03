@@ -6,6 +6,8 @@ import {
   launchIosSimulatorRuntime,
   parseAccessibilityObserverOutput,
   parseAvailableSimulatorDevices,
+  parseUiActionObserverOutput,
+  type RuntimeUiAction,
   type RuntimeCommandRequest
 } from '../../electron/main/ios-simulator-runtime'
 
@@ -49,6 +51,30 @@ function accessibilityObserverOutput(bundleIdentifier = 'com.example.PopPang'): 
   ].join('\n')
 }
 
+function uiActionObserverOutput(
+  actions: RuntimeUiAction[],
+  bundleIdentifier = 'com.example.PopPang'
+): string {
+  const payload = {
+    schemaVersion: 1,
+    bundleIdentifier,
+    executedAt: '2026-09-03T00:00:00Z',
+    actionCount: actions.length,
+    results: actions.map((action, index) => ({
+      index,
+      kind: action.kind,
+      identifier: action.identifier,
+      durationMilliseconds: 120 + index
+    }))
+  }
+  return [
+    'AGENTMONITOR_UI_ACTIONS_BEGIN',
+    Buffer.from(JSON.stringify(payload)).toString('base64'),
+    'AGENTMONITOR_UI_ACTIONS_END',
+    ''
+  ].join('\n')
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
@@ -65,6 +91,15 @@ describe('iOS Simulator runtime adapter', () => {
     const commands: RuntimeCommandRequest[] = []
     const progress: string[] = []
     const progressUpdates: Array<Record<string, unknown>> = []
+    const uiActions: RuntimeUiAction[] = [
+      { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 10 },
+      {
+        kind: 'type-text',
+        identifier: 'destination-search',
+        text: '부산항',
+        timeoutSeconds: 12
+      }
+    ]
     const execute = async (request: RuntimeCommandRequest) => {
       commands.push(request)
       if (request.args.join(' ') === 'simctl list devices available --json') {
@@ -129,7 +164,7 @@ describe('iOS Simulator runtime adapter', () => {
         }
       }
       if (request.args.some((argument) => argument.startsWith('-only-testing:'))) {
-        const stdout = accessibilityObserverOutput()
+        const stdout = `${uiActionObserverOutput(uiActions)}${accessibilityObserverOutput()}`
         return { code: 0, output: stdout, stdout }
       }
       if (request.args.includes('launch')) {
@@ -155,6 +190,7 @@ describe('iOS Simulator runtime adapter', () => {
       },
       captureScreen: true,
       captureAccessibility: true,
+      uiActions,
       execute,
       wait: async () => undefined,
       onProgress: (status, _message, update) => {
@@ -176,6 +212,10 @@ describe('iOS Simulator runtime adapter', () => {
         mimeType: 'application/json',
         nodeCount: 2,
         truncated: false
+      },
+      uiActionEvidence: {
+        mimeType: 'application/json',
+        actionCount: 2
       }
     })
     expect(result.screenEvidence?.path).toMatch(/runtime-sessions\/.+\/evidence\/screen-.+\.png$/)
@@ -185,7 +225,7 @@ describe('iOS Simulator runtime adapter', () => {
       'building',
       'installing',
       'launching',
-      'observing',
+      'acting',
       'observing'
     ])
     expect(progressUpdates).toEqual([
@@ -222,11 +262,12 @@ describe('iOS Simulator runtime adapter', () => {
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'simctl', 'install', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
-      ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID'],
-      ['/usr/bin/xcrun', 'xcodebuild', '-project', expect.stringContaining('AgentMonitoringAccessibility.xcodeproj')]
+      ['/usr/bin/xcrun', 'xcodebuild', '-project', expect.stringContaining('AgentMonitoringAccessibility.xcodeproj')],
+      ['/usr/bin/xcrun', 'simctl', 'io', 'IPHONE-UDID']
     ])
     expect(result.accessibilityEvidence?.content).toContain('start-navigation')
-    expect(
+    expect(result.uiActionEvidence?.content).toContain('destination-search')
+    const testPlan = JSON.parse(
       await readFile(
         join(
           runtimeRoot,
@@ -236,7 +277,20 @@ describe('iOS Simulator runtime adapter', () => {
         ),
         'utf8'
       )
-    ).toContain('com.example.PopPang')
+    ) as {
+      configurations: Array<{
+        options: { environmentVariableEntries: Array<{ key: string; value: string }> }
+      }>
+    }
+    const environment = Object.fromEntries(
+      testPlan.configurations[0].options.environmentVariableEntries.map((entry) => [
+        entry.key,
+        entry.value
+      ])
+    )
+    expect(environment.AGENTMONITOR_TARGET_BUNDLE_ID).toBe('com.example.PopPang')
+    expect(environment.AGENTMONITOR_CAPTURE_ACCESSIBILITY).toBe('1')
+    expect(JSON.parse(Buffer.from(environment.AGENTMONITOR_UI_ACTIONS_BASE64, 'base64').toString('utf8'))).toEqual(uiActions)
   })
 
   it('reports a clear error when no iPad Simulator is available', async () => {
@@ -259,6 +313,7 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        uiActions: [],
         execute: async () => ({
           code: 0,
           output: '',
@@ -298,6 +353,7 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        uiActions: [],
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -330,6 +386,7 @@ describe('iOS Simulator runtime adapter', () => {
         },
         captureScreen: false,
         captureAccessibility: false,
+        uiActions: [],
         execute: async () => ({ code: 0, output: '', stdout: '' }),
         onProgress: () => undefined
       })
@@ -400,5 +457,26 @@ describe('iOS Simulator runtime adapter', () => {
         'com.example.PopPang'
       )
     ).toThrow('올바른 base64가 아닙니다')
+  })
+
+  it('accepts only UI action results that match the requested identifier sequence', () => {
+    const actions: RuntimeUiAction[] = [
+      { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 10 }
+    ]
+    expect(
+      parseUiActionObserverOutput(
+        uiActionObserverOutput(actions),
+        'com.example.PopPang',
+        actions
+      )
+    ).toMatchObject({ actionCount: 1, results: [{ identifier: 'start-navigation' }] })
+
+    expect(() =>
+      parseUiActionObserverOutput(
+        uiActionObserverOutput(actions),
+        'com.example.PopPang',
+        [{ kind: 'tap', identifier: 'different-control', timeoutSeconds: 10 }]
+      )
+    ).toThrow('요청한 action 계약과 다릅니다')
   })
 })

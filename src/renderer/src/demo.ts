@@ -163,6 +163,16 @@ function buildSnapshot(): DashboardSnapshot {
           mimeType: 'application/json' as const,
           sizeBytes: 42_816,
           createdAt: atOffset(0, 8, 59)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000103',
+          taskId: tasks[0].id,
+          projectId,
+          kind: 'ui-actions' as const,
+          path: 'demo://runtime/evidence/ui-actions-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 3_584,
+          createdAt: atOffset(0, 8, 57)
         }
       ]
     : []
@@ -352,7 +362,7 @@ export const demoBridge: AgentMonitoringBridge = {
           ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 · XCTest 접근성 트리 수집 사용 가능 · 앱 상태 연결 예정' }
           : { key: 'observe' as const, status: 'missing' as const, detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
         hasIosContract
-          ? { key: 'act' as const, status: 'declared' as const, detail: 'UI · fixture 조작 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'act' as const, status: 'ready' as const, detail: 'accessibility identifier UI 조작 2단계 사용 가능 · fixture · 연결 예정' }
           : { key: 'act' as const, status: 'missing' as const, detail: 'UI·fixture 조작이 선언되지 않았습니다.' },
         hasTestCommand
           ? { key: 'verify' as const, status: 'ready' as const, detail: `검증 명령: ${project.testCommand.trim()}` }

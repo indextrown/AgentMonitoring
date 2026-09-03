@@ -28,6 +28,7 @@ export type EventKind =
   | 'task_discarded'
   | 'runtime_started'
   | 'runtime_ready'
+  | 'runtime_acted'
   | 'runtime_observed'
   | 'runtime_failed'
   | 'runtime_stopped'
@@ -132,6 +133,7 @@ export type RuntimeSessionStatus =
   | 'building'
   | 'installing'
   | 'launching'
+  | 'acting'
   | 'observing'
   | 'running'
   | 'failed'
@@ -155,7 +157,7 @@ export interface RuntimeEvidenceRecord {
   id: string
   taskId: string
   projectId: string
-  kind: 'screen' | 'accessibility'
+  kind: 'screen' | 'accessibility' | 'ui-actions'
   path: string
   mimeType: 'image/png' | 'application/json'
   sizeBytes: number

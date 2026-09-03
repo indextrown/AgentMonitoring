@@ -43,6 +43,7 @@ async function createExecutionFixture(options: {
   withRuntimeManifest?: boolean
   withScreenObservation?: boolean
   withAccessibilityObservation?: boolean
+  withUiActions?: boolean
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -80,9 +81,22 @@ async function createExecutionFixture(options: {
             ...(options.withScreenObservation ? ['screen'] : []),
             ...(options.withAccessibilityObservation ? ['accessibility'] : [])
           ],
-          act: [],
+          act: options.withUiActions ? ['ui'] : [],
           verify: ['test-command']
-        }
+        },
+        runtimeScenario: options.withUiActions
+          ? {
+              actions: [
+                { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 10 },
+                {
+                  kind: 'type-text',
+                  identifier: 'destination-search',
+                  text: '부산항',
+                  timeoutSeconds: 12
+                }
+              ]
+            }
+          : undefined
       })
     )
     await writeFile(join(repository, 'App.xcodeproj', 'project.pbxproj'), '// fixture\n')
@@ -369,16 +383,21 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     store.close()
   })
 
-  it('launches an iPad runtime and gives screen and accessibility evidence to the reviewer', async () => {
+  it('launches an iPad runtime and gives UI action, screen, and accessibility evidence to the reviewer', async () => {
     const launchedWorktrees: string[] = []
     const stoppedBundles: string[] = []
     let screenEvidencePath = ''
     let accessibilityEvidencePath = ''
+    let uiActionEvidencePath = ''
     const runtimeAdapter: IosSimulatorRuntimeAdapter = {
       launch: async (input) => {
         launchedWorktrees.push(input.worktreePath)
         expect(input.captureScreen).toBe(true)
         expect(input.captureAccessibility).toBe(true)
+        expect(input.uiActions).toMatchObject([
+          { kind: 'tap', identifier: 'start-navigation' },
+          { kind: 'type-text', identifier: 'destination-search', text: '부산항' }
+        ])
         expect(input.contract.deviceFamily).toBe('ipad')
         input.onProgress('booting', 'iPad 부팅')
         input.onProgress('building', 'Swift 앱 빌드')
@@ -389,6 +408,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         accessibilityEvidencePath = join(evidenceDirectory, 'accessibility-fixture.json')
         const accessibilityContent = '{"schemaVersion":1,"root":{"label":"항해 시작"}}\n'
         await writeFile(accessibilityEvidencePath, accessibilityContent)
+        uiActionEvidencePath = join(evidenceDirectory, 'ui-actions-fixture.json')
+        const uiActionContent = '{"schemaVersion":1,"actionCount":2,"results":[{"identifier":"start-navigation"},{"identifier":"destination-search"}]}\n'
+        await writeFile(uiActionEvidencePath, uiActionContent)
         return {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',
@@ -409,6 +431,14 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
             nodeCount: 2,
             truncated: false,
             content: accessibilityContent
+          },
+          uiActionEvidence: {
+            path: uiActionEvidencePath,
+            mimeType: 'application/json',
+            sizeBytes: Buffer.byteLength(uiActionContent),
+            executedAt: new Date().toISOString(),
+            actionCount: 2,
+            content: uiActionContent
           }
         }
       },
@@ -426,6 +456,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       withRuntimeManifest: true,
       withScreenObservation: true,
       withAccessibilityObservation: true,
+      withUiActions: true,
       runtimeAdapter
     })
 
@@ -455,16 +486,24 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
           kind: 'accessibility',
           path: accessibilityEvidencePath,
           mimeType: 'application/json'
+        }),
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'ui-actions',
+          path: uiActionEvidencePath,
+          mimeType: 'application/json'
         })
       ])
     )
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_observed')).toBe(true)
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_acted')).toBe(true)
     const codexCalls = (await readFile(join(fixture.directory, 'codex-argv.jsonl'), 'utf8'))
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line) as string[])
     expect(codexCalls.at(-1)).toEqual(expect.arrayContaining(['--image', screenEvidencePath]))
     expect(codexCalls.at(-1)?.join('\n')).toContain('항해 시작')
+    expect(codexCalls.at(-1)?.join('\n')).toContain('destination-search')
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App'])
@@ -478,6 +517,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       launch: async (input) => {
         expect(input.captureScreen).toBe(false)
         expect(input.captureAccessibility).toBe(false)
+        expect(input.uiActions).toEqual([])
         input.onProgress('launching', 'fixture 앱 실행 중', {
           deviceId: 'IPAD-UDID',
           deviceName: 'iPad Pro 13-inch',

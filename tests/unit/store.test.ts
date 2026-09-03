@@ -128,6 +128,13 @@ describe('AppStore', () => {
       sizeBytes: 2_048,
       createdAt: new Date(Date.now() + 1_000).toISOString()
     })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'ui-actions',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'ui-actions.json'),
+      mimeType: 'application/json',
+      sizeBytes: 3_072,
+      createdAt: new Date(Date.now() + 2_000).toISOString()
+    })
     store.close()
 
     const reopened = new AppStore(databasePath)
@@ -141,6 +148,12 @@ describe('AppStore', () => {
       }
     ])
     expect(reopened.getSnapshot(project.id).runtimeEvidence).toMatchObject([
+      {
+        taskId: task.id,
+        kind: 'ui-actions',
+        mimeType: 'application/json',
+        sizeBytes: 3_072
+      },
       {
         taskId: task.id,
         kind: 'accessibility',

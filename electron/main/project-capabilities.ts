@@ -24,6 +24,34 @@ const relativeXcodeContainerSchema = z.string().min(1).max(512).refine(
   'container는 저장소 내부의 .xcworkspace 또는 .xcodeproj 상대 경로여야 합니다.'
 )
 
+const accessibilityIdentifierSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .refine(
+    (value) => !/[\u0000-\u001F\u007F]/.test(value),
+    'identifier에는 제어 문자를 사용할 수 없습니다.'
+  )
+
+const runtimeUiActionSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('tap'),
+      identifier: accessibilityIdentifierSchema,
+      timeoutSeconds: z.number().int().min(1).max(30).default(10)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('type-text'),
+      identifier: accessibilityIdentifierSchema,
+      text: z.string().min(1).max(2_000),
+      timeoutSeconds: z.number().int().min(1).max(30).default(10)
+    })
+    .strict()
+])
+
 export const projectCapabilityManifestSchema = z
   .object({
     version: z.literal(1),
@@ -44,7 +72,13 @@ export const projectCapabilityManifestSchema = z
         act: z.array(z.enum(['ui', 'fixture'])).max(2),
         verify: z.array(z.enum(['test-command', 'runtime-scenario'])).max(2)
       })
+      .strict(),
+    runtimeScenario: z
+      .object({
+        actions: z.array(runtimeUiActionSchema).max(20)
+      })
       .strict()
+      .optional()
   })
   .strict()
   .superRefine((manifest, context) => {
@@ -63,6 +97,16 @@ export const projectCapabilityManifestSchema = z
         code: 'custom',
         path: ['capabilities', 'verify'],
         message: 'runtime-scenario에는 run이 필요합니다.'
+      })
+    }
+    if (
+      (manifest.runtimeScenario?.actions.length ?? 0) > 0 &&
+      !manifest.capabilities.act.includes('ui')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['capabilities', 'act'],
+        message: 'runtimeScenario.actions를 실행하려면 act에 ui가 필요합니다.'
       })
     }
   })
@@ -195,6 +239,12 @@ export async function inspectProjectCapabilities(
   const declaredObserveLabels = capabilities.observe
     .filter((item) => !['screen', 'accessibility'].includes(item))
     .map((item) => observeLabels[item])
+  const uiActionCount = capabilities.act.includes('ui')
+    ? result.value.runtimeScenario?.actions.length ?? 0
+    : 0
+  const declaredActLabels = capabilities.act
+    .filter((item) => item === 'fixture' || (item === 'ui' && uiActionCount === 0))
+    .map((item) => actLabels[item])
 
   return {
     manifest: {
@@ -223,8 +273,17 @@ export async function inspectProjectCapabilities(
         : capabilities.observe.length
           ? declaredCapability('observe', `${capabilities.observe.map((item) => observeLabels[item]).join(' · ')} 관찰 계약 선언`)
         : missingCapability('observe', '관찰 채널이 선언되지 않았습니다.'),
-      capabilities.act.length
-        ? declaredCapability('act', `${capabilities.act.map((item) => actLabels[item]).join(' · ')} 조작 계약 선언`)
+      uiActionCount > 0
+        ? readyCapability(
+            'act',
+            [
+              `accessibility identifier UI 조작 ${uiActionCount.toLocaleString('ko-KR')}단계 사용 가능`,
+              declaredActLabels.join(' · '),
+              declaredActLabels.length ? '연결 예정' : ''
+            ].filter(Boolean).join(' · ')
+          )
+        : capabilities.act.length
+          ? declaredCapability('act', `${capabilities.act.map((item) => actLabels[item]).join(' · ')} 조작 계약 선언`)
         : missingCapability('act', '조작 채널이 선언되지 않았습니다.'),
       verifyFromCommand ??
         (capabilities.verify.length

@@ -133,7 +133,8 @@ const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
   building: '앱 빌드',
   installing: '앱 설치',
   launching: '앱 실행',
-  observing: '화면 캡처',
+  acting: 'UI 조작',
+  observing: '증거 수집',
   running: '실행 중',
   failed: '실패',
   stopped: '종료됨'
@@ -836,7 +837,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>Build·Run, 화면 캡처, 접근성 트리 수집은 작업별 Swift runtime에서 사용합니다. 상태 관찰과 조작은 다음 단계에서 연결합니다.</small>
+              <small>Build·Run, 화면·접근성 관찰과 identifier UI 조작은 작업별 Swift runtime에서 사용합니다. 상태·fixture 조작은 다음 단계에서 연결합니다.</small>
             )}
           </footer>
         </article>
@@ -1543,13 +1544,19 @@ function TaskDrawer({
             {evidence.length > 0 && (
               <div className="runtime-evidence-list">
                 {evidence.slice(0, 3).map((item) => {
-                  const EvidenceIcon = item.kind === 'accessibility' ? FileJson : ImageIcon
+                  const isJsonEvidence = item.kind !== 'screen'
+                  const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
+                  const evidenceLabel = item.kind === 'accessibility'
+                    ? 'Simulator 접근성 트리'
+                    : item.kind === 'ui-actions'
+                      ? 'Simulator UI 조작 결과'
+                      : 'Simulator 화면 증거'
                   return (
                     <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
                       <EvidenceIcon size={14} />
                       <span>
-                        <strong>{item.kind === 'accessibility' ? 'Simulator 접근성 트리' : 'Simulator 화면 증거'}</strong>
-                        <small>{item.kind === 'accessibility' ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
+                        <strong>{evidenceLabel}</strong>
+                        <small>{isJsonEvidence ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)} · {timeAgo(item.createdAt)}</small>
                       </span>
                       <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
                     </button>

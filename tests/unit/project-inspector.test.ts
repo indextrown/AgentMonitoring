@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { inspectProjectCapabilities } from '../../electron/main/project-capabilities'
+import {
+  inspectProjectCapabilities,
+  projectCapabilityManifestSchema
+} from '../../electron/main/project-capabilities'
 import { inspectProject, parseGitStatus } from '../../electron/main/project-inspector'
 import type { ProjectRecord } from '../../src/shared/types'
 
@@ -137,6 +140,16 @@ describe('inspectProject', () => {
           observe: ['screen', 'accessibility', 'state'],
           act: ['ui', 'fixture'],
           verify: ['test-command', 'runtime-scenario']
+        },
+        runtimeScenario: {
+          actions: [
+            { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 12 },
+            {
+              kind: 'type-text',
+              identifier: 'destination-search',
+              text: '부산항'
+            }
+          ]
         }
       })
     )
@@ -168,7 +181,7 @@ describe('inspectProject', () => {
       { key: 'build', status: 'ready' },
       { key: 'run', status: 'ready' },
       { key: 'observe', status: 'ready' },
-      { key: 'act', status: 'declared' },
+      { key: 'act', status: 'ready' },
       { key: 'verify', status: 'ready' }
     ])
     expect(inspection.capabilities.find(({ key }) => key === 'run')?.detail).toBe(
@@ -176,6 +189,9 @@ describe('inspectProject', () => {
     )
     expect(inspection.capabilities.find(({ key }) => key === 'observe')?.detail).toBe(
       'Simulator 화면 캡처 · XCTest 접근성 트리 수집 사용 가능 · 앱 상태 · 연결 예정'
+    )
+    expect(inspection.capabilities.find(({ key }) => key === 'act')?.detail).toBe(
+      'accessibility identifier UI 조작 2단계 사용 가능 · fixture · 연결 예정'
     )
   })
 
@@ -207,6 +223,29 @@ describe('inspectProject', () => {
       message: 'JSON 문법이 올바르지 않습니다.'
     })
     expect(inspection.capabilities.find((capability) => capability.key === 'code')?.status).toBe('ready')
+  })
+
+  it('rejects runtime UI actions unless the ui act capability is enabled', () => {
+    expect(() =>
+      projectCapabilityManifestSchema.parse({
+        version: 1,
+        adapter: {
+          kind: 'ios-simulator',
+          container: 'PopPang.xcodeproj',
+          scheme: 'PopPang'
+        },
+        capabilities: {
+          build: true,
+          run: true,
+          observe: [],
+          act: [],
+          verify: ['test-command']
+        },
+        runtimeScenario: {
+          actions: [{ kind: 'tap', identifier: 'start-navigation' }]
+        }
+      })
+    ).toThrow('runtimeScenario.actions를 실행하려면 act에 ui가 필요합니다.')
   })
 
   it('rejects capability manifests larger than the inspection boundary', async () => {

@@ -46,6 +46,9 @@ test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await expect(runtime.getByRole('button', { name: /Simulator 접근성 트리/ })).toContainText(
     '41.8 KB'
   )
+  await expect(runtime.getByRole('button', { name: /Simulator UI 조작 결과/ })).toContainText(
+    '3.5 KB'
+  )
 })
 
 test('shows repository readiness when selecting a project without tasks', async ({ page }) => {
@@ -191,10 +194,10 @@ test('distinguishes supported iOS runtime capabilities from planned access', asy
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
 
   await expect(page.getByText('계약 확인됨')).toBeVisible()
-  await expect(page.getByText('현재 4개 사용 가능 · 2개는 프로젝트 선언 후 연결 대기')).toBeVisible()
-  await expect(page.locator('.capability-item.ready')).toHaveCount(4)
-  await expect(page.locator('.capability-item.declared')).toHaveCount(2)
-  await expect(page.getByText('Build·Run, 화면 캡처, 접근성 트리 수집은 작업별 Swift runtime에서 사용합니다. 상태 관찰과 조작은 다음 단계에서 연결합니다.')).toBeVisible()
+  await expect(page.getByText('현재 5개 사용 가능 · 1개는 프로젝트 선언 후 연결 대기')).toBeVisible()
+  await expect(page.locator('.capability-item.ready')).toHaveCount(5)
+  await expect(page.locator('.capability-item.declared')).toHaveCount(1)
+  await expect(page.getByText('Build·Run, 화면·접근성 관찰과 identifier UI 조작은 작업별 Swift runtime에서 사용합니다. 상태·fixture 조작은 다음 단계에서 연결합니다.')).toBeVisible()
 })
 
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {

@@ -62,6 +62,7 @@ interface RuntimeRunResult {
 }
 
 const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
+const MAX_UI_ACTION_REVIEW_CHARS = 20_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -740,6 +741,9 @@ export class AgentRunner {
     this.emit(task, 'runtime_started', 'runtime', startMessage)
 
     try {
+      const uiActions = manifest.value.capabilities.act.includes('ui')
+        ? manifest.value.runtimeScenario?.actions ?? []
+        : []
       const result = await this.runtimeAdapter.launch({
         taskId: task.id,
         worktreePath,
@@ -747,6 +751,7 @@ export class AgentRunner {
         contract: manifest.value.adapter,
         captureScreen: manifest.value.capabilities.observe.includes('screen'),
         captureAccessibility: manifest.value.capabilities.observe.includes('accessibility'),
+        uiActions,
         execute: (request) => this.executeRuntimeCommand(request, control),
         onProgress: (status, message, update = {}) => {
           this.store.setRuntimeSession(task.id, status, { ...update, message })
@@ -763,6 +768,12 @@ export class AgentRunner {
         throw new IosRuntimeStageError(
           'observing',
           '접근성 관찰 계약이 활성화됐지만 접근성 트리가 생성되지 않았습니다.'
+        )
+      }
+      if (uiActions.length > 0 && !result.uiActionEvidence) {
+        throw new IosRuntimeStageError(
+          'acting',
+          'UI 조작 계약이 활성화됐지만 action 결과가 생성되지 않았습니다.'
         )
       }
       const imagePaths: string[] = []
@@ -782,7 +793,31 @@ export class AgentRunner {
           `Simulator 화면 증거 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
         )
       }
-      let reviewContext = ''
+      const reviewContexts: string[] = []
+      if (result.uiActionEvidence) {
+        const actions = result.uiActionEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          kind: 'ui-actions',
+          path: actions.path,
+          mimeType: actions.mimeType,
+          sizeBytes: actions.sizeBytes,
+          createdAt: actions.executedAt
+        })
+        this.emit(
+          task,
+          'runtime_acted',
+          'runtime',
+          `Simulator identifier UI 조작 완료 · ${actions.actionCount.toLocaleString('ko-KR')}단계 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+        )
+        const content = actions.content.slice(0, MAX_UI_ACTION_REVIEW_CHARS)
+        reviewContexts.push([
+          `다음 JSON은 accessibility identifier로 순서대로 실행해 모두 성공한 UI 조작 결과입니다. (${actions.actionCount.toLocaleString('ko-KR')}단계)`,
+          '```json',
+          content,
+          actions.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+      }
       if (result.accessibilityEvidence) {
         const accessibility = result.accessibilityEvidence
         const evidence = this.store.addRuntimeEvidence(task.id, {
@@ -799,19 +834,22 @@ export class AgentRunner {
           `Simulator 접근성 트리 저장 · ${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes${accessibility.truncated ? ' · 안전 제한으로 일부 생략' : ''}`
         )
         const content = accessibility.content.slice(0, MAX_ACCESSIBILITY_REVIEW_CHARS)
-        reviewContext = [
+        reviewContexts.push([
           `다음 JSON은 실행 중인 앱의 접근성 트리입니다. identifier, label, value, frame, enabled·selected 상태와 계층을 이용해 요구사항과 화면 구조를 검토하세요. (${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소${accessibility.truncated ? ', 수집 시 일부 생략' : ''})`,
           '```json',
           content,
           accessibility.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
           '```'
-        ].filter(Boolean).join('\n')
+        ].filter(Boolean).join('\n'))
       }
       const message = [
         `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`,
         result.screenEvidence ? '화면 증거 1개 저장' : '',
         result.accessibilityEvidence
           ? `접근성 요소 ${result.accessibilityEvidence.nodeCount.toLocaleString('ko-KR')}개 저장`
+          : '',
+        result.uiActionEvidence
+          ? `identifier UI 조작 ${result.uiActionEvidence.actionCount.toLocaleString('ko-KR')}단계 완료`
           : ''
       ].filter(Boolean).join(' · ')
       this.store.setRuntimeSession(task.id, 'running', {
@@ -822,7 +860,7 @@ export class AgentRunner {
         message
       })
       this.emit(task, 'runtime_ready', 'runtime', message)
-      return { summary: message, reviewContext, imagePaths }
+      return { summary: message, reviewContext: reviewContexts.join('\n\n'), imagePaths }
     } catch (error) {
       if (error instanceof StoppedError) throw error
       if (error instanceof ProcessTimeoutError) {

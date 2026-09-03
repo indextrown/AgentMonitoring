@@ -25,11 +25,26 @@ const packagedAccessibilityObserver = join(
   'AgentMonitoringAccessibility.xcodeproj',
   'project.pbxproj'
 )
+const packagedRuntimeUiDriver = join(
+  process.cwd(),
+  'dist',
+  outputDirectory,
+  'AgentMonitoring.app',
+  'Contents',
+  'Resources',
+  'ios-accessibility-observer',
+  'AgentMonitoringAccessibilityTests',
+  'AccessibilitySnapshotTests.swift'
+)
 
 try {
   const observerStats = await stat(packagedAccessibilityObserver)
   if (!observerStats.isFile()) {
     throw new Error('패키지에 XCTest 접근성 observer가 포함되지 않았습니다.')
+  }
+  const runtimeUiDriverStats = await stat(packagedRuntimeUiDriver)
+  if (!runtimeUiDriverStats.isFile()) {
+    throw new Error('패키지에 XCTest UI 조작 driver가 포함되지 않았습니다.')
   }
   await new Promise((resolvePromise, reject) => {
     const child = spawn(executable, [], {
@@ -66,7 +81,9 @@ try {
       reject(new Error(`패키지 preload bridge 확인에 실패했습니다. 종료 코드: ${code}\n${output}`))
     })
   })
-  console.log('Package smoke test passed: PRELOAD_BRIDGE_READY + ACCESSIBILITY_OBSERVER_READY')
+  console.log(
+    'Package smoke test passed: PRELOAD_BRIDGE_READY + ACCESSIBILITY_OBSERVER_READY + UI_ACTION_DRIVER_READY'
+  )
 } finally {
   await rm(smokeUserData, { recursive: true, force: true })
 }
