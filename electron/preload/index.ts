@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { AGENT_MONITORING_BRIDGE_VERSION } from '../../src/shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -9,6 +10,7 @@ import type {
 } from '../../src/shared/types'
 
 const bridge: AgentMonitoringBridge = {
+  apiVersion: AGENT_MONITORING_BRIDGE_VERSION,
   getCodexAuth: () => ipcRenderer.invoke('codex-auth:status'),
   loginCodex: () => ipcRenderer.invoke('codex-auth:login'),
   cancelCodexLogin: () => ipcRenderer.invoke('codex-auth:cancel'),

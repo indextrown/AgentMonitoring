@@ -53,6 +53,7 @@ import {
   buildRuntimeTaskReport,
   isActiveTask
 } from '../../shared/domain'
+import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -83,9 +84,27 @@ import { demoBridge } from './demo'
 
 type Page = 'dashboard' | 'tasks' | 'findings' | 'notes' | 'projects'
 type Range = 7 | 30 | 'all'
+type BridgeConnectionIssue = 'missing' | 'outdated'
 
-const electronBridgeUnavailable = !window.agentMonitoring && navigator.userAgent.toLowerCase().includes('electron')
-const bridge: AgentMonitoringBridge = window.agentMonitoring ?? demoBridge
+const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
+const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
+const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
+  'getStorageOverview',
+  'setStoragePolicy',
+  'cleanupStorage'
+]
+const bridgeConnectionIssue: BridgeConnectionIssue | null = !electronRuntime
+  ? null
+  : !runtimeBridge
+    ? 'missing'
+    : runtimeBridge.apiVersion !== AGENT_MONITORING_BRIDGE_VERSION ||
+        requiredBridgeMethods.some((method) => typeof runtimeBridge[method] !== 'function')
+      ? 'outdated'
+      : null
+const electronBridgeUnavailable = bridgeConnectionIssue !== null
+const bridge: AgentMonitoringBridge = electronBridgeUnavailable
+  ? demoBridge
+  : (runtimeBridge as AgentMonitoringBridge | undefined) ?? demoBridge
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   queued: '대기',
@@ -492,7 +511,7 @@ export function App(): React.JSX.Element {
   }
 
   if (electronBridgeUnavailable) {
-    return <RuntimeErrorScreen />
+    return <RuntimeErrorScreen issue={bridgeConnectionIssue ?? 'missing'} />
   }
 
   if (!snapshot || !codexAuth) {
@@ -708,7 +727,8 @@ export function App(): React.JSX.Element {
   )
 }
 
-function RuntimeErrorScreen(): React.JSX.Element {
+function RuntimeErrorScreen({ issue }: { issue: BridgeConnectionIssue }): React.JSX.Element {
+  const outdated = issue === 'outdated'
   return (
     <main className="auth-shell">
       <div className="auth-titlebar">
@@ -718,15 +738,18 @@ function RuntimeErrorScreen(): React.JSX.Element {
       <section className="auth-card" role="alert">
         <div className="auth-icon error"><Octagon size={25} /></div>
         <p className="eyebrow">RUNTIME CONNECTION</p>
-        <h1>앱 연결을 불러오지 못했습니다</h1>
+        <h1>{outdated ? '앱 연결을 업데이트해야 합니다' : '앱 연결을 불러오지 못했습니다'}</h1>
         <p className="auth-description">
-          Electron preload가 연결되지 않아 실제 프로젝트와 로컬 데이터에 접근할 수 없습니다.
-          안전을 위해 데모 화면으로 전환하지 않았습니다.
+          {outdated
+            ? '화면은 새 버전이지만 Electron preload는 이전 버전입니다. 일부 기능만 실행하면 오류가 나므로 작업을 시작하기 전에 연결을 다시 불러옵니다.'
+            : 'Electron preload가 연결되지 않아 실제 프로젝트와 로컬 데이터에 접근할 수 없습니다. 안전을 위해 데모 화면으로 전환하지 않았습니다.'}
         </p>
         <button className="auth-primary" onClick={() => window.location.reload()}>
-          다시 불러오기
+          {outdated ? '새 연결 다시 불러오기' : '다시 불러오기'}
         </button>
-        <p className="auth-footnote">문제가 계속되면 터미널에서 앱을 종료한 뒤 `pnpm dev`로 다시 실행하세요.</p>
+        <p className="auth-footnote">
+          다시 불러와도 같다면 터미널에서 실행 중인 앱을 `Ctrl+C`로 완전히 종료한 뒤 `pnpm dev`를 다시 실행하세요.
+        </p>
       </section>
     </main>
   )

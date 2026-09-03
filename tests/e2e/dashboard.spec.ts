@@ -179,6 +179,22 @@ test('gates the workspace behind the dedicated Codex login', async ({ page }) =>
   await expect(page.getByRole('heading', { name: 'ElmwoodOnline' })).toBeVisible()
 })
 
+test('blocks an outdated Electron preload before unsupported features run', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 Electron/44.1.0'
+    })
+    ;(window as unknown as { agentMonitoring: unknown }).agentMonitoring = { apiVersion: 1 }
+  })
+  await page.goto('/')
+
+  await expect(page.getByRole('heading', { name: '앱 연결을 업데이트해야 합니다' })).toBeVisible()
+  await expect(page.getByText('Electron preload는 이전 버전입니다', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: '새 연결 다시 불러오기' })).toBeVisible()
+  await expect(page.getByText(/Ctrl\+C.*pnpm dev/)).toBeVisible()
+})
+
 test('starts from a real-project onboarding state without seeded data', async ({ page }) => {
   await page.goto('/?workspace=empty')
 

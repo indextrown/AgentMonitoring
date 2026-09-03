@@ -362,7 +362,10 @@ export interface GenerateRuntimeScenarioInput {
   prompt: string
 }
 
+export const AGENT_MONITORING_BRIDGE_VERSION = 1
+
 export interface AgentMonitoringBridge {
+  apiVersion: number
   getCodexAuth: () => Promise<CodexAuthStatus>
   loginCodex: () => Promise<CodexAuthStatus>
   cancelCodexLogin: () => Promise<CodexAuthStatus>

@@ -1,12 +1,13 @@
-import type {
-  AgentMonitoringBridge,
-  CodexAuthStatus,
-  DashboardSnapshot,
-  EventKind,
-  EventRecord,
-  ProjectRecord,
-  TaskRecord,
-  TaskStatus
+import {
+  AGENT_MONITORING_BRIDGE_VERSION,
+  type AgentMonitoringBridge,
+  type CodexAuthStatus,
+  type DashboardSnapshot,
+  type EventKind,
+  type EventRecord,
+  type ProjectRecord,
+  type TaskRecord,
+  type TaskStatus
 } from '../../shared/types'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
@@ -338,6 +339,7 @@ function updateTask(
 }
 
 export const demoBridge: AgentMonitoringBridge = {
+  apiVersion: AGENT_MONITORING_BRIDGE_VERSION,
   getCodexAuth: async () => demoAuth,
   loginCodex: async () => {
     updateDemoAuth({ state: 'signing_in', authMode: null, email: null, planType: null })
