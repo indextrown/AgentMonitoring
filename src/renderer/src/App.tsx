@@ -1694,23 +1694,23 @@ function StorageModal({ onClose }: { onClose: () => void }): React.JSX.Element {
                 <small>{overview.worktreeCount}개 · 승인·폐기 시 즉시 정리</small>
               </article>
               <article>
-                <span>실행 증거 · 빌드</span>
+                <span>실행 증거 · 진행 중 빌드</span>
                 <strong>{formatBytes(overview.runtimeArtifactBytes)}</strong>
-                <small>{overview.runtimeArtifactCount}개 작업 기록</small>
+                <small>{overview.runtimeArtifactCount}개 작업 기록 · 완료·폐기 시 빌드 정리</small>
               </article>
             </div>
 
             <section className="storage-policy">
               <div>
                 <strong>Simulator 실행 기록 보관</strong>
-                <p>화면 캡처, 접근성 트리, UI 조작 결과와 작업별 DerivedData를 보관합니다.</p>
+                <p>화면 캡처, 접근성 트리와 UI 조작 결과를 보관합니다. DerivedData는 완료·폐기 시 바로 삭제합니다.</p>
               </div>
               <select
                 aria-label="Simulator 실행 기록 보관 기간"
                 value={retentionDays}
                 onChange={(event) => setRetentionDays(Number(event.target.value) as RuntimeArtifactRetentionDays)}
               >
-                <option value={0}>작업 종료 후 바로 삭제</option>
+                <option value={0}>완료·폐기 후 바로 삭제</option>
                 <option value={7}>7일</option>
                 <option value={30}>30일 (기본값)</option>
                 <option value={90}>90일</option>

@@ -315,6 +315,7 @@ test('shows storage usage and runs retention-based cleanup', async ({ page }) =>
   await expect(dialog.getByRole('heading', { name: '저장 공간 관리' })).toBeVisible()
   await expect(dialog.getByText('610.0 MB')).toBeVisible()
   await expect(dialog.getByText('승인·폐기 시 즉시 정리')).toBeVisible()
+  await expect(dialog.getByText(/DerivedData는 완료·폐기 시 바로 삭제합니다/)).toBeVisible()
   await dialog.getByLabel('Simulator 실행 기록 보관 기간').selectOption('7')
   await dialog.getByRole('button', { name: '정책 저장' }).click()
 

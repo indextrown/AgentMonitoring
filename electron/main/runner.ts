@@ -833,6 +833,7 @@ export class AgentRunner {
     } catch (error) {
       this.emit(completed, 'agent', 'git', `격리 작업공간 정리 실패 · ${String(error).slice(-1_000)}`, 'low')
     }
+    await this.cleanupTerminalDerivedData(completed)
     await this.removeRuntimeArtifactsWhenExpired(this.store.getTask(taskId))
   }
 
@@ -843,6 +844,7 @@ export class AgentRunner {
     await this.cleanupTaskWorktree(task, true)
     const discarded = this.store.transitionTask(taskId, 'discarded')
     this.emit(discarded, 'task_discarded', 'human', `${task.title} 변경 폐기`)
+    await this.cleanupTerminalDerivedData(discarded)
     await this.removeRuntimeArtifactsWhenExpired(discarded)
   }
 
@@ -887,6 +889,58 @@ export class AgentRunner {
       recursive: stats.isDirectory() && !stats.isSymbolicLink(),
       force: true
     })
+  }
+
+  private async removeTaskDerivedData(taskId: string): Promise<number> {
+    const runtimeRoot = resolve(this.runtimeRoot)
+    const sessionPath = resolve(runtimeRoot, taskId)
+    if (!isPathInside(runtimeRoot, sessionPath)) {
+      throw new Error('안전하지 않은 DerivedData 정리 경로입니다.')
+    }
+
+    const sessionStats = await lstat(sessionPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (!sessionStats || !sessionStats.isDirectory() || sessionStats.isSymbolicLink()) return 0
+
+    const targets = [resolve(sessionPath, 'DerivedData')]
+    const observerPath = resolve(sessionPath, 'accessibility-observer')
+    const observerStats = await lstat(observerPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (observerStats?.isDirectory() && !observerStats.isSymbolicLink()) {
+      targets.push(resolve(observerPath, 'DerivedData'))
+    }
+
+    let removed = 0
+    for (const target of targets) {
+      if (!isPathInside(sessionPath, target)) throw new Error('작업 경로 밖의 DerivedData는 정리할 수 없습니다.')
+      const stats = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
+      if (!stats) continue
+      await rm(target, {
+        recursive: stats.isDirectory() && !stats.isSymbolicLink(),
+        force: true
+      })
+      removed += 1
+    }
+    return removed
+  }
+
+  private async cleanupTerminalDerivedData(task: TaskRecord): Promise<void> {
+    try {
+      const removed = await this.removeTaskDerivedData(task.id)
+      if (removed > 0) {
+        const reason = task.status === 'completed' ? '작업 완료' : '작업 폐기'
+        this.emit(task, 'agent', 'runtime', `${reason} 후 DerivedData ${removed}곳 즉시 정리`)
+      }
+    } catch (error) {
+      this.emit(task, 'agent', 'runtime', `DerivedData 정리 실패 · ${String(error).slice(-1_000)}`, 'low')
+    }
   }
 
   private shouldRemoveRuntimeArtifacts(task: TaskRecord): boolean {

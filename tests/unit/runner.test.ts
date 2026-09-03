@@ -947,6 +947,28 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('removes DerivedData immediately after approval and keeps runtime evidence', async () => {
+    const fixture = await createApprovalFixture()
+    const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    const appDerivedDataPath = join(runtimeSessionPath, 'DerivedData')
+    const observerDerivedDataPath = join(runtimeSessionPath, 'accessibility-observer', 'DerivedData')
+    const evidencePath = join(runtimeSessionPath, 'evidence', 'screen.png')
+    await mkdir(appDerivedDataPath, { recursive: true })
+    await mkdir(observerDerivedDataPath, { recursive: true })
+    await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(join(appDerivedDataPath, 'App.app'), 'build-output')
+    await writeFile(join(observerDerivedDataPath, 'Observer.xctest'), 'observer-output')
+    await writeFile(evidencePath, 'runtime-evidence')
+
+    await fixture.runner.approve(fixture.taskId)
+
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('completed')
+    await expect(stat(appDerivedDataPath)).rejects.toThrow()
+    await expect(stat(observerDerivedDataPath)).rejects.toThrow()
+    expect((await stat(evidencePath)).isFile()).toBe(true)
+    fixture.store.close()
+  })
+
   it('refuses a non-fast-forward approval without changing the original branch', async () => {
     const fixture = await createApprovalFixture()
     await writeFile(join(fixture.repository, 'main-change.txt'), 'advanced\n')
@@ -985,12 +1007,18 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
-  it('discards the worktree immediately and keeps runtime evidence until its retention expires', async () => {
+  it('discards worktree and DerivedData immediately while keeping evidence until retention expires', async () => {
     const fixture = await createApprovalFixture()
     const task = fixture.store.getTask(fixture.taskId)
     const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    const appDerivedDataPath = join(runtimeSessionPath, 'DerivedData')
+    const observerDerivedDataPath = join(runtimeSessionPath, 'accessibility-observer', 'DerivedData')
     const evidencePath = join(runtimeSessionPath, 'evidence', 'screen.png')
+    await mkdir(appDerivedDataPath, { recursive: true })
+    await mkdir(observerDerivedDataPath, { recursive: true })
     await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(join(appDerivedDataPath, 'App.app'), 'build-output')
+    await writeFile(join(observerDerivedDataPath, 'Observer.xctest'), 'observer-output')
     await writeFile(evidencePath, 'runtime-evidence')
     fixture.store.setRuntimeSession(task.id, 'stopped', { message: '검증 증거 보관 중' })
     fixture.store.addRuntimeEvidence(task.id, {
@@ -1005,6 +1033,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     expect(fixture.store.getTask(task.id)).toMatchObject({ status: 'discarded', worktreePath: null })
     await expect(stat(fixture.worktreePath)).rejects.toThrow()
+    await expect(stat(appDerivedDataPath)).rejects.toThrow()
+    await expect(stat(observerDerivedDataPath)).rejects.toThrow()
     expect((await stat(evidencePath)).isFile()).toBe(true)
     expect(fixture.store.getRuntimeSession(task.id)).not.toBeNull()
 
