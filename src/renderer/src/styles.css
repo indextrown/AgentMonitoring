@@ -898,9 +898,57 @@ kbd {
 
 .capability-header-actions .secondary-button,
 .capability-summary-actions .secondary-button,
+.capability-summary-actions .primary-button,
 .capability-empty .secondary-button {
   min-height: 27px;
   padding: 0 9px;
+  font-size: 8px;
+}
+
+.capability-connect {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin-top: 13px;
+  padding: 11px 12px;
+  border: 1px solid #31503f;
+  border-radius: 6px;
+  background: #101b16;
+}
+
+.capability-connect-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid #345a46;
+  border-radius: 7px;
+  color: #70c096;
+  background: #13251b;
+}
+
+.capability-connect strong {
+  color: #b9c9c0;
+  font-size: 9px;
+}
+
+.capability-connect p {
+  margin: 4px 0 0;
+  color: #65746c;
+  font-size: 7px;
+  line-height: 1.5;
+}
+
+.capability-connect-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.capability-connect-actions .primary-button {
+  min-height: 29px;
+  padding: 0 10px;
   font-size: 8px;
 }
 
@@ -3543,6 +3591,15 @@ kbd {
   .capability-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .capability-connect {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .capability-connect-actions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 
   .timeline-card {

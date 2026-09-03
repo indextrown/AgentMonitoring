@@ -107,10 +107,10 @@ describe('inspectProject', () => {
     })
     expect(inspection.capabilities).toEqual([
       { key: 'code', status: 'ready', detail: 'Git 추적 파일 5개에 접근 가능' },
-      { key: 'build', status: 'missing', detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
-      { key: 'run', status: 'missing', detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
-      { key: 'observe', status: 'missing', detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
-      { key: 'act', status: 'missing', detail: 'UI·fixture 조작이 선언되지 않았습니다.' },
+      { key: 'build', status: 'missing', detail: 'Xcode 프로젝트를 자동 연결하거나 직접 설정하세요.' },
+      { key: 'run', status: 'missing', detail: 'Build 연결 시 Simulator 실행도 함께 활성화됩니다.' },
+      { key: 'observe', status: 'missing', detail: 'Run 연결 시 화면과 접근성 관찰이 함께 활성화됩니다.' },
+      { key: 'act', status: 'missing', detail: 'Run 연결 후 새 작업에서 UI 시나리오를 만들 수 있습니다.' },
       { key: 'verify', status: 'missing', detail: '프로젝트 검증 명령이 설정되지 않았습니다.' }
     ])
     expect(inspection.manifests).toEqual(['Tuist.swift', 'Workspace.swift'])

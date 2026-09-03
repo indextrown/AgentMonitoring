@@ -413,14 +413,41 @@ export const demoBridge: AgentMonitoringBridge = {
     if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
     return updated
   },
+  autoConfigureProjectRuntime: async (projectIdToConfigure) => {
+    if (searchParams.get('runtime-discovery') === 'missing') {
+      throw new Error('Xcode 프로젝트 또는 Workspace를 찾지 못했습니다. 프로젝트 설정에서 직접 입력하세요.')
+    }
+    let updated: ProjectRecord | undefined
+    state = {
+      ...state,
+      projects: state.projects.map((project) => {
+        if (project.id !== projectIdToConfigure) return project
+        updated = {
+          ...project,
+          runtimeAdapter: {
+            kind: 'ios-simulator',
+            container: `${project.name}.xcodeproj`,
+            scheme: project.name,
+            configuration: 'Debug',
+            deviceFamily: searchParams.get('device') === 'ipad' ? 'ipad' : 'iphone'
+          },
+          runtimeConfigSource: 'detected'
+        }
+        return updated
+      })
+    }
+    if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
+    return updated
+  },
   inspectProject: async (requestedProjectId) => {
     const project = state.projects.find((item) => item.id === requestedProjectId)
     if (!project) throw new Error('프로젝트를 찾을 수 없습니다.')
     const connected = !project.isDemo
     const dirty = connected && searchParams.get('inspection') === 'dirty'
     const hasTestCommand = Boolean(project.testCommand.trim())
-    const hasIosContract = connected && searchParams.get('contract') === 'ios'
-    const deviceFamilyLabel = searchParams.get('device') === 'iphone' ? 'iPhone' : 'iPad'
+    const hasIosRuntime = Boolean(project.runtimeAdapter)
+    const hasManifestContract = connected && searchParams.get('contract') === 'ios'
+    const deviceFamilyLabel = project.runtimeAdapter?.deviceFamily === 'ipad' ? 'iPad' : 'iPhone'
     const dirtyFiles = [0, 1, 2, 3, 4].map((index) => ({
       kind: 'untracked' as const,
       path: `fastlane/screenshots/ko/${index}_APP_IPHONE_65_${index}.png`
@@ -449,12 +476,12 @@ export const demoBridge: AgentMonitoringBridge = {
       trackedFileCount: connected ? 84 : 3_842,
       testFileCount: connected ? 9 : 126,
       suggestedTestCommands: connected ? ['pnpm test'] : [],
-      capabilityManifest: hasIosContract
+      capabilityManifest: hasIosRuntime
         ? {
-            path: '.agentmonitor/project.json',
+            path: hasManifestContract ? '.agentmonitor/project.json' : 'AgentMonitoring 내부 설정',
             state: 'valid' as const,
             adapterKind: 'ios-simulator' as const,
-            message: `PopPang.xcworkspace · PopPang · Debug · ${deviceFamilyLabel}`
+            message: `${project.runtimeAdapter?.container} · ${project.runtimeAdapter?.scheme} · Debug · ${deviceFamilyLabel}`
           }
         : {
             path: '.agentmonitor/project.json',
@@ -468,21 +495,21 @@ export const demoBridge: AgentMonitoringBridge = {
           status: 'ready' as const,
           detail: `Git 추적 파일 ${connected ? 84 : '3,842'}개에 접근 가능`
         },
-        hasIosContract
-          ? { key: 'build' as const, status: 'ready' as const, detail: 'PopPang Debug 빌드 adapter 사용 가능' }
-          : { key: 'build' as const, status: 'missing' as const, detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
-        hasIosContract
+        hasIosRuntime
+          ? { key: 'build' as const, status: 'ready' as const, detail: `${project.runtimeAdapter?.scheme} Debug 빌드 adapter 사용 가능` }
+          : { key: 'build' as const, status: 'missing' as const, detail: 'Xcode 프로젝트를 자동 연결하거나 직접 설정하세요.' },
+        hasIosRuntime
           ? { key: 'run' as const, status: 'ready' as const, detail: `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능` }
-          : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
-        hasIosContract
-          ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 · XCTest 접근성 트리 수집 · Debug bridge 앱 상태 수집 사용 가능' }
-          : { key: 'observe' as const, status: 'missing' as const, detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
-        hasIosContract
-          ? { key: 'act' as const, status: 'ready' as const, detail: 'accessibility identifier UI 조작 2단계 · Debug fixture signed-in-home 적용 사용 가능' }
-          : { key: 'act' as const, status: 'missing' as const, detail: 'UI·fixture 조작이 선언되지 않았습니다.' },
+          : { key: 'run' as const, status: 'missing' as const, detail: 'Build 연결 시 Simulator 실행도 함께 활성화됩니다.' },
+        hasIosRuntime
+          ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 · 접근성 트리 수집 사용 가능' }
+          : { key: 'observe' as const, status: 'missing' as const, detail: 'Run 연결 시 화면과 접근성 관찰이 함께 활성화됩니다.' },
+        hasIosRuntime
+          ? { key: 'act' as const, status: 'ready' as const, detail: '작업 등록 시 identifier UI 조작 시나리오 생성 가능' }
+          : { key: 'act' as const, status: 'missing' as const, detail: 'Run 연결 후 새 작업에서 UI 시나리오를 만들 수 있습니다.' },
         hasTestCommand
           ? { key: 'verify' as const, status: 'ready' as const, detail: `검증 명령: ${project.testCommand.trim()}` }
-          : hasIosContract
+          : hasIosRuntime
             ? { key: 'verify' as const, status: 'declared' as const, detail: '검증 명령 · 실행 시나리오 계약 선언 · 실행 어댑터 연결 예정' }
             : { key: 'verify' as const, status: 'missing' as const, detail: '프로젝트 검증 명령이 설정되지 않았습니다.' }
       ],

@@ -381,10 +381,10 @@ export async function inspectProjectCapabilities(
       },
       capabilities: [
         code,
-        missingCapability('build', '프로젝트 계약에 빌드 방식이 없습니다.'),
-        missingCapability('run', '프로젝트 계약에 앱 실행 방식이 없습니다.'),
-        missingCapability('observe', '화면·접근성·상태 관찰이 선언되지 않았습니다.'),
-        missingCapability('act', 'UI·fixture 조작이 선언되지 않았습니다.'),
+        missingCapability('build', 'Xcode 프로젝트를 자동 연결하거나 직접 설정하세요.'),
+        missingCapability('run', 'Build 연결 시 Simulator 실행도 함께 활성화됩니다.'),
+        missingCapability('observe', 'Run 연결 시 화면과 접근성 관찰이 함께 활성화됩니다.'),
+        missingCapability('act', 'Run 연결 후 새 작업에서 UI 시나리오를 만들 수 있습니다.'),
         verifyFromCommand ?? missingCapability('verify', '프로젝트 검증 명령이 설정되지 않았습니다.')
       ]
     }

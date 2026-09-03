@@ -238,6 +238,23 @@ function registerIpc(): void {
     return inspectProject(project)
   })
 
+  ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    const project = requireStore().getProject(validProjectId)
+    if (project.runtimeAdapter) return project
+    const resolvedRuntime = await resolveProjectRuntimeConfig(project.path)
+    if (!resolvedRuntime) {
+      throw new Error(
+        'Xcode 프로젝트 또는 Workspace를 찾지 못했습니다. Tuist 프로젝트라면 `tuist generate`를 한 번 실행한 뒤 다시 시도하거나 프로젝트 설정에서 직접 입력하세요.'
+      )
+    }
+    return requireStore().setProjectRuntimeAdapter(
+      project.id,
+      resolvedRuntime.adapter,
+      resolvedRuntime.source
+    )
+  })
+
   ipcMain.handle('runtime-scenario:generate', async (_event, rawInput: GenerateRuntimeScenarioInput) => {
     const input = generateRuntimeScenarioSchema.parse(rawInput)
     const auth = await requireCodexAuth().status()

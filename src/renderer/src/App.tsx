@@ -89,6 +89,7 @@ type BridgeConnectionIssue = 'missing' | 'outdated'
 const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
+  'autoConfigureProjectRuntime',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage'
@@ -260,6 +261,7 @@ export function App(): React.JSX.Element {
   const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
   const [inspection, setInspection] = useState<ProjectInspection | null>(null)
   const [inspectionLoading, setInspectionLoading] = useState(false)
+  const [runtimeConnecting, setRuntimeConnecting] = useState(false)
   const [selectingProjectId, setSelectingProjectId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -293,6 +295,20 @@ export function App(): React.JSX.Element {
       if (requestId === inspectionRequestRef.current) setInspectionLoading(false)
     }
   }, [])
+
+  const autoConfigureRuntime = useCallback(async (projectId: string) => {
+    setRuntimeConnecting(true)
+    setError(null)
+    try {
+      await bridge.autoConfigureProjectRuntime(projectId)
+      await load(projectId)
+      await refreshInspection(projectId)
+    } catch (runtimeError) {
+      setError(String(runtimeError))
+    } finally {
+      setRuntimeConnecting(false)
+    }
+  }, [load, refreshInspection])
 
   const loadCodexAuth = useCallback(async () => {
     try {
@@ -589,6 +605,8 @@ export function App(): React.JSX.Element {
             inspection={inspection}
             loading={inspectionLoading}
             onRefresh={() => void refreshInspection(selectedProject.id)}
+            onAutoConnect={() => void autoConfigureRuntime(selectedProject.id)}
+            autoConnecting={runtimeConnecting}
             onOpen={() => void bridge.openPath(selectedProject.path)}
             onConfigure={() => setPage('projects')}
             onApplyCommand={(command) => void applySuggestedTestCommand(selectedProject, command)}
@@ -606,6 +624,8 @@ export function App(): React.JSX.Element {
             range={range}
             onRange={setRange}
             onRefreshInspection={() => void refreshInspection(selectedProject.id)}
+            onAutoConnect={() => void autoConfigureRuntime(selectedProject.id)}
+            autoConnecting={runtimeConnecting}
             onPage={setPage}
             onOpenTask={setSelectedTask}
             onNewTask={() => setTaskModal(true)}
@@ -643,6 +663,8 @@ export function App(): React.JSX.Element {
             inspection={inspection}
             inspectionLoading={inspectionLoading}
             onRefreshInspection={() => void refreshInspection(selectedProject.id)}
+            onAutoConnect={() => void autoConfigureRuntime(selectedProject.id)}
+            autoConnecting={runtimeConnecting}
             onSave={async (project) => {
               await bridge.updateProject(project)
               await load(project.projectId)
@@ -808,6 +830,8 @@ function ProjectStartPage({
   inspection,
   loading,
   onRefresh,
+  onAutoConnect,
+  autoConnecting,
   onOpen,
   onConfigure,
   onApplyCommand,
@@ -817,6 +841,8 @@ function ProjectStartPage({
   inspection: ProjectInspection | null
   loading: boolean
   onRefresh: () => void
+  onAutoConnect: () => void
+  autoConnecting: boolean
   onOpen: () => void
   onConfigure: () => void
   onApplyCommand: (command: string) => void
@@ -878,7 +904,14 @@ function ProjectStartPage({
         </article>
       )}
 
-      {inspection && <ProjectCapabilityPanel inspection={inspection} />}
+      {inspection && (
+        <ProjectCapabilityPanel
+          inspection={inspection}
+          autoConnecting={autoConnecting}
+          onAutoConnect={onAutoConnect}
+          onConfigure={onConfigure}
+        />
+      )}
 
       {inspection && !inspection.clean && (
         <div className="readiness-warning" role="status">
@@ -945,15 +978,29 @@ function capabilityManifestLabel(inspection: ProjectInspection): string {
   return '코드 작업 모드'
 }
 
+function needsRuntimeConnection(inspection: ProjectInspection): boolean {
+  if (inspection.capabilityManifest.state !== 'missing') return false
+  return inspection.capabilities.some((capability) =>
+    ['build', 'run', 'observe', 'act'].includes(capability.key) && capability.status === 'missing'
+  )
+}
+
 function ProjectCapabilityPanel({
   inspection,
-  onRefresh
+  onRefresh,
+  onAutoConnect,
+  onConfigure,
+  autoConnecting = false
 }: {
   inspection: ProjectInspection
   onRefresh?: () => void
+  onAutoConnect?: () => void
+  onConfigure?: () => void
+  autoConnecting?: boolean
 }): React.JSX.Element {
   const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
   const declaredCount = inspection.capabilities.filter((capability) => capability.status === 'declared').length
+  const canAutoConnect = needsRuntimeConnection(inspection) && onAutoConnect
 
   return (
     <article className={`panel capability-panel manifest-${inspection.capabilityManifest.state}`}>
@@ -975,6 +1022,22 @@ function ProjectCapabilityPanel({
           )}
         </div>
       </header>
+      {canAutoConnect && (
+        <section className="capability-connect">
+          <div className="capability-connect-icon"><Bot size={16} /></div>
+          <div>
+            <strong>iOS 앱 실행 영역을 한 번에 연결하세요</strong>
+            <p>Xcode 프로젝트와 Scheme을 찾아 Build·Run·화면·접근성·UI 조작을 활성화합니다. 저장소 파일은 바꾸지 않습니다.</p>
+          </div>
+          <div className="capability-connect-actions">
+            {onConfigure && <button className="text-button" type="button" onClick={onConfigure}>직접 설정</button>}
+            <button className="primary-button" type="button" disabled={autoConnecting} onClick={onAutoConnect}>
+              {autoConnecting ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}
+              {autoConnecting ? '찾는 중' : 'iOS 자동 연결'}
+            </button>
+          </div>
+        </section>
+      )}
       <div className="capability-grid">
         {inspection.capabilities.map((capability) => (
           <div className={`capability-item ${capability.status}`} key={capability.key}>
@@ -988,7 +1051,7 @@ function ProjectCapabilityPanel({
         <code>{inspection.capabilityManifest.path}</code>
         <span>{inspection.capabilityManifest.message}</span>
         {inspection.capabilityManifest.state === 'valid' && (
-          <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
+          <small>연결된 Build·Run·관찰·조작 항목은 작업별 Swift runtime에서 사용합니다. Debug state·fixture는 project.json 고급 설정입니다.</small>
         )}
       </footer>
     </article>
@@ -1018,16 +1081,21 @@ function ProjectCapabilitySummary({
   inspection,
   loading,
   onRefresh,
-  onDetails
+  onDetails,
+  onAutoConnect,
+  autoConnecting
 }: {
   inspection: ProjectInspection | null
   loading: boolean
   onRefresh: () => void
   onDetails: () => void
+  onAutoConnect: () => void
+  autoConnecting: boolean
 }): React.JSX.Element {
   if (!inspection) return <ProjectCapabilityEmpty loading={loading} onRefresh={onRefresh} />
 
   const readyCount = inspection.capabilities.filter((capability) => capability.status === 'ready').length
+  const canAutoConnect = needsRuntimeConnection(inspection)
 
   return (
     <article className={`panel capability-summary manifest-${inspection.capabilityManifest.state}`}>
@@ -1039,6 +1107,12 @@ function ProjectCapabilitySummary({
         </div>
         <div className="capability-summary-actions">
           <span className="manifest-state">{capabilityManifestLabel(inspection)}</span>
+          {canAutoConnect && (
+            <button className="primary-button" disabled={autoConnecting} onClick={onAutoConnect}>
+              {autoConnecting ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}
+              {autoConnecting ? '찾는 중' : 'iOS 자동 연결'}
+            </button>
+          )}
           <button className="secondary-button" onClick={onDetails}><Settings2 size={13} /> 전체 보기</button>
         </div>
       </header>
@@ -1239,6 +1313,8 @@ function DashboardPage({
   range,
   onRange,
   onRefreshInspection,
+  onAutoConnect,
+  autoConnecting,
   onPage,
   onOpenTask,
   onNewTask
@@ -1252,6 +1328,8 @@ function DashboardPage({
   range: Range
   onRange: (range: Range) => void
   onRefreshInspection: () => void
+  onAutoConnect: () => void
+  autoConnecting: boolean
   onPage: (page: Page) => void
   onOpenTask: (task: TaskRecord) => void
   onNewTask: () => void
@@ -1321,6 +1399,8 @@ function DashboardPage({
         loading={inspectionLoading}
         onRefresh={onRefreshInspection}
         onDetails={() => onPage('projects')}
+        onAutoConnect={onAutoConnect}
+        autoConnecting={autoConnecting}
       />
 
       <article className="panel timeline-card">
@@ -1519,6 +1599,8 @@ function ProjectsPage({
   inspection,
   inspectionLoading,
   onRefreshInspection,
+  onAutoConnect,
+  autoConnecting,
   onSave,
   onOpen,
   onRemove
@@ -1527,6 +1609,8 @@ function ProjectsPage({
   inspection: ProjectInspection | null
   inspectionLoading: boolean
   onRefreshInspection: () => void
+  onAutoConnect: () => void
+  autoConnecting: boolean
   onSave: (input: UpdateProjectInput) => Promise<void>
   onOpen: () => void
   onRemove: () => void
@@ -1543,7 +1627,13 @@ function ProjectsPage({
     <section className="workspace-page">
       <PageHeading title="프로젝트 설정" description="에이전트가 접근할 저장소와 검증 명령을 명시한다." />
       {inspection ? (
-        <ProjectCapabilityPanel inspection={inspection} onRefresh={onRefreshInspection} />
+        <ProjectCapabilityPanel
+          inspection={inspection}
+          autoConnecting={autoConnecting}
+          onAutoConnect={onAutoConnect}
+          onConfigure={() => document.getElementById('ios-runtime-settings')?.scrollIntoView({ behavior: 'smooth' })}
+          onRefresh={onRefreshInspection}
+        />
       ) : (
         <ProjectCapabilityEmpty loading={inspectionLoading} onRefresh={onRefreshInspection} />
       )}
@@ -1556,7 +1646,7 @@ function ProjectsPage({
         <label><span>저장소 경로</span><div className="path-field"><code>{project.path}</code><button type="button" disabled={project.isDemo} onClick={onOpen}><FolderOpen size={14} /> 열기</button></div></label>
         <label><span>검증 명령</span><input value={testCommand} placeholder="예: pnpm check 또는 xcodebuild test ..." onChange={(event) => setTestCommand(event.target.value)} /><small>shell 연산자 없이 허용된 실행 파일과 인자만 입력한다.</small></label>
         <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
-        <section className="runtime-settings">
+        <section className="runtime-settings" id="ios-runtime-settings">
           <div className="runtime-settings-heading">
             <div>
               <strong>iOS Simulator 실행 설정</strong>

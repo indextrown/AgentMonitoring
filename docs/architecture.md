@@ -31,7 +31,9 @@ Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되�
 
 프로젝트 루트에 `.agentmonitor/project.json`이 있으면 `ProjectCapabilityInspector`가 최대 64KB의 해당 파일만 추가로 읽는다. Zod의 strict schema로 version, iOS Simulator adapter, Xcode container·scheme, iPad·iPhone 기기군, 선언된 capability를 검증하며 임의 명령이나 알 수 없는 필드는 허용하지 않는다. `deviceFamily`를 생략한 기존 계약은 iPad를 기본값으로 사용한다. manifest 자체가 심볼릭 링크이거나 저장소 외부 Xcode container 경로를 가리키면 유효하지 않은 계약으로 처리한다. 오류는 프로젝트 검사 전체를 실패시키지 않고 Renderer에 진단 상태로 전달한다.
 
-manifest가 없으면 `ProjectRuntimeConfigDetector`가 Git 추적 파일에서 저장소 내부 `.xcworkspace`와 `.xcodeproj`를 찾는다. Workspace를 우선하고 `xcodebuild -list -json`으로 Scheme을 확인한다. 감지 결과는 `projects.runtime_adapter_json`에 저장하며 기본 기기군은 iPhone이다. Renderer의 프로젝트 설정에서 container, Scheme, iPhone·iPad 선택을 수정하거나 runtime을 끌 수 있다. 이 과정은 대상 저장소에 파일을 쓰지 않는다.
+manifest가 없으면 `ProjectRuntimeConfigDetector`가 저장소 내부 `.xcworkspace`와 `.xcodeproj`를 찾는다. Git 추적 파일을 먼저 확인하고, 생성 결과가 Git에 없는 프로젝트를 위해 실제 디렉터리도 최대 깊이 4와 최대 2,000개 폴더 안에서 탐색한다. 심볼릭 링크, 숨김 폴더, 빌드 산출물과 의존성 폴더는 건너뛴다. 후보가 여러 개면 Workspace, 루트에 가까운 경로, 이름순으로 하나를 고른다.
+
+Detector는 `xcodebuild -list -json`으로 Scheme을 확인한다. 감지 결과는 `projects.runtime_adapter_json`에 저장하며 기본 기기군은 iPhone이다. Renderer는 Build·Run·Observe·Act가 연결되지 않았을 때 **iOS 자동 연결**을 제공한다. 사용자는 프로젝트 설정에서 container, Scheme, iPhone·iPad 선택을 수정하거나 runtime을 끌 수도 있다. 이 과정은 대상 저장소에 파일을 쓰지 않는다.
 
 Renderer는 다음 상태를 구분한다.
 
