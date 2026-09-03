@@ -1,98 +1,96 @@
 # AgentMonitoring
 
-> 로컬 Git 저장소에서 Codex의 구현·테스트·앱 실행·자가 수정을 관리하고, 사람이 최종 변경을 승인하는 macOS control plane이에요.
+> 기능 목표를 적으면 Codex가 격리된 작업공간에서 구현하고 테스트해요. Swift 앱은 Simulator에서 직접 조작하고, 사람은 결과와 증거를 확인한 뒤 원본 코드에 반영해요.
 
-AgentMonitoring은 코드를 직접 편집하는 IDE가 아니에요. 기존 IDE와 Git 작업 방식을 유지하면서, 역할별 Codex 에이전트가 격리된 작업공간에서 코드를 수정하고 검증하도록 관리해요.
-
-Swift 프로젝트를 연결하면 Xcode 프로젝트와 Scheme을 자동으로 찾아요. 새 작업의 목표를 입력하면 Codex가 iPhone·iPad Simulator에서 실행할 조작과 합격 조건을 제안해요. 사람이 조건을 확인하고 승인하면 AgentMonitoring이 그 조건을 작업에 고정하고, 구현·앱 조작·자가 수정·결과 보고까지 이어서 실행해요.
-
-## 30초 만에 이해하기
-
-| 단계 | AgentMonitoring이 하는 일 |
-| --- | --- |
-| 준비 | 로컬 Git 저장소를 연결하고 Swift 앱의 Xcode 프로젝트·Scheme·기기를 자동으로 감지해요. |
-| 검증 설계 | 자연어 작업 목표에서 Simulator 조작과 합격 조건을 만들어요. 사람이 내용을 수정하고 승인해야 작업에 고정해요. |
-| 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 순서대로 실행해요. 모든 코드 변경은 작업별 Git worktree에서 이뤄져요. |
-| 앱 검증 | 선언한 경우 iPhone·iPad Simulator에서 앱을 빌드하고 실행해요. 화면·접근성·Debug 상태를 수집하고 fixture와 UI 조작을 실행해요. |
-| 자가 수정 | 프로젝트 테스트나 runtime assertion이 실패하면 실패 로그와 증거를 다음 구현 시도에 전달해요. 정해진 횟수 안에서 다시 구현하고 검증해요. |
-| 승인 | 변경 파일, Git patch, 테스트 결과, 시도별 runtime 증거를 보여줘요. 사람이 승인해야 현재 로컬 브랜치에 적용해요. |
-
-```text
-로컬 Git 저장소 연결
-  → 목표와 완료 조건 등록
-  → Simulator 검증 시나리오 자동 생성·사람 승인
-  → 테스트 설계 → 비평 → 구현 → 프로젝트 테스트
-  → 선택한 Simulator에서 앱 실행·조작·관찰·판정
-  → 실패 증거를 바탕으로 자가 수정
-  → 코드와 실행 보고서 리뷰
-  → 사람 승인 후 현재 로컬 브랜치에 적용
-```
+AgentMonitoring은 로컬 Git 저장소의 AI 개발 작업을 관리하는 macOS 데스크톱 앱이에요. 코드 편집기는 기존 IDE를 그대로 사용하고, AgentMonitoring은 여러 Codex 역할의 실행 순서와 재시도, 테스트, 앱 실행, 최종 승인을 관리해요.
 
 ![AgentMonitoring 대시보드](./tests/e2e/dashboard.spec.ts-snapshots/dashboard-chromium-desktop-darwin.png)
 
+- [이 도구로 무엇을 할 수 있나요?](#이-도구로-무엇을-할-수-있나요)
+- [작업 한 건은 이렇게 진행돼요](#작업-한-건은-이렇게-진행돼요)
+- [현재 제공하는 핵심 기능](#현재-제공하는-핵심-기능)
 - [빠르게 시작하기](#빠르게-시작하기)
-- [첫 작업 실행하기](#첫-작업-실행하기)
-- [Swift 앱 연결하기](#swift-앱-연결하기)
-- [에이전트 역할](#에이전트-역할)
-- [실행 안전장치](#실행-안전장치)
-- [개발하고 검증하기](#개발하고-검증하기)
-- [사용 예시: 식별자 수정과 실제 SwiftUI 기능 구현](./docs/사용예시.md)
+- [Swift 앱은 어떻게 검증하나요?](#swift-앱은-어떻게-검증하나요)
+- [코드와 원본 저장소를 어떻게 보호하나요?](#코드와-원본-저장소를-어떻게-보호하나요)
+- [AgentMonitoring 개발하고 검증하기](#agentmonitoring-개발하고-검증하기)
 
-## 지금 제공하는 기능
+## 이 도구로 무엇을 할 수 있나요?
+
+예를 들어 다음과 같이 작업을 등록할 수 있어요.
+
+```text
+장보기 목록 화면을 구현해 주세요.
+항목을 입력하고 추가하면 목록에 표시되어야 합니다.
+구매 완료를 누르면 완료 상태로 바뀌어야 합니다.
+빈 입력은 추가하지 말고 관련 테스트를 작성해 주세요.
+```
+
+AgentMonitoring은 이 요청을 코드 생성 한 번으로 끝내지 않아요.
+
+1. Codex가 Simulator에서 조작할 동작과 합격 조건을 제안해요.
+2. 사람이 버튼, 입력값과 확인할 결과를 검토해요.
+3. Test Designer와 Critic이 테스트 범위를 설계하고 검토해요.
+4. Implementer가 별도 Git worktree에서 코드를 수정해요.
+5. 프로젝트 테스트와 실제 앱 동작을 검증해요.
+6. 실패하면 로그와 화면 증거를 바탕으로 다시 수정해요.
+7. Reviewer가 코드와 실행 결과를 검토해요.
+8. 사람이 승인하면 변경을 현재 로컬 브랜치에 적용해요.
+
+이 과정에서 구현 에이전트는 사람이 승인한 합격 조건을 바꿀 수 없어요. 원본 저장소도 최종 승인 전까지 수정하지 않아요.
+
+## 작업 한 건은 이렇게 진행돼요
+
+```text
+로컬 Git 프로젝트 연결
+  → 목표와 완료 조건 작성
+  → 검증 시나리오 생성·사람 승인
+  → 테스트 설계 → 테스트 비평 → 기능 구현
+  → 프로젝트 테스트
+  → 선택한 경우 Simulator 실행·조작·판정
+      ├─ 실패: 증거를 전달하고 다시 구현
+      └─ 통과: 최종 Reviewer 검토
+  → 변경 파일·테스트·실행 증거 확인
+  → 사람 승인 후 원본 브랜치에 적용
+```
+
+| 참여자 | 하는 일 |
+| --- | --- |
+| 사용자 | 목표를 작성하고, 검증 조건과 최종 변경을 승인해요. |
+| Test Designer | 성공·실패·경계 조건을 확인할 테스트를 만들어요. |
+| Critic | 테스트가 요구사항을 제대로 검증하는지 비평해요. |
+| Implementer | 테스트와 프로젝트 규칙에 맞춰 코드를 수정해요. |
+| Test Runner | 프로젝트에 등록한 검증 명령을 실행해요. |
+| Swift Runtime | 앱을 Simulator에서 실행·조작하고 결과를 수집해요. |
+| Reviewer | 최종 diff, 테스트와 실행 증거를 함께 검토해요. |
+
+오케스트레이터는 AI가 아니라 코드로 작성한 상태 머신이에요. 역할 실행 순서, 재시도 횟수, 권한과 최종 승인 여부는 AgentMonitoring이 통제해요.
+
+## 어떤 개발 작업에 적합한가요?
+
+| 작업 | 지원 방식 |
+| --- | --- |
+| 기능 구현·버그 수정 | Git 저장소와 검증 명령을 연결해 구현과 테스트를 반복해요. |
+| 테스트 추가 | Test Designer가 테스트를 만들고 Critic이 누락된 경로를 확인해요. |
+| 리팩터링 | 목표와 금지 범위를 적고 테스트와 Reviewer 결과로 회귀를 확인해요. |
+| SwiftUI 화면·기능 구현 | iPhone·iPad Simulator에서 입력, 탭과 화면 결과를 검증해요. |
+| 앱 상태 검증 | Debug bridge를 연결하면 화면 밖 상태와 fixture도 확인할 수 있어요. |
+
+일반 Git 프로젝트는 코드 수정과 등록한 테스트 명령을 사용할 수 있어요. 앱 빌드·실행·화면 관찰은 현재 Swift 앱의 iPhone·iPad Simulator Debug 빌드를 지원해요.
+
+AgentMonitoring은 내장 코드 편집기, 원격 배포 도구나 사람 승인 없는 자동 merge 서비스가 아니에요.
+
+## 현재 제공하는 핵심 기능
 
 아래 기능은 UI 목업이 아니라 `pnpm dev`로 실행하는 Electron 앱에서 실제로 동작해요.
 
-### 프로젝트와 계정
-
-- Codex app-server를 통한 ChatGPT 로그인
-- 로컬 Git 저장소 등록과 브랜치·변경 파일·언어·빌드 도구 검사
-- Code, Build, Run, Observe, Act, Verify 기준의 AI 접근성 진단
-- 프로젝트, 작업, 이벤트, 버그, 메모의 로컬 SQLite 저장과 `⌘K` 검색
-
-### 에이전트 실행
-
-- Test Designer, Critic, Implementer, Test Runner, Reviewer 역할 분리
-- 작업별 Git worktree와 `agentmonitor/*` 브랜치 생성
-- 역할별 읽기·쓰기 권한 제한
-- 실시간 상태, 역할별 로그, 테스트 결과, 최근 활동 표시
-- 중단·재실행, 제한 시간 초과 처리, 앱 재시작 뒤 안전한 상태 복구
-
-### Swift 앱 runtime
-
-- Xcode 프로젝트·Workspace와 Scheme 자동 감지
-- 프로젝트 설정에서 iPhone·iPad 선택과 감지 결과 수정
-- 자연어 작업 목표에서 UI 조작·합격 조건 자동 생성
-- 작업 등록 전 식별자·입력값·예상 결과 검토와 수정
-- 승인 시점의 검증 계약을 작업별로 고정
-- iPhone 또는 iPad Simulator 선택
-- worktree의 Swift 앱 빌드·설치·실행
-- 최종 화면 PNG와 XCTest 접근성 트리 수집
-- accessibility identifier 기반 `tap`·`type-text`
-- Debug bridge를 통한 앱 상태 조회와 fixture 적용
-- 선언형 runtime assertion 판정
-- 실패 증거를 이용한 제한된 자가 수정
-- 실행 ID와 시도별 화면·접근성·조작·상태·판정 보고서
-
-### 검토와 적용
-
-- 변경 파일, 줄 증감, Git patch, Reviewer finding 표시
-- 작업 worktree를 외부 IDE로 열기
-- 승인된 변경만 현재 로컬 브랜치에 fast-forward 적용
-- 필요 없는 작업과 worktree 폐기
-
-## 현재 지원 범위
-
-| 항목 | 지원 범위 |
+| 영역 | 현재 제공하는 기능 |
 | --- | --- |
-| 운영체제 | macOS |
-| 사용자와 장비 | 단일 사용자, 단일 Mac |
-| AI 작업자 | Codex |
-| 대상 코드 | 사용자가 연결한 로컬 Git 저장소 |
-| Swift 앱 | iPhone·iPad Simulator의 Debug 빌드 |
-| 변경 반영 | 사람 승인 후 현재 로컬 브랜치에만 적용 |
-| 데이터 저장 | 로컬 SQLite, Git worktree, runtime 증거 파일 |
-
-AgentMonitoring은 내장 코드 편집기, 원격 배포 도구, 자동 merge 서비스가 아니에요. 현재 제한은 [아직 지원하지 않는 기능](#아직-지원하지-않는-기능)에서 확인할 수 있어요.
+| 프로젝트 연결 | ChatGPT 로그인, 로컬 Git 저장소 등록, 브랜치·변경 파일·언어·빌드 도구 검사, 검증 명령 설정 |
+| 작업 관리 | 새 작업 등록, 실시간 상태와 역할별 로그, 중단·재실행, 검색, 버그·메모·활동 기록 |
+| 에이전트 실행 | Test Designer·Critic·Implementer·Reviewer 역할 분리, 작업별 worktree, 역할별 읽기·쓰기 권한 제한 |
+| Swift 앱 검증 | Xcode 프로젝트·Scheme 자동 감지, iPhone·iPad 선택, Simulator 빌드·설치·실행·조작 |
+| 결과와 자가 수정 | 프로젝트 테스트, 화면·접근성·Debug 상태 수집, 합격 조건 판정, 실패 증거를 이용한 제한된 재시도 |
+| 검토와 적용 | 변경 파일·Git patch·Reviewer finding·시도별 증거 확인, 외부 IDE로 worktree 열기, 승인 후 로컬 브랜치에 적용 |
 
 ## 빠르게 시작하기
 
@@ -102,13 +100,13 @@ AgentMonitoring은 내장 코드 편집기, 원격 배포 도구, 자동 merge �
 - Node.js 24 이상
 - Git
 - Codex CLI
-- Swift runtime을 사용할 때는 Xcode와 iPhone 또는 iPad Simulator
+- Swift 앱을 검증한다면 Xcode와 iPhone 또는 iPad Simulator
 
 터미널에서 `codex` 명령을 실행할 수 있어야 해요. OpenAI API 키는 필요하지 않아요.
 
 ### 1. pnpm 준비하기
 
-`pnpm` 명령을 찾을 수 없다면 Corepack과 pnpm 11을 설치하세요.
+`pnpm` 명령을 찾을 수 없다면 Corepack과 pnpm 11을 준비하세요.
 
 ```bash
 npm install --global corepack@0.34.7
@@ -120,7 +118,7 @@ pnpm --version
 
 `pnpm --version`이 `11`로 시작하면 준비가 끝나요.
 
-### 2. 실제 앱 실행하기
+### 2. AgentMonitoring 실행하기
 
 저장소 루트에서 의존성을 설치하고 Electron 앱을 실행하세요.
 
@@ -129,357 +127,199 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm install`은 Electron 실행 파일을 내려받아요. 실행을 허용한 패키지는 공급망 보호를 위해 `pnpm-workspace.yaml`에 명시했어요.
+실제 Git 프로젝트와 Codex를 연결하려면 반드시 `pnpm dev`를 사용하세요. `pnpm dev:web`은 샘플 데이터로 UI만 확인하는 브라우저 데모예요.
 
 ### 3. ChatGPT로 로그인하기
 
-앱이 열리면 **ChatGPT로 계속**을 누르세요. 브라우저에서 OpenAI 인증을 마치면 앱으로 돌아와 실제 프로젝트를 등록할 수 있어요.
+앱에서 **ChatGPT로 계속**을 누르고 브라우저 로그인을 마치세요.
 
-AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하지 않아요. Electron `userData` 아래에 앱 전용 `CODEX_HOME`을 만들고 Codex app-server의 브라우저 로그인 흐름을 사용해요. Codex가 인증 정보와 토큰 갱신을 관리하며, AgentMonitoring의 SQLite에는 토큰을 저장하지 않아요.
+AgentMonitoring은 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용해요. Codex가 인증 정보와 토큰 갱신을 관리하며, AgentMonitoring의 SQLite에는 토큰을 저장하지 않아요.
 
-### 브라우저 미리보기와 구분하기
-
-| 명령 | 용도 | 실제 Git·Codex 연결 |
-| --- | --- | --- |
-| `pnpm dev` | Electron 데스크톱 앱 실행 | 연결함 |
-| `pnpm dev:web` | 브라우저에서 UI만 미리보기 | 연결하지 않음 |
-
-`pnpm dev:web`은 샘플 데이터와 가상 상호작용을 사용하는 UI 데모예요. 실제 프로젝트를 등록하고 에이전트를 실행하려면 `pnpm dev`를 사용하세요.
-
-## 첫 작업 실행하기
+### 4. Git 프로젝트 연결하기
 
 1. 왼쪽 사이드바에서 **실제 Git 프로젝트 추가**를 누르세요.
-2. 작업할 Git 저장소 폴더를 선택하세요.
-3. 프로젝트 준비 화면에서 Git 상태와 감지된 언어·빌드 도구를 확인하세요.
-4. 추천 검증 명령을 적용하거나 **프로젝트 설정**에서 직접 입력하세요.
-5. **새 작업**을 누르고 목표와 완료 조건을 입력하세요.
-6. Swift 앱이라면 **검증 시나리오 만들기**를 누르세요. Codex가 사용자 조작과 합격 조건을 제안해요.
-7. 식별자, 입력값, 예상 결과를 확인하고 **검증 조건 승인하고 작업 등록**을 누르세요.
-8. 작업 상세 화면에서 **실행**을 누르세요.
-9. 역할별 로그, 테스트 결과, runtime 실행 보고서를 확인하세요.
-10. 작업이 **승인 대기** 상태가 되면 변경 파일과 Git patch를 검토하세요.
-11. 변경이 적절하면 **원본에 적용**을 누르세요. 사용하지 않으려면 worktree를 폐기하세요.
+2. 작업할 Git 저장소 루트를 선택하세요.
+3. 브랜치, 변경 파일, 언어와 빌드 도구 감지 결과를 확인하세요.
+4. 추천 검증 명령을 선택하거나 **프로젝트 설정**에서 직접 입력하세요.
 
 ![프로젝트 준비 상태](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
 
-**원본에 적용**을 누르면 앱이 작업 브랜치의 변경을 커밋하고 현재 로컬 브랜치에 fast-forward로 반영해요. 원본 저장소에 커밋하지 않은 변경이 있거나 두 브랜치가 갈라졌다면 적용하지 않아요.
+검증 명령은 작업 완료를 판정하는 프로젝트의 기본 테스트예요. 예를 들면 `pnpm test`, `swift test`, `tuist test`나 `xcodebuild ... test`를 등록할 수 있어요. 검증 명령이 비어 있으면 작업을 시작하지 않아요.
 
-앱은 첫 실행 때 샘플 프로젝트나 활동 기록을 만들지 않아요. 이전 버전의 `is_demo=1` 샘플 레코드는 시작 과정에서 제거하고 사용자가 만든 기록은 유지해요.
+### 5. 첫 작업 등록하기
 
-## Swift 앱 연결하기
-
-Swift runtime은 선택 기능이에요. Swift 앱이 아니거나 Simulator 검증을 끄면 코드 구현과 프로젝트 검증 명령만 실행해요.
-
-### 자동으로 연결하기
-
-1. **실제 Git 프로젝트 추가**에서 Swift 저장소를 선택하세요.
-2. AgentMonitoring이 Git 추적 파일에서 `.xcworkspace`와 `.xcodeproj`를 찾고 `xcodebuild -list -json`으로 Scheme을 확인해요.
-3. **프로젝트 설정**에서 감지한 Xcode container, Scheme, iPhone·iPad 선택을 확인하세요.
-4. 새 작업의 목표와 완료 조건을 입력한 뒤 **검증 시나리오 만들기**를 누르세요.
-5. Codex가 제안한 UI 조작과 합격 조건을 검토하세요. 필요한 값은 화면에서 바로 수정할 수 있어요.
+1. **새 작업**을 누르세요.
+2. 작업 제목과 사용자가 확인할 수 있는 완료 조건을 작성하세요.
+3. 최대 자가 수정 횟수를 정하세요.
+4. Swift 앱이라면 **검증 시나리오 만들기**를 누르세요.
+5. Codex가 제안한 accessibility identifier, 입력값과 예상 결과를 확인하세요.
 6. **검증 조건 승인하고 작업 등록**을 누르세요.
 
-자동 감지한 프로젝트 공통 설정은 AgentMonitoring의 로컬 SQLite에 저장해요. 대상 Git 저장소에 설정 파일을 자동으로 만들거나 작업 트리를 변경하지 않아요.
-
-승인한 검증 시나리오는 해당 작업에 별도 스냅샷으로 저장해요. 이후 프로젝트 설정을 바꾸거나 구현 에이전트가 worktree의 파일을 수정해도, 이미 시작한 작업의 합격 조건은 바뀌지 않아요.
-
-### `project.json`을 직접 관리하기
-
-팀이 저장소에 고급 runtime 설정을 함께 보관하거나 Debug state·fixture를 사용한다면 `.agentmonitor/project.json`을 계속 사용할 수 있어요. AgentMonitoring은 기존 파일을 우선 읽으며, 새 작업에서 자동 생성한 시나리오를 승인하면 그 작업에 한해 승인 스냅샷을 사용해요.
-
-아래 예시는 iPhone Simulator에서 앱을 실행하고, UI를 한 번 조작한 뒤 화면과 접근성 상태를 검증해요.
-
-```json
-{
-  "version": 1,
-  "adapter": {
-    "kind": "ios-simulator",
-    "container": "PopPang.xcworkspace",
-    "scheme": "PopPang",
-    "configuration": "Debug",
-    "deviceFamily": "iphone"
-  },
-  "capabilities": {
-    "build": true,
-    "run": true,
-    "observe": ["screen", "accessibility"],
-    "act": ["ui"],
-    "verify": ["test-command", "runtime-scenario"]
-  },
-  "runtimeScenario": {
-    "actions": [
-      {
-        "kind": "tap",
-        "identifier": "start-navigation",
-        "timeoutSeconds": 10
-      }
-    ],
-    "assertions": [
-      {
-        "kind": "accessibility",
-        "name": "시작 버튼 활성화",
-        "identifier": "start-navigation",
-        "property": "enabled",
-        "expected": true
-      },
-      {
-        "kind": "evidence",
-        "name": "최종 화면 저장",
-        "target": "screen"
-      }
-    ]
-  }
-}
-```
-
-`container`와 `scheme`을 실제 프로젝트 값으로 바꾸세요. `deviceFamily`는 `"iphone"` 또는 `"ipad"`를 받아요. 이 값을 생략하면 기존 manifest와의 호환을 위해 `"ipad"`를 사용해요.
-
-### 앱 내부 상태와 fixture 연결하기
-
-화면 밖의 상태를 검증하거나 테스트 데이터를 주입하려면 Debug bridge를 연결하세요.
-
-1. [`AgentMonitoringDebugBridge.swift`](./resources/swift-debug-bridge/AgentMonitoringDebugBridge.swift)를 대상 앱 target에 추가하세요.
-2. 상태 제공자와 fixture 적용자를 연결하세요.
-3. manifest에 `debugBridge`를 선언하세요.
-4. `observe`에 `state`, `act`에 `fixture`를 추가하세요.
-
-연결 코드는 [Swift Debug bridge 안내](./resources/swift-debug-bridge/README.md)에서 확인할 수 있어요. Release 빌드에서 bridge의 `start` 호출은 아무 작업도 하지 않아요.
-
-<details>
-<summary>Debug 상태·fixture·텍스트 입력을 포함한 전체 manifest 예시</summary>
-
-```json
-{
-  "version": 1,
-  "adapter": {
-    "kind": "ios-simulator",
-    "container": "PopPang.xcworkspace",
-    "scheme": "PopPang",
-    "configuration": "Debug",
-    "deviceFamily": "iphone"
-  },
-  "capabilities": {
-    "build": true,
-    "run": true,
-    "observe": ["screen", "accessibility", "state"],
-    "act": ["ui", "fixture"],
-    "verify": ["test-command", "runtime-scenario"]
-  },
-  "debugBridge": {
-    "protocol": "file-v1",
-    "responseTimeoutSeconds": 10
-  },
-  "runtimeScenario": {
-    "actions": [
-      {
-        "kind": "tap",
-        "identifier": "start-navigation",
-        "timeoutSeconds": 10
-      },
-      {
-        "kind": "type-text",
-        "identifier": "destination-search",
-        "text": "부산항",
-        "timeoutSeconds": 10
-      }
-    ],
-    "fixture": {
-      "id": "signed-in-home",
-      "payload": {
-        "accountID": "fixture-user",
-        "selectedTab": "home"
-      }
-    },
-    "assertions": [
-      {
-        "kind": "state",
-        "name": "홈 탭 유지",
-        "path": ["selectedTab"],
-        "operator": "equals",
-        "expected": "home"
-      },
-      {
-        "kind": "accessibility",
-        "name": "시작 버튼 활성화",
-        "identifier": "start-navigation",
-        "property": "enabled",
-        "expected": true
-      },
-      {
-        "kind": "evidence",
-        "name": "최종 화면 저장",
-        "target": "screen"
-      }
-    ]
-  }
-}
-```
-
-</details>
-
-### runtime에서 확인할 수 있는 영역
-
-| 영역 | 선언 | 결과 |
-| --- | --- | --- |
-| Build | `capabilities.build` | worktree의 Swift 앱을 Debug로 빌드해요. |
-| Run | `capabilities.run` | 선택한 iPhone·iPad Simulator에 설치하고 실행해요. |
-| Observe screen | `observe: ["screen"]` | 최종 화면을 PNG로 저장해요. |
-| Observe accessibility | `observe: ["accessibility"]` | identifier, label, value, frame, enabled·selected 상태와 하위 요소를 JSON으로 저장해요. |
-| Observe state | `observe: ["state"]` | Debug bridge가 제공한 앱 내부 상태를 JSON으로 저장해요. |
-| Act ui | `act: ["ui"]` | identifier가 정확히 일치하는 요소를 tap하거나 text를 입력해요. |
-| Act fixture | `act: ["fixture"]` | Debug bridge를 통해 선언한 fixture를 적용해요. |
-| Verify | `verify: ["runtime-scenario"]` | state·accessibility·증거 존재 assertion을 판정해요. |
-
-manifest는 최대 64KB의 strict JSON이에요. 셸 명령, 알 수 없는 필드, 저장소 밖 Xcode container는 허용하지 않아요.
-
-UI action은 최대 20개까지 선언할 수 있어요. `tap`과 `type-text`만 지원하며 각 action의 제한 시간은 1~30초예요. accessibility identifier가 없거나 둘 이상이면 조작을 멈추고 runtime을 실패로 기록해요. 좌표, label·title selector, 임의 XCTest 코드는 받지 않아요.
-
-runtime assertion은 최대 50개까지 선언할 수 있어요. `state`는 제한된 path에 `exists`·`equals`·`not-equals`를 적용해요. `accessibility`는 정확한 identifier의 존재 여부나 제한된 속성을 비교해요. `evidence`는 화면·접근성·상태·UI 조작·fixture 결과가 실제로 만들어졌는지 확인해요. JSONPath, 정규식, JavaScript, shell은 실행하지 않아요.
-
-상태 제공자에는 화면·이동·선택 상태처럼 검증에 필요한 값만 넣으세요. 인증 토큰과 고객 데이터는 넣지 마세요.
-
-## 검증·자가 수정·보고 흐름
+좋은 작업 설명은 구현 방법만 지시하지 않고 결과를 분명하게 적어요.
 
 ```text
-프로젝트 검증 명령 실행
-  ├─ 실패: 로그를 Implementer에게 전달하고 다시 구현
-  └─ 성공: 작업 등록 때 승인한 runtime 계약 읽기
-      → 선택한 Simulator 부팅
-      → worktree 앱 빌드·설치·실행
-      → fixture 적용 → UI 조작
-      → Debug 상태·접근성 트리·화면 수집
-      → runtime assertion 판정
-          ├─ 실패·재시도 가능: 모든 증거를 보존하고 다시 구현
-          ├─ 마지막 시도 실패: high finding과 함께 작업 종료
-          └─ 통과: Reviewer 실행
+좋지 않은 예: 프로필 화면 코드를 수정해 주세요.
+
+좋은 예: 사용자가 이름을 수정하고 저장하면 프로필 화면에 새 이름이 보여야 합니다.
+빈 이름은 저장하지 말고 오류 안내를 표시해야 합니다.
+성공, 빈 입력과 저장 실패 경로를 테스트해 주세요.
 ```
 
-Runtime Repair는 매 시도마다 작업에 저장한 승인 스냅샷을 다시 읽어요. 작업별 스냅샷이 없는 기존 흐름은 원본 checkout의 `project.json`을 읽어요. Implementer는 worktree에서 합격 조건을 수정하거나 약화할 수 없어요. 빌드·설치·실행·관찰 단계의 실패는 추측성 수정을 막기 위해 자동 Repair하지 않고 즉시 진단해요.
+Swift 앱이 아니거나 Simulator 검증이 필요하지 않다면 코드와 프로젝트 테스트만 실행할 수 있어요.
 
-작업 상세의 실행 보고서는 증거를 실행 ID와 시도 번호로 묶어요. 각 시도를 펼치면 당시 화면 PNG와 접근성·UI 조작·Debug 상태·runtime 판정 JSON을 열 수 있어요. 실패 뒤 다음 시도가 통과하면 **복구 후 통과**로 표시하고 이전 실패 증거도 보존해요.
+### 6. 실행하고 결과 확인하기
 
-![시도별 runtime 실행 보고서](./tests/e2e/dashboard.spec.ts-snapshots/runtime-report-chromium-desktop-darwin.png)
+작업 상세에서 **실행**을 누르세요. 역할별 진행 상황과 테스트 결과가 실시간으로 쌓여요.
 
-## 에이전트 역할
+작업이 **승인 대기**가 되면 다음 항목을 확인하세요.
 
-| 역할 | 책임 | 코드 수정 |
-| --- | --- | --- |
-| Test Designer | 성공·실패·경계 조건을 검증할 테스트를 만들어요. | 테스트만 수정 |
-| Critic | 테스트가 요구사항과 실패 경로를 충분히 검증하는지 평가해요. | 수정하지 않음 |
-| Implementer | 테스트와 프로젝트 규칙에 맞춰 기능을 구현하고 실패를 수정해요. | 제품 코드 수정 |
-| Test Runner | 프로젝트에 등록한 검증 명령을 실행해요. | 수정하지 않음 |
-| Swift Runtime | 앱을 실행·조작·관찰하고 assertion을 판정해요. | 수정하지 않음 |
-| Reviewer | 최종 diff, 테스트, runtime 증거를 검토하고 finding을 남겨요. | 수정하지 않음 |
+- 어떤 파일을 바꿨는지
+- 줄 추가·삭제와 전체 Git patch가 작업 범위에 맞는지
+- 프로젝트 테스트가 통과했는지
+- Simulator 화면과 접근성 판정이 기대한 결과인지
+- 실패 뒤 복구한 시도가 있다면 무엇을 고쳤는지
+- Reviewer finding이 남아 있는지
 
-오케스트레이터는 대규모 언어 모델(LLM)이 아니라 코드로 작성한 상태 머신이에요. AI는 역할별 결과를 만들지만, 상태 전이, 재시도 횟수, sandbox, 최종 승인 여부는 앱이 통제해요. 자세한 구조는 [아키텍처 문서](./docs/architecture.md)에서 확인할 수 있어요.
+결과가 맞으면 **원본에 적용**을 누르세요. 앱이 작업 브랜치를 커밋하고 현재 로컬 브랜치에 fast-forward로 반영해요. 원본 checkout에 커밋하지 않은 변경이 있거나 브랜치가 갈라졌다면 적용하지 않아요.
 
-## 실행 안전장치
+## Swift 앱은 어떻게 검증하나요?
 
-### 원본 저장소와 격리해요
+Swift 저장소를 연결하면 AgentMonitoring이 Git 추적 파일에서 `.xcworkspace`와 `.xcodeproj`를 찾아요. 이어서 `xcodebuild -list -json`으로 Scheme을 확인하고 iPhone을 기본 실행 기기로 설정해요. 프로젝트 설정에서 iPad로 바꾸거나 감지 결과를 직접 수정할 수 있어요.
 
-모든 에이전트는 앱이 만든 Git worktree에서 작업해요. 구현 역할은 `workspace-write`, Critic과 Reviewer는 `read-only` sandbox에서 실행해요. 에이전트는 sandbox 우회, commit, push, merge, 배포를 수행하지 않아요.
+새 작업에서는 Codex가 자연어 목표를 다음 두 종류의 조건으로 바꿔요.
+
+- 사용자 조작: 정확한 accessibility identifier를 이용한 `tap`, `type-text`
+- 합격 조건: 화면 요소의 존재, label, value, enabled·selected 상태
+
+사람이 내용을 검토하고 승인하면 전체 조건을 작업별 스냅샷으로 저장해요. 이후 프로젝트 설정이나 worktree 코드가 바뀌어도 해당 작업의 기준은 바뀌지 않아요.
+
+| 단계 | AgentMonitoring이 확인하는 것 |
+| --- | --- |
+| Build | 작업 worktree의 앱을 Debug로 빌드해요. |
+| Run | 선택한 iPhone·iPad Simulator에 설치하고 실행해요. |
+| Observe | 최종 화면 PNG와 접근성 트리를 저장해요. |
+| Act | 승인한 identifier로 요소를 누르거나 텍스트를 입력해요. |
+| Verify | 접근성 합격 조건과 증거 생성 여부를 판정해요. |
+| Repair | 실패 로그와 화면 증거를 다음 구현 시도에 전달해요. |
+| Report | 시도별 화면, 조작, 판정과 복구 이력을 보여줘요. |
+
+대상 Git 저장소에 설정 파일을 자동으로 만들지는 않아요. 자동 감지한 프로젝트 설정은 AgentMonitoring의 로컬 SQLite에 저장해요.
+
+팀이 실행 설정을 Git으로 공유하거나 Debug state·fixture가 필요하다면 `.agentmonitor/project.json`을 사용할 수 있어요. 형식과 실제 예제는 다음 문서에서 확인하세요.
+
+- [Swift 앱 전체 사용 예시](./docs/사용예시.md)
+- [고급 `project.json` 예시](./docs/demo-swift-project/.agentmonitor/project.json)
+- [Swift Debug bridge 연결](./resources/swift-debug-bridge/README.md)
+
+## 실패하면 어떻게 되나요?
+
+프로젝트 테스트나 Simulator 합격 조건이 실패하면 현재 시도의 로그와 증거를 보존해요. 남은 시도 횟수가 있으면 Implementer가 그 증거를 받아 코드를 수정하고 프로젝트 테스트부터 다시 실행해요.
+
+빌드, 설치, 앱 실행이나 화면 수집 자체가 실패하면 추측으로 코드를 계속 바꾸지 않아요. 환경 문제일 수 있으므로 즉시 실패 원인을 보여줘요.
+
+작업 상세의 실행 보고서는 모든 증거를 실행 ID와 시도 번호로 묶어요. 실패 뒤 다음 시도가 통과하면 **복구 후 통과**로 표시하고 이전 실패도 남겨요.
+
+![시도별 Simulator 실행 보고서](./tests/e2e/dashboard.spec.ts-snapshots/runtime-report-chromium-desktop-darwin.png)
+
+## 코드와 원본 저장소를 어떻게 보호하나요?
+
+### 작업을 원본과 분리해요
+
+모든 에이전트는 `agentmonitor/*` 브랜치의 별도 Git worktree에서 작업해요. 구현 역할만 코드를 쓸 수 있고, Critic과 Reviewer는 읽기 전용으로 실행해요.
+
+에이전트는 commit, push, merge나 배포를 수행하지 않아요. 사람이 **원본에 적용**을 누른 뒤에만 AgentMonitoring이 로컬 커밋과 fast-forward를 처리해요. 원격 push와 PR 생성은 사용자가 별도로 진행해야 해요.
 
 ### 실행할 명령을 제한해요
 
-검증 명령은 shell 문자열로 실행하지 않아요. 입력을 실행 파일과 인자로 나눈 뒤 아래 허용 목록에 있는 실행 파일만 직접 실행해요.
+검증 명령은 셸 문자열로 실행하지 않아요. 실행 파일과 인자를 나눈 뒤 허용 목록에 있는 도구만 직접 실행해요. 파이프, redirect와 `&&` 같은 셸 문법은 사용할 수 없어요.
 
 ```text
 pnpm npm npx yarn bun tuist xcodebuild swift cargo go
 python python3 pytest make cmake gradle
 ```
 
-검증 명령이 비어 있으면 작업을 시작하지 않아요. 파이프, redirect, `&&` 같은 shell 문법도 사용할 수 없어요.
+### 사람이 승인한 기준을 고정해요
 
-Swift runtime 계약에는 명령 문자열을 넣을 수 없어요. AgentMonitoring은 고정된 `/usr/bin/xcrun xcodebuild`, `/usr/bin/xcrun simctl`, `/usr/bin/open`과 인자 배열만 실행해요. 새 작업은 사람이 승인한 작업별 스냅샷을 사용하고, 기존 manifest 흐름은 AI가 수정할 수 없는 원본 checkout에서 읽어요.
+새 작업의 Simulator 합격 조건은 등록 시점의 복사본을 사용해요. Implementer가 worktree의 파일을 바꾸더라도 합격 기준을 낮추거나 검증을 우회할 수 없어요.
 
-### 사람이 마지막 변경을 승인해요
+### 실행 시간을 제한해요
 
-앱은 승인 전에 변경 파일과 Git patch를 보여줘요. 사용자가 **원본에 적용**을 눌러야 작업 브랜치를 커밋하고 현재 로컬 브랜치에 fast-forward로 적용해요. 자동 commit, 원격 push, PR 생성, 배포는 하지 않아요.
+역할별 Codex 실행과 프로젝트 테스트, 앱 빌드·설치·관찰에는 각각 제한 시간이 있어요. 사용자가 중단하거나 제한 시간을 넘기면 관련 프로세스를 종료하고 작업을 `stopped` 또는 실패 상태로 기록해요.
 
-<details>
-<summary>프로세스별 제한 시간</summary>
+자세한 권한, 제한 시간과 프로세스 종료 방식은 [아키텍처 문서](./docs/architecture.md)에서 확인하세요.
 
-| 대상 | 제한 시간 |
+## 어떤 데이터가 로컬에 남나요?
+
+AgentMonitoring은 Electron의 `userData` 아래에 다음 데이터를 저장해요.
+
+| 데이터 | 저장 위치와 내용 |
 | --- | --- |
-| Codex 역할별 실행 | 30분 |
-| 프로젝트 검증 명령 | 45분 |
-| Simulator 조회·창 열기 | 30초 |
-| iOS Simulator 부팅 | 5분 |
-| Swift 앱 빌드 | 30분 |
-| 앱 설치 | 2분 |
-| 앱 실행 | 1분 |
-| 화면 캡처 | 30초 |
-| UI 조작·접근성 트리 수집 | 5분 |
+| 관리 정보 | SQLite에 프로젝트, 작업, 이벤트, 버그, 메모와 증거 위치를 저장해요. |
+| 작업 코드 | `worktrees/<project-id>/<task-id>`에 격리 worktree를 만들어요. |
+| Swift 빌드 | `runtime-sessions/<task-id>/DerivedData`에 작업별 산출물을 저장해요. |
+| 실행 증거 | `runtime-sessions/<task-id>/evidence`에 화면과 JSON 결과를 저장해요. |
 
-</details>
+AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 자체 백엔드가 없어요. 다만 Codex가 처리하는 코드와 실행 증거에는 로그인한 ChatGPT 계정과 조직의 데이터 정책이 적용돼요.
 
-사용자가 작업을 중단하거나 제한 시간을 넘기면 프로세스 그룹에 `SIGTERM`을 보내요. 3초 안에 종료되지 않으면 `SIGKILL`로 종료해요. 사용자가 중단한 작업은 `stopped`로 남아 다시 실행할 수 있어요.
+화면은 Reviewer의 이미지 입력으로 전달할 수 있어요. 접근성·Debug 상태·fixture 결과는 길이를 제한해 Reviewer에게 전달해요. 실제 서비스 토큰, 비밀번호와 고객 데이터를 테스트 fixture나 Debug 상태에 넣지 마세요.
 
-Codex CLI 옵션은 [공식 OpenAI Codex 명령 문서](https://learn.chatgpt.com/docs/developer-commands?surface=cli)를 기준으로 해요.
+## AgentMonitoring 개발하고 검증하기
 
-## 로컬 데이터와 개인정보
+README의 위쪽은 AgentMonitoring을 사용하는 방법이에요. 이 섹션은 AgentMonitoring 자체를 수정하려는 개발자를 위한 안내예요.
 
-Electron의 `userData` 아래에 다음 데이터를 저장해요.
-
-| 경로 | 저장 내용 |
-| --- | --- |
-| `agent-monitoring.sqlite` | 프로젝트, 작업, 이벤트, 버그, 메모, runtime session과 증거 메타데이터 |
-| `worktrees/<project-id>/<task-id>` | 작업별 Git worktree |
-| `runtime-sessions/<task-id>/DerivedData` | Swift 작업별 빌드 산출물 |
-| `runtime-sessions/<task-id>/evidence/*.png` | Simulator 화면 증거 |
-| `runtime-sessions/<task-id>/evidence/*.json` | 접근성, UI 조작, Debug 상태·fixture, runtime 판정 증거 |
-
-AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 보내는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에 기록하지 않아요.
-
-화면은 Reviewer의 이미지 입력으로 전송해요. 접근성·Debug 상태·fixture 결과는 길이를 제한해 Reviewer 프롬프트에 전달해요. UI action 결과에는 입력한 text를 다시 기록하지 않아요. 저장소 코드와 runtime 증거를 포함해 Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
-
-## 개발하고 검증하기
+```bash
+pnpm install
+pnpm dev
+```
 
 | 명령 | 확인하는 것 |
 | --- | --- |
-| `pnpm typecheck` | TypeScript 타입 오류 |
-| `pnpm test` | 상태 전이, 저장소, 프로젝트 검사, Runner 단위·통합 동작 |
-| `pnpm test:e2e` | 대시보드 시각 회귀와 주요 사용자 흐름 |
-| `pnpm test:package` | 패키지의 preload bridge·XCTest 도구·Swift Debug bridge |
-| `pnpm check` | 타입 검사, 단위 테스트, 웹 프로덕션 빌드 |
+| `pnpm typecheck` | TypeScript 타입 오류를 확인해요. |
+| `pnpm test` | 상태 전이, 저장소, 프로젝트 검사와 Runner를 검증해요. |
+| `pnpm test:e2e` | 주요 사용자 흐름과 화면 회귀를 검증해요. |
+| `pnpm check` | 타입 검사, 단위 테스트와 웹 프로덕션 빌드를 실행해요. |
+| `pnpm build` | Electron main, preload와 renderer 번들을 만들어요. |
+| `pnpm test:package` | macOS 앱을 패키징하고 preload·iOS runtime 도구를 검사해요. |
 
-시각 기준 이미지를 의도적으로 바꿀 때만 스냅샷을 갱신하세요.
+브라우저에서 UI만 빠르게 확인하려면 다음 명령을 사용하세요.
+
+```bash
+pnpm dev:web
+```
+
+이 모드는 샘플 데이터와 가상 상호작용만 사용해요. 실제 Git, Codex 로그인이나 Simulator를 연결하지 않아요.
+
+시각 기준 이미지를 의도적으로 변경했을 때만 Playwright 스냅샷을 갱신하세요.
 
 ```bash
 pnpm exec playwright test --update-snapshots
 ```
 
-프로덕션 번들은 아래 명령으로 만들고 검사할 수 있어요.
+## 현재 지원 범위
 
-```bash
-pnpm build
-pnpm package
-pnpm test:package
-```
-
-`pnpm test:package`는 macOS 앱을 실제로 시작해 sandboxed preload bridge와 번들된 iOS runtime 도구를 검사해요.
-
-## 기술 구성
-
-| 영역 | 기술 |
+| 항목 | 지원 범위 |
 | --- | --- |
-| 데스크톱 | Electron 44, electron-vite |
-| 화면 | React 19, TypeScript, Recharts, Lucide |
-| 영속화 | Electron의 Node.js `node:sqlite` |
-| 검증 | Vitest, Playwright |
-| 에이전트 | Codex CLI 비대화형 JSONL 실행 |
-| Swift runtime | Xcode `xcodebuild`, CoreSimulator `simctl` |
+| 운영체제 | macOS |
+| 사용자와 장비 | 단일 사용자, 단일 Mac |
+| AI 작업자 | Codex |
+| 대상 코드 | 로컬 Git 저장소 |
+| Swift 앱 | iPhone·iPad Simulator의 Debug 빌드 |
+| 변경 반영 | 사람 승인 후 현재 로컬 브랜치에 적용 |
+| 데이터 저장 | 로컬 SQLite, Git worktree와 실행 증거 파일 |
 
-## 아직 지원하지 않는 기능
+현재 지원하지 않는 기능은 다음과 같아요.
 
 - 내장 코드 편집기
 - 사람 승인 없는 자동 commit·merge
 - 원격 push·PR 생성·배포
-- 원격 팀 협업
+- 원격 팀 협업과 병렬 작업 스케줄러
 - 여러 AI 공급자 또는 계정 순환
-- 병렬 작업 스케줄러
 - 앱 자동 업데이트와 코드 서명
 
-## 저장소 정책
+## 더 알아보기
 
-이 저장소는 private 사용을 전제로 해요. 실행 로그, SQLite 파일, worktree, 빌드 결과, 환경 파일은 Git에서 제외해요. 실제 서비스 비밀값이나 고객 데이터는 fixture로 커밋하지 않아요.
+- 실제 SwiftUI 기능을 처음부터 구현하는 과정: [사용 예시](./docs/사용예시.md)
+- worktree, 권한, 상태 전이와 데이터 구조: [아키텍처](./docs/architecture.md)
+- 앱 내부 Debug state와 fixture 연결: [Swift Debug bridge](./resources/swift-debug-bridge/README.md)
+
+이 저장소는 private 사용을 전제로 해요. 실행 로그, SQLite 파일, worktree, 빌드 결과와 환경 파일은 Git에서 제외해요.
