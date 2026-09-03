@@ -11,6 +11,8 @@ React renderer
 Electron main
    ├── SQLite event store
    ├── read-only ProjectInspector
+   ├── Xcode runtime config detector
+   ├── Codex runtime scenario generator
    ├── 작업 상태 머신
    └── AgentRunner
           ├── Git worktree
@@ -29,6 +31,8 @@ Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되�
 
 프로젝트 루트에 `.agentmonitor/project.json`이 있으면 `ProjectCapabilityInspector`가 최대 64KB의 해당 파일만 추가로 읽는다. Zod의 strict schema로 version, iOS Simulator adapter, Xcode container·scheme, iPad·iPhone 기기군, 선언된 capability를 검증하며 임의 명령이나 알 수 없는 필드는 허용하지 않는다. `deviceFamily`를 생략한 기존 계약은 iPad를 기본값으로 사용한다. manifest 자체가 심볼릭 링크이거나 저장소 외부 Xcode container 경로를 가리키면 유효하지 않은 계약으로 처리한다. 오류는 프로젝트 검사 전체를 실패시키지 않고 Renderer에 진단 상태로 전달한다.
 
+manifest가 없으면 `ProjectRuntimeConfigDetector`가 Git 추적 파일에서 저장소 내부 `.xcworkspace`와 `.xcodeproj`를 찾는다. Workspace를 우선하고 `xcodebuild -list -json`으로 Scheme을 확인한다. 감지 결과는 `projects.runtime_adapter_json`에 저장하며 기본 기기군은 iPhone이다. Renderer의 프로젝트 설정에서 container, Scheme, iPhone·iPad 선택을 수정하거나 runtime을 끌 수 있다. 이 과정은 대상 저장소에 파일을 쓰지 않는다.
+
 Renderer는 다음 상태를 구분한다.
 
 | 상태 | 의미 |
@@ -37,9 +41,21 @@ Renderer는 다음 상태를 구분한다.
 | `declared` | 프로젝트 계약에는 있지만 실행 adapter가 아직 연결되지 않았다. |
 | `missing` | 프로젝트에서 선언하거나 설정하지 않았다. |
 
-유효한 iOS 계약에서 `build`와 `run`이 활성화되면 AgentRunner가 테스트 통과 뒤 Xcode와 Simulator runtime을 시작한다. `observe`의 `screen`은 화면 캡처 adapter에, `accessibility`는 XCTest snapshot observer에 연결한다. `act`의 `ui`와 `runtimeScenario.actions`가 함께 있으면 identifier 기반 XCTest driver에 연결한다. `debugBridge` 계약이 있으면 `act.fixture`는 앱 내부 fixture 적용에, `observe.state`는 최종 Debug 상태 수집에 연결한다. `verify.runtime-scenario`와 assertion이 있으면 수집한 증거를 선언형 조건으로 판정한다. 판정 실패와 남은 시도가 있으면 증거를 Implementer에 전달한 뒤 테스트와 runtime을 다시 실행한다. manifest가 없거나 Build·Run이 비활성화된 프로젝트는 기존 코드 작업 모드로 동작한다.
+유효한 iOS 계약이나 자동 감지한 runtime adapter가 있으면 새 작업 화면에서 Simulator 검증을 선택할 수 있다. manifest와 자동 감지 설정이 모두 없거나 사용자가 작업에서 Simulator 검증을 끄면 기존 코드 작업 모드로 동작한다.
 
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
+
+## 작업별 검증 시나리오
+
+Renderer는 작업 제목과 목표를 `runtime-scenario:generate` IPC로 보낸다. Main process는 앱 전용 `CODEX_HOME`으로 `codex exec`를 read-only sandbox에서 실행한다. JSON Schema가 최종 응답을 UI action과 accessibility assertion으로 제한한다. 생성기는 저장소를 읽을 수 있지만 코드를 수정할 수 없다.
+
+사용자는 생성된 action identifier, 텍스트 입력값, assertion 이름·identifier·예상값을 작업 등록 전에 수정한다. 작업 등록 버튼이 승인 경계다. IPC는 전체 runtime 계약을 strict Zod schema로 다시 검증하고 다음 값을 `tasks`에 저장한다.
+
+- `runtime_contract_json`: adapter, capability, action, assertion을 포함한 승인 스냅샷
+- `runtime_scenario_summary`: 사람이 검토할 짧은 목적
+- `runtime_scenario_approved_at`: 승인 시각
+
+AgentRunner는 작업별 스냅샷이 있으면 원본 `project.json`보다 먼저 사용한다. Test Designer, Implementer, Reviewer 프롬프트에도 같은 계약을 전달한다. Implementer는 제안된 accessibility identifier를 제품 코드에 추가할 수 있지만 승인 스냅샷은 worktree 밖 SQLite에 있으므로 수정할 수 없다. 기존 작업에 스냅샷이 없으면 원본 checkout의 `project.json`을 읽어 하위 호환성을 유지한다.
 
 ## 상태 전이
 
@@ -68,10 +84,10 @@ awaiting_approval/failed/stopped → discarded
 
 ## Swift runtime session
 
-AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있을 때만 `IosSimulatorRuntimeAdapter`를 호출한다. 계약은 AI가 수정할 수 있는 worktree가 아니라 사용자가 연결한 원본 checkout에서 읽는다.
+AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있을 때만 `IosSimulatorRuntimeAdapter`를 호출한다. 새 흐름은 작업 등록 때 사람이 승인한 SQLite 스냅샷을 읽는다. 스냅샷이 없는 기존 흐름은 AI가 수정할 수 있는 worktree가 아니라 사용자가 연결한 원본 checkout에서 계약을 읽는다.
 
 ```text
-원본 프로젝트의 선언형 계약 읽기
+작업별 승인 스냅샷 또는 원본 프로젝트 계약 읽기
   → worktree 내부 Xcode container 실경로 확인
   → `simctl list devices available --json`에서 `deviceFamily`에 맞는 iPad 또는 iPhone 선택
   → `simctl bootstatus <udid> -b`
@@ -101,7 +117,7 @@ Debug bridge는 `file-v1` 프로토콜만 허용한다. `simctl get_app_containe
 
 접근성 계층은 identifier, label, title, value, placeholder, frame, enabled·selected 상태와 children을 최대 5,000개 요소·64단계·512KB로 제한한다. 검증한 결과는 최대 1MB 접근성·Debug state JSON과 최대 256KB action JSON으로 저장한다. Reviewer 입력은 접근성·Debug state 60,000자와 action 20,000자로 제한하고 전체 파일은 로컬 session에 보존한다.
 
-runtime assertion은 원본 checkout의 strict manifest에서 최대 50개를 읽는다. State assertion은 최대 16단계의 문자열·배열 인덱스 path와 `exists`·`equals`·`not-equals`만 지원한다. Accessibility assertion은 정확한 identifier의 존재 여부 또는 제한된 속성만 비교한다. Evidence assertion은 이미 검증해 저장한 화면·접근성·상태·UI action·fixture 결과의 존재만 확인한다. 임의 JSONPath·정규식·스크립트는 실행하지 않는다. 판정 결과에는 전체 state를 복제하지 않고 제한된 기대값·실제값 preview만 기록한다.
+runtime assertion은 작업별 승인 스냅샷이나 원본 checkout의 strict manifest에서 최대 50개를 읽는다. State assertion은 최대 16단계의 문자열·배열 인덱스 path와 `exists`·`equals`·`not-equals`만 지원한다. Accessibility assertion은 정확한 identifier의 존재 여부 또는 제한된 속성만 비교한다. Evidence assertion은 이미 검증해 저장한 화면·접근성·상태·UI action·fixture 결과의 존재만 확인한다. 임의 JSONPath·정규식·스크립트는 실행하지 않는다. 판정 결과에는 전체 state를 복제하지 않고 제한된 기대값·실제값 preview만 기록한다.
 
 runtime assertion이 실패하면 모든 판정과 raw 증거를 먼저 보존하고 실행 중인 앱을 종료한다. 남은 `maxAttempts`가 있으면 최대 120,000자의 제한된 상태·접근성·조작·판정 JSON과 화면 PNG 경로를 다음 workspace-write Implementer 호출에 전달한다. 다음 시도는 프로젝트 검증 명령을 다시 통과한 뒤 새 runtime session에서 동일한 원본 assertion을 평가한다. Build·install·launch·observe처럼 assertion 이전 단계의 실패는 추측성 코드 수정을 막기 위해 자동 Repair하지 않는다.
 
@@ -130,8 +146,8 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 
 | 테이블 | 의미 |
 | --- | --- |
-| `projects` | 로컬 저장소 경로와 검증 명령 |
-| `tasks` | 목표, 상태, 재시도, 브랜치와 worktree |
+| `projects` | 로컬 저장소 경로, 검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
+| `tasks` | 목표, 상태, 재시도, 브랜치와 worktree, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
@@ -169,14 +185,14 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - Codex sandbox 우회 옵션을 사용하지 않는다.
 - 검증 명령은 shell을 거치지 않고 허용 목록의 실행 파일만 `spawn`한다.
 - Swift runtime은 manifest의 명령을 실행하지 않고 고정된 `/usr/bin/xcrun xcodebuild`, `/usr/bin/xcrun simctl`, `/usr/bin/open`과 인자 배열만 사용한다.
-- runtime 계약은 원본 checkout에서 읽어 worktree 안의 에이전트 변경으로 실행 권한을 넓힐 수 없게 한다.
+- 새 작업의 runtime 계약은 승인 시점에 SQLite 스냅샷으로 고정하고, 기존 manifest 계약은 원본 checkout에서 읽어 worktree 안의 에이전트 변경으로 실행 권한을 넓힐 수 없게 한다.
 - Xcode container는 worktree 내부 실경로, `.app` 산출물은 작업 전용 DerivedData 내부 실경로, 화면·runtime JSON은 작업 전용 evidence 내부 실경로일 때만 허용한다.
 - Debug bridge는 `simctl get_app_container`로 확인한 앱 sandbox의 Application Support 고정 하위 경로만 사용하고 manifest에서 임의 경로·명령·코드를 받지 않는다.
 - 화면 증거는 Observe screen 계약에서 Reviewer의 `--image` 입력으로, 접근성·Debug state·fixture JSON은 제한된 프롬프트 문맥으로만 전달한다.
-- UI action은 원본 checkout의 strict manifest에 있는 최대 20개 identifier 기반 action만 실행하며 좌표, label selector, 임의 XCTest·shell 명령은 받지 않는다.
+- UI action은 승인 스냅샷이나 원본 checkout의 strict manifest에 있는 최대 20개 identifier 기반 action만 실행하며 좌표, label selector, 임의 XCTest·shell 명령은 받지 않는다.
 - Runtime verification은 최대 50개의 제한된 state path·접근성 속성·증거 존재 assertion만 평가하며 임의 코드나 표현식을 실행하지 않는다.
-- Runtime Repair는 원본 checkout의 assertion을 매 시도 다시 읽고 worktree의 manifest 변경을 합격 조건으로 사용하지 않는다.
-- 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`와 고정 경로의 선언형 `.agentmonitor/project.json`만 사용한다. `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용은 검사 응답으로 가져오지 않는다.
+- Runtime Repair는 승인 스냅샷이나 원본 checkout의 assertion을 매 시도 다시 읽고 worktree의 manifest 변경을 합격 조건으로 사용하지 않는다.
+- 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`, Xcode container 목록과 고정 경로의 선언형 `.agentmonitor/project.json`만 사용한다. `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용은 검사 응답으로 가져오지 않는다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.

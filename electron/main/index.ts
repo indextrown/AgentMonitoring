@@ -4,10 +4,20 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { z } from 'zod'
-import type { CodexAuthStatus, CreateTaskInput, EventRecord, UpdateProjectInput } from '../../src/shared/types'
+import type {
+  ApprovedRuntimeContract,
+  CodexAuthStatus,
+  CreateTaskInput,
+  EventRecord,
+  GenerateRuntimeScenarioInput,
+  UpdateProjectInput
+} from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
+import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
+import { resolveProjectRuntimeConfig } from './project-runtime-config'
 import { AgentRunner } from './runner'
+import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
 import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
 
@@ -18,13 +28,22 @@ const createTaskSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(2).max(120),
   prompt: z.string().trim().min(10).max(20_000),
-  maxAttempts: z.number().int().min(1).max(5)
+  maxAttempts: z.number().int().min(1).max(5),
+  runtimeContract: projectCapabilityManifestSchema.nullable().optional(),
+  runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional()
 })
 
 const updateProjectSchema = z.object({
   projectId: z.string().uuid(),
   name: z.string().trim().min(1).max(80),
-  testCommand: z.string().trim().max(500)
+  testCommand: z.string().trim().max(500),
+  runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional()
+})
+
+const generateRuntimeScenarioSchema = z.object({
+  projectId: z.string().uuid(),
+  title: z.string().trim().min(2).max(120),
+  prompt: z.string().trim().min(10).max(20_000)
 })
 
 const addNoteSchema = z.object({
@@ -48,6 +67,7 @@ let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
 let codexAuth: CodexAuthManager | null = null
+let scenarioGenerator: RuntimeScenarioGenerator | null = null
 let shutdownStarted = false
 const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
 
@@ -90,12 +110,18 @@ function requireCodexAuth(): CodexAuthManager {
   return codexAuth
 }
 
+function requireScenarioGenerator(): RuntimeScenarioGenerator {
+  if (!scenarioGenerator) throw new Error('검증 시나리오 생성기가 준비되지 않았습니다.')
+  return scenarioGenerator
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeCodexAuth = codexAuth
   const activeStore = store
   runner = null
   codexAuth = null
+  scenarioGenerator = null
 
   try {
     await shutdownResources({ runner: activeRunner, codexAuth: activeCodexAuth, store: activeStore })
@@ -169,7 +195,16 @@ function registerIpc(): void {
     } catch {
       throw new Error('선택한 폴더는 Git 저장소가 아닙니다.')
     }
-    return requireStore().addProject(basename(projectPath), projectPath)
+    let project = requireStore().addProject(basename(projectPath), projectPath)
+    const resolvedRuntime = await resolveProjectRuntimeConfig(projectPath)
+    if (resolvedRuntime) {
+      project = requireStore().setProjectRuntimeAdapter(
+        project.id,
+        resolvedRuntime.adapter,
+        resolvedRuntime.source
+      )
+    }
+    return project
   })
 
   ipcMain.handle('project:update', (_event, rawInput: UpdateProjectInput) => {
@@ -177,9 +212,36 @@ function registerIpc(): void {
     return requireStore().updateProject(input)
   })
 
-  ipcMain.handle('project:inspect', (_event, projectId: string) => {
+  ipcMain.handle('project:inspect', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
-    return inspectProject(requireStore().getProject(validProjectId))
+    let project = requireStore().getProject(validProjectId)
+    if (!project.runtimeAdapter) {
+      const resolvedRuntime = await resolveProjectRuntimeConfig(project.path)
+      if (resolvedRuntime) {
+        project = requireStore().setProjectRuntimeAdapter(
+          project.id,
+          resolvedRuntime.adapter,
+          resolvedRuntime.source
+        )
+      }
+    }
+    return inspectProject(project)
+  })
+
+  ipcMain.handle('runtime-scenario:generate', async (_event, rawInput: GenerateRuntimeScenarioInput) => {
+    const input = generateRuntimeScenarioSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('검증 시나리오를 만들려면 먼저 Codex에 로그인하세요.')
+    const project = requireStore().getProject(input.projectId)
+    if (!project.runtimeAdapter) {
+      throw new Error('이 프로젝트에서 iOS 실행 설정을 찾지 못했습니다. 프로젝트 설정에서 먼저 등록하세요.')
+    }
+    return requireScenarioGenerator().generate({
+      projectPath: project.path,
+      title: input.title,
+      prompt: input.prompt,
+      adapter: project.runtimeAdapter
+    })
   })
 
   ipcMain.handle('project:remove', async (_event, projectId: string) => {
@@ -189,7 +251,14 @@ function registerIpc(): void {
 
   ipcMain.handle('task:create', (_event, rawInput: CreateTaskInput) => {
     const input = createTaskSchema.parse(rawInput)
-    return requireStore().createTask(input.projectId, input.title, input.prompt, input.maxAttempts)
+    return requireStore().createTask(
+      input.projectId,
+      input.title,
+      input.prompt,
+      input.maxAttempts,
+      (input.runtimeContract as ApprovedRuntimeContract | null | undefined) ?? null,
+      input.runtimeScenarioSummary ?? null
+    )
   })
 
   ipcMain.handle('task:changes', (_event, taskId: string) => {
@@ -259,6 +328,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   store.recoverInterruptedTasks()
   store.recoverInterruptedRuntimeSessions()
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
+  scenarioGenerator = new RuntimeScenarioGenerator(codexCommand, codexHome)
   runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()
   await createWindow()
