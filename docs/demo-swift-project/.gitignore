@@ -1,0 +1,6 @@
+/.build/
+/.derived/
+/.tuist-bin/
+/AgentMonitoringDemo.xcworkspace/
+**/xcuserdata/
+/.DS_Store
