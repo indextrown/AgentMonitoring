@@ -135,6 +135,7 @@ const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
   launching: '앱 실행',
   acting: 'UI 조작',
   observing: '증거 수집',
+  verifying: '인수 검증',
   running: '실행 중',
   failed: '실패',
   stopped: '종료됨'
@@ -1543,7 +1544,7 @@ function TaskDrawer({
             <p>{runtime.message}</p>
             {evidence.length > 0 && (
               <div className="runtime-evidence-list">
-                {evidence.slice(0, 4).map((item) => {
+                {evidence.slice(0, 5).map((item) => {
                   const isJsonEvidence = item.kind !== 'screen'
                   const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
                   const evidenceLabel = item.kind === 'accessibility'
@@ -1552,6 +1553,8 @@ function TaskDrawer({
                       ? 'Simulator UI 조작 결과'
                       : item.kind === 'debug-state'
                         ? 'Simulator Debug state·fixture'
+                        : item.kind === 'runtime-verification'
+                          ? 'Runtime 인수 검증 결과'
                         : 'Simulator 화면 증거'
                   return (
                     <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
@@ -1564,7 +1567,7 @@ function TaskDrawer({
                     </button>
                   )
                 })}
-                {evidence.length > 4 && <small>최근 4개 표시 · 전체 {evidence.length}개 저장</small>}
+                {evidence.length > 5 && <small>최근 5개 표시 · 전체 {evidence.length}개 저장</small>}
               </div>
             )}
             <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>

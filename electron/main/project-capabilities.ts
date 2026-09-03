@@ -63,6 +63,76 @@ const runtimeFixtureSchema = z
   })
   .strict()
 
+const runtimeStatePathSegmentSchema = z.union([
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .refine(
+      (value) => !['__proto__', 'constructor', 'prototype'].includes(value),
+      'state path에는 안전하지 않은 객체 키를 사용할 수 없습니다.'
+    ),
+  z.number().int().min(0).max(1_000)
+])
+
+const runtimeAssertionNameSchema = z.string().trim().min(1).max(160).optional()
+const runtimeStatePathSchema = z.array(runtimeStatePathSegmentSchema).min(1).max(16)
+
+const runtimeAcceptanceAssertionSchema = z.union([
+  z
+    .object({
+      kind: z.literal('state'),
+      name: runtimeAssertionNameSchema,
+      path: runtimeStatePathSchema,
+      operator: z.literal('exists'),
+      expected: z.boolean().default(true)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('state'),
+      name: runtimeAssertionNameSchema,
+      path: runtimeStatePathSchema,
+      operator: z.enum(['equals', 'not-equals']),
+      expected: z.json()
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('accessibility'),
+      name: runtimeAssertionNameSchema,
+      identifier: accessibilityIdentifierSchema,
+      property: z.literal('exists'),
+      expected: z.boolean().default(true)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('accessibility'),
+      name: runtimeAssertionNameSchema,
+      identifier: accessibilityIdentifierSchema,
+      property: z.enum(['label', 'title', 'value', 'placeholderValue', 'elementType']),
+      expected: z.string().max(2_000)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('accessibility'),
+      name: runtimeAssertionNameSchema,
+      identifier: accessibilityIdentifierSchema,
+      property: z.enum(['enabled', 'selected']),
+      expected: z.boolean()
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('evidence'),
+      name: runtimeAssertionNameSchema,
+      target: z.enum(['screen', 'accessibility', 'state', 'ui-actions', 'fixture'])
+    })
+    .strict()
+])
+
 export const projectCapabilityManifestSchema = z
   .object({
     version: z.literal(1),
@@ -94,7 +164,8 @@ export const projectCapabilityManifestSchema = z
     runtimeScenario: z
       .object({
         actions: z.array(runtimeUiActionSchema).max(20).default([]),
-        fixture: runtimeFixtureSchema.optional()
+        fixture: runtimeFixtureSchema.optional(),
+        assertions: z.array(runtimeAcceptanceAssertionSchema).max(50).default([])
       })
       .strict()
       .optional()
@@ -142,6 +213,62 @@ export const projectCapabilityManifestSchema = z
         message: 'runtimeScenario.fixture를 적용하려면 debugBridge 계약이 필요합니다.'
       })
     }
+    const assertions = manifest.runtimeScenario?.assertions ?? []
+    if (assertions.length > 0 && !manifest.capabilities.verify.includes('runtime-scenario')) {
+      context.addIssue({
+        code: 'custom',
+        path: ['capabilities', 'verify'],
+        message: 'runtimeScenario.assertions를 평가하려면 verify에 runtime-scenario가 필요합니다.'
+      })
+    }
+    assertions.forEach((assertion, index) => {
+      if (assertion.kind === 'state') {
+        if (!manifest.capabilities.observe.includes('state')) {
+          context.addIssue({
+            code: 'custom',
+            path: ['runtimeScenario', 'assertions', index],
+            message: 'state assertion에는 observe.state가 필요합니다.'
+          })
+        }
+        if (!manifest.debugBridge) {
+          context.addIssue({
+            code: 'custom',
+            path: ['runtimeScenario', 'assertions', index],
+            message: 'state assertion에는 debugBridge 계약이 필요합니다.'
+          })
+        }
+      }
+      if (
+        assertion.kind === 'accessibility' &&
+        !manifest.capabilities.observe.includes('accessibility')
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['runtimeScenario', 'assertions', index],
+          message: 'accessibility assertion에는 observe.accessibility가 필요합니다.'
+        })
+      }
+      if (assertion.kind !== 'evidence') return
+      const targetReady = {
+        screen: manifest.capabilities.observe.includes('screen'),
+        accessibility: manifest.capabilities.observe.includes('accessibility'),
+        state: manifest.capabilities.observe.includes('state') && Boolean(manifest.debugBridge),
+        'ui-actions':
+          manifest.capabilities.act.includes('ui') &&
+          (manifest.runtimeScenario?.actions.length ?? 0) > 0,
+        fixture:
+          manifest.capabilities.act.includes('fixture') &&
+          Boolean(manifest.debugBridge) &&
+          Boolean(manifest.runtimeScenario?.fixture)
+      }[assertion.target]
+      if (!targetReady) {
+        context.addIssue({
+          code: 'custom',
+          path: ['runtimeScenario', 'assertions', index],
+          message: `${assertion.target} evidence assertion에 필요한 Observe·Act 계약이 준비되지 않았습니다.`
+        })
+      }
+    })
   })
 
 export type ProjectCapabilityManifest = z.infer<typeof projectCapabilityManifestSchema>
@@ -292,6 +419,18 @@ export async function inspectProjectCapabilities(
   const declaredActLabels = capabilities.act
     .filter((item) => (item === 'fixture' && !fixtureReady) || (item === 'ui' && uiActionCount === 0))
     .map((item) => actLabels[item])
+  const runtimeAssertionCount = capabilities.verify.includes('runtime-scenario')
+    ? result.value.runtimeScenario?.assertions.length ?? 0
+    : 0
+  const readyVerifyLabels = [
+    verifyFromCommand?.detail ?? '',
+    runtimeAssertionCount > 0
+      ? `runtime acceptance ${runtimeAssertionCount.toLocaleString('ko-KR')}개`
+      : ''
+  ].filter(Boolean)
+  const declaredVerifyLabels = capabilities.verify
+    .filter((item) => item === 'runtime-scenario' && runtimeAssertionCount === 0)
+    .map((item) => verifyLabels[item])
 
   return {
     manifest: {
@@ -332,10 +471,18 @@ export async function inspectProjectCapabilities(
         : capabilities.act.length
           ? declaredCapability('act', `${capabilities.act.map((item) => actLabels[item]).join(' · ')} 조작 계약 선언`)
         : missingCapability('act', '조작 채널이 선언되지 않았습니다.'),
-      verifyFromCommand ??
-        (capabilities.verify.length
+      readyVerifyLabels.length > 0
+        ? readyCapability(
+            'verify',
+            [
+              readyVerifyLabels.join(' · '),
+              declaredVerifyLabels.join(' · '),
+              declaredVerifyLabels.length ? 'assertion 미설정' : ''
+            ].filter(Boolean).join(' · ')
+          )
+        : capabilities.verify.length
           ? declaredCapability('verify', `${capabilities.verify.map((item) => verifyLabels[item]).join(' · ')} 계약 선언`)
-          : missingCapability('verify', '검증 명령과 실행 시나리오가 없습니다.'))
+          : missingCapability('verify', '검증 명령과 실행 시나리오가 없습니다.')
     ]
   }
 }

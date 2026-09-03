@@ -13,6 +13,11 @@ import {
   type RuntimeCommandRequest
 } from './ios-simulator-runtime'
 import { readProjectCapabilityManifest } from './project-capabilities'
+import {
+  evaluateRuntimeAcceptance,
+  summarizeRuntimeAcceptance,
+  writeRuntimeAcceptanceEvidence
+} from './runtime-acceptance'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -64,6 +69,7 @@ interface RuntimeRunResult {
 const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
 const MAX_UI_ACTION_REVIEW_CHARS = 20_000
 const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
+const MAX_RUNTIME_VERIFICATION_REVIEW_CHARS = 40_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -893,6 +899,67 @@ export class AgentRunner {
           '```'
         ].filter(Boolean).join('\n'))
       }
+      let verificationSummary = ''
+      const runtimeAssertions = manifest.value.capabilities.verify.includes('runtime-scenario')
+        ? manifest.value.runtimeScenario?.assertions ?? []
+        : []
+      if (runtimeAssertions.length > 0) {
+        const verifyMessage = `runtime acceptance ${runtimeAssertions.length.toLocaleString('ko-KR')}개를 평가합니다.`
+        this.store.setRuntimeSession(task.id, 'verifying', {
+          deviceId: result.deviceId,
+          deviceName: result.deviceName,
+          bundleIdentifier: result.bundleIdentifier,
+          processId: result.processId,
+          message: verifyMessage
+        })
+        this.emit(task, 'runtime_started', 'runtime', verifyMessage)
+
+        const report = evaluateRuntimeAcceptance(runtimeAssertions, result)
+        let verificationEvidence: Awaited<ReturnType<typeof writeRuntimeAcceptanceEvidence>>
+        try {
+          verificationEvidence = await writeRuntimeAcceptanceEvidence(
+            this.runtimeRoot,
+            task.id,
+            report
+          )
+        } catch (error) {
+          throw new IosRuntimeStageError(
+            'verifying',
+            `runtime acceptance 결과를 안전하게 저장하지 못했습니다. ${redact(String(error))}`
+          )
+        }
+        const storedEvidence = this.store.addRuntimeEvidence(task.id, {
+          kind: 'runtime-verification',
+          path: verificationEvidence.path,
+          mimeType: verificationEvidence.mimeType,
+          sizeBytes: verificationEvidence.sizeBytes,
+          createdAt: verificationEvidence.createdAt
+        })
+        verificationSummary = summarizeRuntimeAcceptance(report)
+        this.emit(
+          task,
+          'runtime_verified',
+          'runtime',
+          `${verificationSummary} · ${storedEvidence.sizeBytes.toLocaleString('ko-KR')} bytes`,
+          report.passed ? null : 'high'
+        )
+        const content = verificationEvidence.content.slice(
+          0,
+          MAX_RUNTIME_VERIFICATION_REVIEW_CHARS
+        )
+        reviewContexts.push([
+          `다음 JSON은 선언된 runtime acceptance assertion을 증거와 결정적으로 비교한 결과입니다. (${report.passedCount.toLocaleString('ko-KR')}/${report.assertionCount.toLocaleString('ko-KR')} 통과)`,
+          '```json',
+          content,
+          verificationEvidence.content.length > content.length
+            ? '\n... Reviewer 입력 크기 제한으로 이하 생략'
+            : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+        if (!report.passed) {
+          throw new IosRuntimeStageError('verifying', verificationSummary)
+        }
+      }
       const message = [
         `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`,
         result.screenEvidence ? '화면 증거 1개 저장' : '',
@@ -907,7 +974,8 @@ export class AgentRunner {
           : '',
         result.debugStateEvidence?.hasState
           ? 'Debug 앱 상태 저장'
-          : ''
+          : '',
+        verificationSummary
       ].filter(Boolean).join(' · ')
       this.store.setRuntimeSession(task.id, 'running', {
         deviceId: result.deviceId,

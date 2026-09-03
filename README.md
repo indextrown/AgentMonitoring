@@ -132,7 +132,7 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
 | Run | 앱을 Simulator에서 실행해요. | Build와 Run을 활성화하고 선택한 iPad·iPhone Simulator가 있으면 사용 가능 |
 | Observe | 화면, 접근성 구조, Debug 상태를 읽어요. | `screen`·`accessibility`와 `debugBridge` 기반 `state` 사용 가능 |
 | Act | UI를 조작하거나 Debug fixture를 적용해요. | identifier 기반 `tap`·`type-text`와 `debugBridge` 기반 fixture 사용 가능 |
-| Verify | 등록한 명령으로 테스트를 실행해요. | 검증 명령을 저장하면 사용 가능 |
+| Verify | 등록한 명령과 runtime assertion으로 결과를 판정해요. | 검증 명령 또는 선언형 `runtimeScenario.assertions`가 있으면 사용 가능 |
 
 앱 실행 자동화를 준비하는 Swift 프로젝트는 저장소 루트에 `.agentmonitor/project.json`을 둘 수 있어요.
 
@@ -177,7 +177,26 @@ AgentMonitoring은 사용자 전역 `~/.codex` 로그인을 그대로 사용하�
         "accountID": "fixture-user",
         "selectedTab": "home"
       }
-    }
+    },
+    "assertions": [
+      {
+        "kind": "state",
+        "name": "홈 탭 유지",
+        "path": ["selectedTab"],
+        "operator": "equals",
+        "expected": "home"
+      },
+      {
+        "kind": "accessibility",
+        "identifier": "start-navigation",
+        "property": "enabled",
+        "expected": true
+      },
+      {
+        "kind": "evidence",
+        "target": "screen"
+      }
+    ]
   }
 }
 ```
@@ -198,6 +217,7 @@ Build와 Run이 `true`이면 프로젝트 검증 명령이 통과한 뒤 다음 
   → 번들된 XCTest driver로 identifier 기반 tap·text 입력 실행
   → 최종 Debug 상태·action 결과·접근성 트리를 JSON으로 저장·전달
   → 최종 화면을 PNG로 캡처해 Reviewer에 첨부
+  → runtime assertion을 수집한 증거와 비교하고 판정 JSON 저장
   → 기기, bundle identifier, PID를 작업 runtime session에 기록
 ```
 
@@ -210,6 +230,10 @@ fixture payload와 state는 JSON dictionary여야 해요. 요청은 64KB, 응답
 선택한 기기군에 사용 가능한 Simulator가 없으면 자동으로 기기를 만들지 않고 작업을 실패 상태로 전환해요. Xcode에서 해당 iPad 또는 iPhone Simulator를 만든 뒤 작업을 다시 실행하세요. 접근성 증거는 identifier, label, title, value, frame, enabled·selected 상태, 하위 요소를 담아요.
 
 접근성 계층은 Apple의 공개 [`XCUIElementSnapshotProviding.snapshot()` API](https://developer.apple.com/documentation/xcuiautomation/xcuielementsnapshotproviding/snapshot())로 수집해요. 이 앱이 대상 프로젝트의 UI-test target을 임의로 수정하지는 않아요.
+
+runtime assertion은 최대 50개까지 선언할 수 있어요. `state`는 Debug state의 제한된 path에 `exists`·`equals`·`not-equals`를 적용하고, `accessibility`는 정확한 identifier의 존재 여부나 label·value·enabled·selected 같은 속성을 비교해요. `evidence`는 화면·접근성·상태·UI 조작·fixture 증거가 실제로 만들어졌는지 확인해요. JSON path 표현식, 정규식, JavaScript, shell 같은 실행 가능한 입력은 받지 않아요.
+
+판정 결과는 assertion별 기대값·실제값·통과 여부를 `runtime-verification-*.json`에 남겨요. 하나라도 실패하면 `verifying` 단계에서 작업을 중단하고 high finding을 만들어요. 이 단계는 결과를 판정할 뿐, 실패한 코드를 다시 수정하는 Repair 루프는 아직 실행하지 않아요.
 
 ## 실제 앱과 브라우저 미리보기 구분하기
 
@@ -233,7 +257,8 @@ fixture payload와 state는 JSON dictionary여야 해요. 요청은 64KB, 응답
           ├─ Act fixture 계약이 있으면 Debug fixture 적용
           ├─ Act ui 시나리오가 있으면 identifier 기반 UI 조작
           ├─ Observe state·accessibility 계약이 있으면 최종 내부 상태·접근성 트리 저장
-          └─ Observe screen 계약이 있으면 최종 화면 증거 저장
+          ├─ Observe screen 계약이 있으면 최종 화면 증거 저장
+          └─ Verify runtime assertion을 증거와 비교해 결과 저장
   → 읽기 전용 Reviewer가 코드, runtime 결과, 첨부 화면 검토
   → 사람의 최종 승인 대기
 ```
@@ -341,7 +366,7 @@ Electron의 `userData` 아래에 다음 데이터를 저장해요.
 - `worktrees/<project-id>/<task-id>`: 작업별 Git worktree
 - `runtime-sessions/<task-id>/DerivedData`: Swift 작업별 빌드 산출물
 - `runtime-sessions/<task-id>/evidence/*.png`: 작업별 Simulator 화면 증거
-- `runtime-sessions/<task-id>/evidence/*.json`: 작업별 Simulator 접근성 트리, UI 조작 결과, Debug state·fixture 증거
+- `runtime-sessions/<task-id>/evidence/*.json`: 작업별 Simulator 접근성 트리, UI 조작 결과, Debug state·fixture, runtime acceptance 판정 증거
 
 AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 백엔드가 없어요. Codex 인증 정보는 앱 전용 저장소에 격리하고 SQLite에는 기록하지 않아요. 화면은 Reviewer의 이미지 입력으로, 접근성·Debug 상태·fixture 결과 JSON은 길이를 제한한 Reviewer 프롬프트로 전송해요. UI action 결과에는 입력한 text를 다시 기록하지 않고 kind·identifier·순서·실행 시간만 남겨요. 앱이 내보낸 Debug 상태는 로컬 증거에 저장되고 Codex가 처리하므로 상태 제공자에 비밀값을 넣지 마세요. 저장소 코드와 runtime 증거를 포함해 Codex가 처리하는 데이터에는 로그인한 ChatGPT 계정과 조직의 정책이 적용돼요.
 
@@ -355,7 +380,7 @@ AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우�
 - 원격 팀 협업
 - 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
-- runtime 시나리오 기반 자가 수정 루프
+- 실패한 runtime assertion을 Implementer에 되돌리는 자가 수정 루프
 - 앱 자동 업데이트와 코드 서명
 
 ## 저장소 정책

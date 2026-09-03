@@ -183,6 +183,16 @@ function buildSnapshot(): DashboardSnapshot {
           mimeType: 'application/json' as const,
           sizeBytes: 8_192,
           createdAt: atOffset(0, 8, 56)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000105',
+          taskId: tasks[0].id,
+          projectId,
+          kind: 'runtime-verification' as const,
+          path: 'demo://runtime/evidence/runtime-verification-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 2_048,
+          createdAt: atOffset(0, 9, 0)
         }
       ]
     : []

@@ -46,6 +46,7 @@ async function createExecutionFixture(options: {
   withUiActions?: boolean
   withDebugState?: boolean
   withDebugFixture?: boolean
+  runtimeAssertions?: Array<Record<string, unknown>>
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -88,12 +89,15 @@ async function createExecutionFixture(options: {
             ...(options.withUiActions ? ['ui'] : []),
             ...(options.withDebugFixture ? ['fixture'] : [])
           ],
-          verify: ['test-command']
+          verify: [
+            'test-command',
+            ...((options.runtimeAssertions?.length ?? 0) > 0 ? ['runtime-scenario'] : [])
+          ]
         },
         debugBridge: options.withDebugState || options.withDebugFixture
           ? { protocol: 'file-v1', responseTimeoutSeconds: 10 }
           : undefined,
-        runtimeScenario: options.withUiActions || options.withDebugFixture
+        runtimeScenario: options.withUiActions || options.withDebugFixture || options.runtimeAssertions?.length
           ? {
               actions: options.withUiActions
                 ? [
@@ -111,7 +115,8 @@ async function createExecutionFixture(options: {
                     id: 'signed-in-home',
                     payload: { accountID: 'fixture-user', selectedTab: 'home' }
                   }
-                : undefined
+                : undefined,
+              assertions: options.runtimeAssertions ?? []
             }
           : undefined
       })
@@ -495,6 +500,16 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       withUiActions: true,
       withDebugState: true,
       withDebugFixture: true,
+      runtimeAssertions: [
+        {
+          kind: 'state',
+          name: '선택 탭 확인',
+          path: ['selectedTab'],
+          operator: 'equals',
+          expected: 'home'
+        },
+        { kind: 'evidence', target: 'screen' }
+      ],
       runtimeAdapter
     })
 
@@ -536,11 +551,17 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
           kind: 'debug-state',
           path: debugStateEvidencePath,
           mimeType: 'application/json'
+        }),
+        expect.objectContaining({
+          taskId: task.id,
+          kind: 'runtime-verification',
+          mimeType: 'application/json'
         })
       ])
     )
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_observed')).toBe(true)
     expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_acted')).toBe(true)
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'runtime_verified')).toBe(true)
     const codexCalls = (await readFile(join(fixture.directory, 'codex-argv.jsonl'), 'utf8'))
       .trim()
       .split('\n')
@@ -550,10 +571,90 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(codexCalls.at(-1)?.join('\n')).toContain('destination-search')
     expect(codexCalls.at(-1)?.join('\n')).toContain('signed-in-home')
     expect(codexCalls.at(-1)?.join('\n')).toContain('selectedTab')
+    expect(codexCalls.at(-1)?.join('\n')).toContain('runtime acceptance assertion')
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App'])
     expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({ status: 'stopped', processId: null })
+    fixture.store.close()
+  })
+
+  it('stores failed runtime assertions and stops before reviewer approval', async () => {
+    const accessibilityContent = JSON.stringify({
+      schemaVersion: 1,
+      root: { identifier: 'root', children: [] }
+    })
+    const runtimeAdapter: IosSimulatorRuntimeAdapter = {
+      launch: async (input) => {
+        const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')
+        await mkdir(evidenceDirectory, { recursive: true })
+        const accessibilityPath = join(evidenceDirectory, 'accessibility-fixture.json')
+        await writeFile(accessibilityPath, accessibilityContent)
+        return {
+          deviceId: 'IPAD-UDID',
+          deviceName: 'iPad Pro 13-inch',
+          bundleIdentifier: 'com.example.App',
+          processId: 4242,
+          appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+          screenEvidence: null,
+          accessibilityEvidence: {
+            path: accessibilityPath,
+            mimeType: 'application/json',
+            sizeBytes: Buffer.byteLength(accessibilityContent),
+            capturedAt: new Date().toISOString(),
+            nodeCount: 1,
+            truncated: false,
+            content: accessibilityContent
+          },
+          uiActionEvidence: null,
+          debugStateEvidence: null
+        }
+      },
+      stop: async () => undefined
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      withRuntimeManifest: true,
+      withAccessibilityObservation: true,
+      runtimeAssertions: [
+        {
+          kind: 'accessibility',
+          name: '오류 배너 표시',
+          identifier: 'error-banner',
+          property: 'exists',
+          expected: true
+        }
+      ],
+      runtimeAdapter
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toMatchObject({
+      status: 'verifying'
+    })
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const snapshot = fixture.store.getSnapshot(task.projectId)
+    const verification = snapshot.runtimeEvidence.find(
+      (item) => item.kind === 'runtime-verification'
+    )
+    expect(task.status).toBe('failed')
+    expect(fixture.store.getRuntimeSession(task.id)).toMatchObject({ status: 'failed' })
+    expect(verification).toBeDefined()
+    expect(JSON.parse(await readFile(verification!.path, 'utf8'))).toMatchObject({
+      passed: false,
+      assertionCount: 1,
+      passedCount: 0,
+      results: [expect.objectContaining({ description: '오류 배너 표시', passed: false })]
+    })
+    expect(snapshot.events.some((event) => event.kind === 'runtime_verified')).toBe(true)
+    expect(snapshot.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: expect.stringContaining('Swift runtime verifying 단계 실패') })
+      ])
+    )
     fixture.store.close()
   })
 

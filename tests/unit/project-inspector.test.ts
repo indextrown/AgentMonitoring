@@ -157,7 +157,22 @@ describe('inspectProject', () => {
           fixture: {
             id: 'signed-in-home',
             payload: { accountID: 'fixture-user', selectedTab: 'home' }
-          }
+          },
+          assertions: [
+            {
+              kind: 'state',
+              path: ['selectedTab'],
+              operator: 'equals',
+              expected: 'home'
+            },
+            {
+              kind: 'accessibility',
+              identifier: 'start-navigation',
+              property: 'enabled',
+              expected: true
+            },
+            { kind: 'evidence', target: 'screen' }
+          ]
         }
       })
     )
@@ -200,6 +215,9 @@ describe('inspectProject', () => {
     )
     expect(inspection.capabilities.find(({ key }) => key === 'act')?.detail).toBe(
       'accessibility identifier UI 조작 2단계 · Debug fixture signed-in-home 적용 사용 가능'
+    )
+    expect(inspection.capabilities.find(({ key }) => key === 'verify')?.detail).toBe(
+      '검증 명령: tuist test · runtime acceptance 3개'
     )
   })
 
@@ -283,6 +301,41 @@ describe('inspectProject', () => {
       ...manifest,
       capabilities: { ...manifest.capabilities, act: ['fixture'] }
     })).toThrow('runtimeScenario.fixture를 적용하려면 debugBridge 계약이 필요합니다.')
+  })
+
+  it('rejects runtime assertions without their declared evidence channels', () => {
+    const manifest = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'PopPang.xcodeproj',
+        scheme: 'PopPang'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: [],
+        act: [],
+        verify: ['runtime-scenario']
+      },
+      runtimeScenario: {
+        assertions: [
+          {
+            kind: 'accessibility',
+            identifier: 'start-navigation',
+            property: 'exists'
+          }
+        ]
+      }
+    }
+
+    expect(() => projectCapabilityManifestSchema.parse(manifest)).toThrow(
+      'accessibility assertion에는 observe.accessibility가 필요합니다.'
+    )
+    expect(() => projectCapabilityManifestSchema.parse({
+      ...manifest,
+      capabilities: { ...manifest.capabilities, observe: ['accessibility'], verify: [] }
+    })).toThrow('runtimeScenario.assertions를 평가하려면 verify에 runtime-scenario가 필요합니다.')
   })
 
   it('rejects capability manifests larger than the inspection boundary', async () => {

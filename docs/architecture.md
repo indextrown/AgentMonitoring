@@ -33,11 +33,11 @@ Renderer는 다음 상태를 구분한다.
 
 | 상태 | 의미 |
 | --- | --- |
-| `ready` | 현재 AgentMonitoring이 바로 사용할 수 있다. Code, 저장된 검증 명령, 유효한 iOS 계약의 Build·Run·Observe screen·accessibility·state와 선언형 identifier UI action·Debug fixture가 해당한다. |
+| `ready` | 현재 AgentMonitoring이 바로 사용할 수 있다. Code, 저장된 검증 명령, 유효한 iOS 계약의 Build·Run·Observe screen·accessibility·state, 선언형 identifier UI action·Debug fixture·runtime assertion이 해당한다. |
 | `declared` | 프로젝트 계약에는 있지만 실행 adapter가 아직 연결되지 않았다. |
 | `missing` | 프로젝트에서 선언하거나 설정하지 않았다. |
 
-유효한 iOS 계약에서 `build`와 `run`이 활성화되면 AgentRunner가 테스트 통과 뒤 Xcode와 Simulator runtime을 시작한다. `observe`의 `screen`은 화면 캡처 adapter에, `accessibility`는 XCTest snapshot observer에 연결한다. `act`의 `ui`와 `runtimeScenario.actions`가 함께 있으면 identifier 기반 XCTest driver에 연결한다. `debugBridge` 계약이 있으면 `act.fixture`는 앱 내부 fixture 적용에, `observe.state`는 최종 Debug 상태 수집에 연결한다. runtime `verify`는 아직 선언 상태로 표시한다. manifest가 없거나 Build·Run이 비활성화된 프로젝트는 기존 코드 작업 모드로 동작한다.
+유효한 iOS 계약에서 `build`와 `run`이 활성화되면 AgentRunner가 테스트 통과 뒤 Xcode와 Simulator runtime을 시작한다. `observe`의 `screen`은 화면 캡처 adapter에, `accessibility`는 XCTest snapshot observer에 연결한다. `act`의 `ui`와 `runtimeScenario.actions`가 함께 있으면 identifier 기반 XCTest driver에 연결한다. `debugBridge` 계약이 있으면 `act.fixture`는 앱 내부 fixture 적용에, `observe.state`는 최종 Debug 상태 수집에 연결한다. `verify.runtime-scenario`와 assertion이 있으면 수집한 증거를 선언형 조건으로 판정한다. manifest가 없거나 Build·Run이 비활성화된 프로젝트는 기존 코드 작업 모드로 동작한다.
 
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
 
@@ -85,6 +85,7 @@ AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있
   → action 결과와 Observe accessibility의 `XCUIApplication.snapshot()` 계층을 JSON으로 저장
   → Observe state 계약이 있으면 UI 조작 후 최종 Debug 상태 응답 저장
   → Observe screen 계약이면 조작 후 `simctl io <udid> screenshot`
+  → Verify runtime-scenario 계약이면 assertion별 기대값·실제값 비교와 결과 JSON 저장
   → JSON을 Reviewer 프롬프트로, PNG를 `codex exec --image`로 전달
 ```
 
@@ -100,7 +101,9 @@ Debug bridge는 `file-v1` 프로토콜만 허용한다. `simctl get_app_containe
 
 접근성 계층은 identifier, label, title, value, placeholder, frame, enabled·selected 상태와 children을 최대 5,000개 요소·64단계·512KB로 제한한다. 검증한 결과는 최대 1MB 접근성·Debug state JSON과 최대 256KB action JSON으로 저장한다. Reviewer 입력은 접근성·Debug state 60,000자와 action 20,000자로 제한하고 전체 파일은 로컬 session에 보존한다.
 
-runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `acting`, `observing`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다. 화면·접근성·UI action·Debug state·fixture 증거 메타데이터는 별도 레코드로 보존해 작업 상세에서 파일을 열 수 있다.
+runtime assertion은 원본 checkout의 strict manifest에서 최대 50개를 읽는다. State assertion은 최대 16단계의 문자열·배열 인덱스 path와 `exists`·`equals`·`not-equals`만 지원한다. Accessibility assertion은 정확한 identifier의 존재 여부 또는 제한된 속성만 비교한다. Evidence assertion은 이미 검증해 저장한 화면·접근성·상태·UI action·fixture 결과의 존재만 확인한다. 임의 JSONPath·정규식·스크립트는 실행하지 않는다. 판정 결과에는 전체 state를 복제하지 않고 제한된 기대값·실제값 preview만 기록한다.
+
+runtime session은 `preparing`, `booting`, `building`, `installing`, `launching`, `acting`, `observing`, `verifying`, `running`, `failed`, `stopped` 상태를 가지며 기기 UDID·이름, bundle identifier, PID와 마지막 진단을 저장한다. 화면·접근성·UI action·Debug state·fixture·runtime verification 증거 메타데이터는 별도 레코드로 보존해 작업 상세에서 파일을 열 수 있다.
 
 선택한 기기군에 사용 가능한 Simulator가 없으면 기기를 임의로 만들지 않고 명시적인 실패로 처리한다. 화면 캡처나 접근성 observer가 실패해도 runtime 실패로 처리하며 단계와 원인을 기록한다. 실행 중인 관리 대상 앱은 작업 중단·승인·폐기, 프로젝트 제거, 정상 앱 종료 때 `simctl terminate`로 정리한다. 프로젝트 연결을 삭제하면 해당 프로젝트 작업의 정확한 runtime session 경로도 함께 제거한다.
 
@@ -127,7 +130,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
 | `runtime_sessions` | 작업별 Simulator 단계, 기기, 앱, PID와 진단 |
-| `runtime_evidence` | 작업별 화면·접근성·UI action·Debug state·fixture 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
+| `runtime_evidence` | 작업별 화면·접근성·UI action·Debug state·fixture·runtime verification 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
 
 대시보드의 수치와 최근 활동은 `events`, `tasks`, `findings`에서 계산한다. JSONL 원문 전체 대신 UI에 필요한 redacted 메시지만 최대 길이를 제한해 저장한다.
 
@@ -141,6 +144,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 접근성 트리 수집 실패: marker, base64, JSON schema, bundle identifier, 크기 검증 실패를 `observing` 단계에 기록하고 앱을 정리한다.
 - UI action 실패: identifier 누락·중복, timeout, XCTest 조작 실패, 결과 계약 불일치를 `acting` 단계에 기록하고 이후 화면 조작을 중단한다.
 - Debug bridge 실패: 앱 container·sandbox 경계·파일 형식·크기·JSON schema·request ID·fixture ID·timeout 검증 실패를 fixture는 `acting`, state는 `observing` 단계에 기록하고 앱을 정리한다.
+- Runtime assertion 실패: 모든 assertion 결과 JSON을 먼저 저장하고 `verifying` 단계 실패와 high finding을 기록한 뒤 앱을 정리한다.
 - 선택한 iPad·iPhone 기기군이 없음: 새 기기를 만들지 않고 Xcode에서 해당 기기를 준비하도록 안내한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
@@ -164,6 +168,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - Debug bridge는 `simctl get_app_container`로 확인한 앱 sandbox의 Application Support 고정 하위 경로만 사용하고 manifest에서 임의 경로·명령·코드를 받지 않는다.
 - 화면 증거는 Observe screen 계약에서 Reviewer의 `--image` 입력으로, 접근성·Debug state·fixture JSON은 제한된 프롬프트 문맥으로만 전달한다.
 - UI action은 원본 checkout의 strict manifest에 있는 최대 20개 identifier 기반 action만 실행하며 좌표, label selector, 임의 XCTest·shell 명령은 받지 않는다.
+- Runtime verification은 최대 50개의 제한된 state path·접근성 속성·증거 존재 assertion만 평가하며 임의 코드나 표현식을 실행하지 않는다.
 - 프로젝트 검사는 `git status`, `git log`, `git remote`, `git ls-files`와 고정 경로의 선언형 `.agentmonitor/project.json`만 사용한다. `.env`, Git 무시 파일, 인증 자료와 빌드 산출물 내용은 검사 응답으로 가져오지 않는다.
 - 로그에서 일반적인 API token 패턴과 Bearer token을 마스킹한다.
 - API 키와 Codex 인증 정보는 데이터베이스에 저장하지 않는다.
@@ -178,7 +183,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - 앱 재시작은 프로세스 실행을 이어받지 않고 안전한 `stopped` 상태에서 사람의 재실행 결정을 기다린다.
 - 비정상 종료로 Simulator 앱이 남으면 다음 동일 bundle 실행의 `--terminate-running-process` 또는 사용자의 수동 종료로 정리한다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
-- runtime 시나리오 판정·자가수정은 아직 없다.
+- 실패한 runtime assertion을 Implementer에 전달하는 자가수정 루프는 아직 없다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.
 
