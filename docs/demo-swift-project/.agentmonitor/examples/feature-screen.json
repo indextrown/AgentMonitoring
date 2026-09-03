@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "adapter": {
+    "kind": "ios-simulator",
+    "container": "AgentMonitoringDemo.xcodeproj",
+    "scheme": "AgentMonitoringDemo",
+    "configuration": "Debug",
+    "deviceFamily": "iphone"
+  },
+  "capabilities": {
+    "build": true,
+    "run": true,
+    "observe": ["screen", "accessibility"],
+    "act": ["ui"],
+    "verify": ["test-command", "runtime-scenario"]
+  },
+  "runtimeScenario": {
+    "actions": [
+      {
+        "kind": "type-text",
+        "identifier": "demo-message",
+        "text": "새 화면 구현이 완료됐어요",
+        "timeoutSeconds": 10
+      },
+      {
+        "kind": "tap",
+        "identifier": "start-verification",
+        "timeoutSeconds": 10
+      },
+      {
+        "kind": "tap",
+        "identifier": "open-result",
+        "timeoutSeconds": 10
+      }
+    ],
+    "assertions": [
+      {
+        "kind": "accessibility",
+        "name": "결과 화면 표시",
+        "identifier": "result-screen",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "accessibility",
+        "name": "입력 메시지 표시",
+        "identifier": "result-message",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "accessibility",
+        "name": "완료 상태 표시",
+        "identifier": "result-status",
+        "property": "exists",
+        "expected": true
+      },
+      {
+        "kind": "evidence",
+        "name": "결과 화면 저장",
+        "target": "screen"
+      },
+      {
+        "kind": "evidence",
+        "name": "접근성 트리 저장",
+        "target": "accessibility"
+      },
+      {
+        "kind": "evidence",
+        "name": "UI 조작 결과 저장",
+        "target": "ui-actions"
+      }
+    ]
+  }
+}
