@@ -31,6 +31,39 @@ test('opens search and task detail interactions', async ({ page }) => {
   await expect(page.getByText('작업 계약')).toBeVisible()
 })
 
+test('opens the in-app guide with a real task example and pipeline', async ({ page }) => {
+  await page.goto('/')
+
+  const helpButton = page.getByRole('button', { name: '도움말' })
+  await helpButton.focus()
+  await helpButton.press('Enter')
+
+  const guide = page.getByRole('dialog', { name: '처음 작업 시작하기' })
+  await expect(guide).toBeVisible()
+  await expect(guide.getByText('실제 Git 프로젝트 추가를 누르고 저장소 루트를 선택하세요.')).toBeVisible()
+  await expect(guide.getByText('장보기 목록 화면 구현', { exact: true })).toBeVisible()
+  await expect(guide.getByText('작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.')).toBeVisible()
+  await expect(guide.getByText('최대 구현 3회', { exact: true })).toBeVisible()
+  await expect(guide.getByText('합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.')).toBeVisible()
+  await expect(guide).toHaveScreenshot('usage-help.png', { animations: 'disabled' })
+
+  await page.keyboard.press('Escape')
+  await expect(guide).not.toBeVisible()
+})
+
+test('keeps the in-app guide readable and closable in a compact window', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '도움말' }).click()
+
+  const guide = page.getByRole('dialog', { name: '처음 작업 시작하기' })
+  const confirm = guide.getByRole('button', { name: '확인했어요' })
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeVisible()
+  await confirm.click()
+  await expect(guide).not.toBeVisible()
+})
+
 test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await page.goto('/?runtime=running&device=iphone')
   await page.locator('.search-trigger').click()

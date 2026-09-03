@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  CircleHelp,
   Circle,
   Clock3,
   Command,
@@ -257,6 +258,7 @@ export function App(): React.JSX.Element {
   const [editingNote, setEditingNote] = useState<NoteRecord | null>(null)
   const [searchModal, setSearchModal] = useState(false)
   const [storageModal, setStorageModal] = useState(false)
+  const [helpModal, setHelpModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
   const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
   const [inspection, setInspection] = useState<ProjectInspection | null>(null)
@@ -350,6 +352,7 @@ export function App(): React.JSX.Element {
       if (event.key === 'Escape') {
         setSearchModal(false)
         setStorageModal(false)
+        setHelpModal(false)
         setTaskModal(false)
         setNoteModal(false)
         setEditingNote(null)
@@ -568,6 +571,7 @@ export function App(): React.JSX.Element {
         onAddProject={addProject}
         onSearch={() => setSearchModal(true)}
         onStorage={() => setStorageModal(true)}
+        onHelp={() => setHelpModal(true)}
         onFeedback={() => void bridge.openFeedback().catch((feedbackError) => setError(String(feedbackError)))}
       />
 
@@ -723,6 +727,9 @@ export function App(): React.JSX.Element {
       )}
       {storageModal && (
         <StorageModal onClose={() => setStorageModal(false)} />
+      )}
+      {helpModal && (
+        <UsageHelpModal onClose={() => setHelpModal(false)} />
       )}
       {selectedTask && (
         <TaskDrawer
@@ -1205,6 +1212,7 @@ function Sidebar({
   onAddProject,
   onSearch,
   onStorage,
+  onHelp,
   onFeedback
 }: {
   snapshot: DashboardSnapshot
@@ -1217,6 +1225,7 @@ function Sidebar({
   onAddProject: () => void
   onSearch: () => void
   onStorage: () => void
+  onHelp: () => void
   onFeedback: () => void
 }): React.JSX.Element {
   const activeCount = snapshot.tasks.filter(isActiveTask).length
@@ -1294,6 +1303,10 @@ function Sidebar({
       <button className="storage-button" onClick={onStorage}>
         <HardDrive size={14} />
         저장 공간
+      </button>
+      <button className="help-button" onClick={onHelp}>
+        <CircleHelp size={14} />
+        도움말
       </button>
       <button className="feedback-button" onClick={onFeedback}>
         <MessageSquare size={14} />
@@ -1716,11 +1729,96 @@ function EmptyState({ icon: Icon, title }: { icon: typeof Bug; title: string }):
 function Modal({ title, description, onClose, children, wide = false }: { title: string; description?: string; onClose: () => void; children: React.ReactNode; wide?: boolean }): React.JSX.Element {
   return (
     <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className={`modal-card${wide ? ' modal-wide' : ''}`} role="dialog" aria-modal="true">
+      <section className={`modal-card${wide ? ' modal-wide' : ''}`} role="dialog" aria-label={title} aria-modal="true">
         <header><div><h2>{title}</h2>{description && <p>{description}</p>}</div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         {children}
       </section>
     </div>
+  )
+}
+
+function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const startSteps = [
+    ['1', '프로젝트 연결', '실제 Git 프로젝트 추가를 누르고 저장소 루트를 선택하세요.'],
+    ['2', '실행 영역 연결', 'Swift 앱에서 Build·Run·Observe·Act가 회색이면 iOS 자동 연결을 누르세요.'],
+    ['3', '검증 명령 저장', '프로젝트 설정에서 실제로 통과하는 테스트 명령을 등록하세요.'],
+    ['4', '작업 만들기', '새 작업에서 목표와 확인 가능한 완료 조건을 작성하세요.'],
+    ['5', '조건 확인', 'Swift 앱은 검증 시나리오를 만들고 조작과 합격 조건을 확인하세요.'],
+    ['6', '실행 시작', '작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.']
+  ]
+  const pipeline = [
+    ['테스트 설계', 'Test Designer가 성공·실패·경계 조건을 테스트로 만듭니다.'],
+    ['테스트 비평', 'Critic이 빠진 조건과 편법으로 통과할 수 있는 부분을 찾습니다.'],
+    ['기능 구현', 'Implementer가 격리된 Git worktree에서 코드를 수정합니다.'],
+    ['자동 검증', '등록한 테스트와 선택한 Simulator 사용 흐름을 실행합니다.'],
+    ['자가 수정', '실패하면 로그와 화면 증거를 전달해 남은 횟수만큼 다시 구현합니다.'],
+    ['최종 검토', 'Reviewer가 diff, 테스트와 실행 증거를 읽고 문제를 보고합니다.'],
+    ['사람 승인', '결과를 확인한 뒤 원본에 적용하거나 격리 변경을 폐기합니다.']
+  ]
+
+  return (
+    <Modal
+      wide
+      title="처음 작업 시작하기"
+      description="실제 프로젝트 연결부터 Codex 실행과 원본 적용까지 한 번에 확인하세요."
+      onClose={onClose}
+    >
+      <div className="usage-help">
+        <section className="usage-help-intro">
+          <Bot size={20} />
+          <div>
+            <strong>AgentMonitoring은 코드 편집기가 아니라 AI 개발 작업 관리자예요.</strong>
+            <p>Codex가 별도 작업공간에서 구현하고 검증하는 동안 원본 저장소를 보호하고, 마지막 적용 여부는 사람이 결정해요.</p>
+          </div>
+        </section>
+
+        <section className="usage-help-section">
+          <header><span>START</span><h3>처음 작업은 이 순서로 시작하세요</h3></header>
+          <ol className="usage-start-steps">
+            {startSteps.map(([number, title, description]) => (
+              <li key={number}>
+                <span>{number}</span>
+                <div><strong>{title}</strong><p>{description}</p></div>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section className="usage-help-section usage-example">
+          <header><span>EXAMPLE</span><h3>새 작업에는 이렇게 입력해 보세요</h3></header>
+          <div className="usage-example-title"><span>작업 제목</span><code>장보기 목록 화면 구현</code></div>
+          <div className="usage-example-prompt">
+            <span>목표와 완료 조건</span>
+            <pre>장보기 항목을 입력하고 추가하면 목록에 표시되게 해주세요.{'\n'}구매 완료를 누르면 완료 상태로 바뀌어야 합니다.{'\n'}빈 입력은 추가하지 말고 성공·실패 경로를 테스트해 주세요.</pre>
+          </div>
+          <p className="usage-example-note">구현 방법보다 사용자가 보게 될 결과와 실패 조건을 적는 것이 중요해요.</p>
+        </section>
+
+        <section className="usage-help-section">
+          <header><span>PIPELINE</span><h3>실행을 누르면 내부에서 이렇게 진행돼요</h3></header>
+          <ol className="usage-pipeline">
+            {pipeline.map(([title, description], index) => (
+              <li key={title}>
+                <span>{index + 1}</span>
+                <div><strong>{title}</strong><p>{description}</p></div>
+              </li>
+            ))}
+          </ol>
+          <p className="usage-retry-note"><strong>최대 구현 3회</strong>는 AI 전체 호출 횟수가 아니라 Implementer가 코드를 고칠 수 있는 기회를 뜻해요.</p>
+        </section>
+
+        <section className="usage-boundaries" aria-label="승인 단계 구분">
+          <article><ShieldCheck size={15} /><div><strong>검증 조건 승인하고 작업 등록</strong><p>합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.</p></div></article>
+          <article><Play size={15} /><div><strong>실행</strong><p>격리 작업공간을 만들고 Codex 파이프라인을 시작해요.</p></div></article>
+          <article><GitBranch size={15} /><div><strong>원본에 적용</strong><p>최종 확인한 변경만 현재 로컬 브랜치에 반영해요.</p></div></article>
+        </section>
+
+        <footer className="usage-help-footer">
+          <p>일반 Git 프로젝트는 Code와 Verify만으로 실행할 수 있어요. Simulator 검증은 Swift 앱에서 선택적으로 사용해요.</p>
+          <button className="primary-button" type="button" onClick={onClose}>확인했어요</button>
+        </footer>
+      </div>
+    </Modal>
   )
 }
 
