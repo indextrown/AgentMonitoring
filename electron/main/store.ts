@@ -15,9 +15,11 @@ import type {
   Severity,
   TaskRecord,
   TaskStatus,
+  TaskVerificationPlan,
+  TaskVerificationResult,
   UpdateProjectInput
 } from '../../src/shared/types'
-import { assertTransition } from '../../src/shared/domain'
+import { assertTransition, createVerificationResult } from '../../src/shared/domain'
 
 type Row = Record<string, unknown>
 
@@ -46,6 +48,8 @@ const taskColumns = `
   runtime_contract_json AS runtimeContractJson,
   runtime_scenario_summary AS runtimeScenarioSummary,
   runtime_scenario_approved_at AS runtimeScenarioApprovedAt,
+  verification_plan_json AS verificationPlanJson,
+  verification_result_json AS verificationResultJson,
   created_at AS createdAt,
   updated_at AS updatedAt
 `
@@ -144,6 +148,12 @@ function taskFromRow(row: Row): TaskRecord {
     runtimeScenarioSummary: row.runtimeScenarioSummary ? String(row.runtimeScenarioSummary) : null,
     runtimeScenarioApprovedAt: row.runtimeScenarioApprovedAt
       ? String(row.runtimeScenarioApprovedAt)
+      : null,
+    verificationPlan: row.verificationPlanJson
+      ? JSON.parse(String(row.verificationPlanJson)) as TaskVerificationPlan
+      : null,
+    verificationResult: row.verificationResultJson
+      ? JSON.parse(String(row.verificationResultJson)) as TaskVerificationResult
       : null,
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt)
@@ -260,6 +270,8 @@ export class AppStore {
         runtime_contract_json TEXT,
         runtime_scenario_summary TEXT,
         runtime_scenario_approved_at TEXT,
+        verification_plan_json TEXT,
+        verification_result_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -362,6 +374,12 @@ export class AppStore {
     if (!taskColumnNames.has('runtime_scenario_approved_at')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_scenario_approved_at TEXT')
     }
+    if (!taskColumnNames.has('verification_plan_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN verification_plan_json TEXT')
+    }
+    if (!taskColumnNames.has('verification_result_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN verification_result_json TEXT')
+    }
 
     const runtimeEvidenceColumnNames = new Set(
       (this.database.prepare('PRAGMA table_info(runtime_evidence)').all() as Row[]).map((row) =>
@@ -436,7 +454,10 @@ export class AppStore {
     const runtimeConfigSource = input.runtimeAdapter === undefined
       ? existing.runtimeConfigSource ?? null
       : runtimeAdapter
-        ? 'detected'
+        ? existing.runtimeConfigSource === 'manifest' &&
+            JSON.stringify(existing.runtimeAdapter) === JSON.stringify(runtimeAdapter)
+          ? 'manifest'
+          : 'detected'
         : null
     this.database
       .prepare(`
@@ -485,7 +506,8 @@ export class AppStore {
     prompt: string,
     maxAttempts: number,
     runtimeContract: ApprovedRuntimeContract | null = null,
-    runtimeScenarioSummary: string | null = null
+    runtimeScenarioSummary: string | null = null,
+    verificationPlan: TaskVerificationPlan | null = null
   ): TaskRecord {
     this.getProject(projectId)
     const now = new Date().toISOString()
@@ -503,6 +525,8 @@ export class AppStore {
       runtimeContract,
       runtimeScenarioSummary: runtimeScenarioSummary?.trim() || null,
       runtimeScenarioApprovedAt: runtimeContract ? now : null,
+      verificationPlan,
+      verificationResult: verificationPlan ? createVerificationResult(verificationPlan, now) : null,
       createdAt: now,
       updatedAt: now
     }
@@ -511,11 +535,13 @@ export class AppStore {
         INSERT INTO tasks (
           id, project_id, title, prompt, status, provider, max_attempts, attempt,
           branch_name, worktree_path, runtime_contract_json, runtime_scenario_summary,
-          runtime_scenario_approved_at, created_at, updated_at
+          runtime_scenario_approved_at, verification_plan_json, verification_result_json,
+          created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
           NULL, NULL, $runtimeContract, $runtimeScenarioSummary,
-          $runtimeScenarioApprovedAt, $createdAt, $updatedAt
+          $runtimeScenarioApprovedAt, $verificationPlan, $verificationResult,
+          $createdAt, $updatedAt
         )
       `)
       .run({
@@ -528,6 +554,8 @@ export class AppStore {
         runtimeContract: runtimeContract ? JSON.stringify(runtimeContract) : null,
         runtimeScenarioSummary: task.runtimeScenarioSummary ?? null,
         runtimeScenarioApprovedAt: task.runtimeScenarioApprovedAt ?? null,
+        verificationPlan: verificationPlan ? JSON.stringify(verificationPlan) : null,
+        verificationResult: task.verificationResult ? JSON.stringify(task.verificationResult) : null,
         createdAt: now,
         updatedAt: now
       })
@@ -565,6 +593,14 @@ export class AppStore {
     this.database
       .prepare('UPDATE tasks SET status = ?, attempt = ?, updated_at = ? WHERE id = ?')
       .run(status, nextAttempt, now, taskId)
+    return this.getTask(taskId)
+  }
+
+  setTaskVerificationResult(taskId: string, result: TaskVerificationResult): TaskRecord {
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET verification_result_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(result), now, taskId)
     return this.getTask(taskId)
   }
 

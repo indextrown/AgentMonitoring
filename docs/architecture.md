@@ -45,9 +45,19 @@ Renderer는 다음 상태를 구분한다.
 
 유효한 iOS 계약이나 자동 감지한 runtime adapter가 있으면 새 작업 화면에서 Simulator 검증을 선택할 수 있다. manifest와 자동 감지 설정이 모두 없거나 사용자가 작업에서 Simulator 검증을 끄면 기존 코드 작업 모드로 동작한다.
 
-검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다.
+검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 프로젝트 테스트를 선택한 작업에서 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다. Simulator 전용·수동 검토 작업은 검증 명령 없이 실행할 수 있다.
 
-## 작업별 검증 시나리오
+## 작업별 검증 계획과 시나리오
+
+Renderer는 먼저 `verification-plan:recommend` IPC를 호출할 수 있다. Main process는 Codex를 read-only sandbox에서 실행하고 저장소의 테스트 구조, 프로젝트 검증 명령과 iOS 실행 연결을 근거로 검증 조합을 추천한다. 추천 결과는 실행 지시가 아니라 UI 초안이다. 사용자가 조합과 테스트 설계 방식을 확인한 뒤 작업을 등록해야 한다.
+
+`tasks.verification_plan_json`은 다음 선택을 작업별 스냅샷으로 저장한다.
+
+- 검증 조합: `project-tests`, `simulator-runtime`, `both`, `manual-review`
+- 테스트 설계: `automatic`, `swift-testing`, `xctest`, `existing-tests`, `skip`
+- Simulator 출처: `task-scenario`, `project-default`, `off`
+
+AgentRunner는 이 계획을 실행 중에 다시 추론하지 않는다. 프로젝트 테스트를 선택했을 때만 Test Designer·Critic과 검증 명령을 실행한다. Simulator 검증을 선택했을 때만 runtime session을 실행한다. `manual-review`는 Implementer와 Reviewer만 실행하고 `awaiting_manual_validation`에서 멈춘다. `verification_result_json`에는 테스트 설계, 프로젝트 테스트, Simulator와 Reviewer의 `pending`, `running`, `passed`, `failed`, `skipped` 상태를 각각 저장한다.
 
 Renderer는 작업 제목과 목표를 `runtime-scenario:generate` IPC로 보낸다. Main process는 앱 전용 `CODEX_HOME`으로 `codex exec`를 read-only sandbox에서 실행한다. JSON Schema가 최종 응답을 UI action과 accessibility assertion으로 제한한다. 생성기는 저장소를 읽을 수 있지만 코드를 수정할 수 없다.
 
@@ -57,7 +67,7 @@ Renderer는 작업 제목과 목표를 `runtime-scenario:generate` IPC로 보낸
 - `runtime_scenario_summary`: 사람이 검토할 짧은 목적
 - `runtime_scenario_approved_at`: 승인 시각
 
-AgentRunner는 작업별 스냅샷이 있으면 원본 `project.json`보다 먼저 사용한다. Test Designer, Implementer, Reviewer 프롬프트에도 같은 계약을 전달한다. Implementer는 제안된 accessibility identifier를 제품 코드에 추가할 수 있지만 승인 스냅샷은 worktree 밖 SQLite에 있으므로 수정할 수 없다. 기존 작업에 스냅샷이 없으면 원본 checkout의 `project.json`을 읽어 하위 호환성을 유지한다.
+AgentRunner는 검증 계획이 `task-scenario`일 때 작업별 스냅샷을 사용하고, `project-default`일 때 원본 `project.json`을 사용한다. Test Designer, Implementer, Reviewer 프롬프트에도 같은 계약을 전달한다. Implementer는 제안된 accessibility identifier를 제품 코드에 추가할 수 있지만 승인 스냅샷은 worktree 밖 SQLite에 있으므로 수정할 수 없다. 검증 계획이 없는 기존 작업은 프로젝트 테스트를 실행한 뒤 작업 스냅샷 또는 원본 `project.json`을 읽는 종전 동작을 유지한다.
 
 ## 상태 전이
 
@@ -65,19 +75,20 @@ AgentRunner는 작업별 스냅샷이 있으면 원본 `project.json`보다 먼�
 queued → running → testing ─┬→ running
                             ├→ failed
                             └→ awaiting_approval → completed
+running ──────────────────────→ awaiting_manual_validation → completed
 
 queued/running/testing → stopped → running
-awaiting_approval/failed/stopped → discarded
+awaiting_approval/awaiting_manual_validation/failed/stopped → discarded
 ```
 
-`running → completed` 전이는 금지한다. 자동 단계는 반드시 `awaiting_approval`에서 멈추고 사람이 승인해야 한다.
+`running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다.
 
 ## 역할과 권한
 
 | 역할 | sandbox | 변경 권한 | 책임 |
 | --- | --- | --- | --- |
-| Test Designer | workspace-write | 테스트 | 성공·실패·경계 조건 테스트 작성 |
-| Critic | read-only | 없음 | 테스트 공백과 약화 가능성 검토 |
+| Test Designer | workspace-write | 테스트 | 선택한 작업의 성공·실패·경계 조건 테스트 작성 |
+| Critic | read-only | 없음 | 새 테스트 설계를 선택한 작업의 테스트 공백과 약화 가능성 검토 |
 | Implementer | workspace-write | 제품 코드 | 목표 구현과 테스트 실패 수정 |
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
 | Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad·iPhone Simulator 설치·실행, Debug fixture·identifier UI 조작, 화면·접근성·앱 상태 증거 수집 |
@@ -88,7 +99,7 @@ awaiting_approval/failed/stopped → discarded
 
 ## Swift runtime session
 
-AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있을 때만 `IosSimulatorRuntimeAdapter`를 호출한다. 새 흐름은 작업 등록 때 사람이 승인한 SQLite 스냅샷을 읽는다. 스냅샷이 없는 기존 흐름은 AI가 수정할 수 있는 worktree가 아니라 사용자가 연결한 원본 checkout에서 계약을 읽는다.
+AgentRunner는 작업별 검증 계획에 Simulator가 포함되고 유효한 Build·Run 계약이 있을 때만 `IosSimulatorRuntimeAdapter`를 호출한다. `both`는 프로젝트 검증 명령이 통과한 뒤 실행하고, `simulator-runtime`은 프로젝트 검증 명령 없이 실행한다. `task-scenario`는 작업 등록 때 사람이 승인한 SQLite 스냅샷을 읽고, `project-default`는 AI가 수정할 수 있는 worktree가 아니라 사용자가 연결한 원본 checkout에서 계약을 읽는다.
 
 ```text
 작업별 승인 스냅샷 또는 원본 프로젝트 계약 읽기
@@ -155,7 +166,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 | 테이블 | 의미 |
 | --- | --- |
 | `projects` | 로컬 저장소 경로, 검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
-| `tasks` | 목표, 상태, 재시도, 브랜치와 worktree, 사람이 승인한 runtime 계약 스냅샷 |
+| `tasks` | 목표, 상태, 재시도, 브랜치와 worktree, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
@@ -178,7 +189,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - Runtime assertion 실패: 모든 assertion 결과 JSON을 먼저 저장하고 앱을 정리한다. 남은 시도가 있으면 `runtime_repair_started` 이벤트와 함께 증거를 다음 Implementer에 전달하고, 마지막 시도라면 `verifying` 단계의 high finding을 기록한다.
 - 선택한 iPad·iPhone 기기군이 없음: 새 기기를 만들지 않고 Xcode에서 해당 기기를 준비하도록 안내한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
-- 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
+- 프로젝트 테스트를 선택했는데 검증 명령이 누락됨: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다. Simulator 전용·수동 검토 작업에는 검증 명령을 요구하지 않는다.
 - 테스트·runtime 검증이 최대 구현 시도 횟수 안에 통과하지 못함: 작업을 `failed`로 전환한다.
 - 사용자 중단: 현재 child process에 `SIGTERM`을 보내고 `stopped`로 전환한다.
 - 프로세스 종료: macOS와 Linux에서는 격리된 프로세스 그룹에 `SIGTERM`을 보내고 3초 뒤에도 살아 있으면 `SIGKILL`한다.

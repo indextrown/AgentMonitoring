@@ -26,7 +26,15 @@ describe('AppStore', () => {
     expect(initial.runtimeEvidence).toEqual([])
 
     const project = store.addProject('Fixture', join(directory, 'fixture'))
-    const task = store.createTask(project.id, '테스트 작업', '테스트 작업의 완료 조건을 검증한다.', 3)
+    const task = store.createTask(
+      project.id,
+      '테스트 작업',
+      '테스트 작업의 완료 조건을 검증한다.',
+      3,
+      null,
+      null,
+      { version: 1, mode: 'project-tests', testDesign: 'swift-testing', runtimeSource: 'off' }
+    )
     expect(task.status).toBe('queued')
 
     store.transitionTask(task.id, 'running', 1)
@@ -39,6 +47,18 @@ describe('AppStore', () => {
     const snapshot = reopened.getSnapshot(project.id)
     expect(snapshot.selectedProject?.id).toBe(project.id)
     expect(snapshot.tasks[0].status).toBe('completed')
+    expect(snapshot.tasks[0].verificationPlan).toEqual({
+      version: 1,
+      mode: 'project-tests',
+      testDesign: 'swift-testing',
+      runtimeSource: 'off'
+    })
+    expect(snapshot.tasks[0].verificationResult).toMatchObject({
+      testDesign: { status: 'pending' },
+      projectTests: { status: 'pending' },
+      simulatorRuntime: { status: 'skipped' },
+      reviewer: { status: 'pending' }
+    })
     expect(snapshot.notes[0].title).toBe('결정')
     reopened.close()
   })

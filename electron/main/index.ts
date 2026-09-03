@@ -10,6 +10,7 @@ import type {
   CreateTaskInput,
   EventRecord,
   GenerateRuntimeScenarioInput,
+  RecommendVerificationPlanInput,
   StorageCleanupInput,
   StoragePolicy,
   UpdateProjectInput
@@ -20,11 +21,19 @@ import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './proj
 import { resolveProjectRuntimeConfig } from './project-runtime-config'
 import { AgentRunner } from './runner'
 import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
+import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
 
 const execFileAsync = promisify(execFile)
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
+
+const verificationPlanSchema = z.object({
+  version: z.literal(1),
+  mode: z.enum(['project-tests', 'simulator-runtime', 'both', 'manual-review']),
+  testDesign: z.enum(['automatic', 'swift-testing', 'xctest', 'existing-tests', 'skip']),
+  runtimeSource: z.enum(['task-scenario', 'project-default', 'off'])
+}).strict()
 
 const createTaskSchema = z.object({
   projectId: z.string().uuid(),
@@ -32,7 +41,23 @@ const createTaskSchema = z.object({
   prompt: z.string().trim().min(10).max(20_000),
   maxAttempts: z.number().int().min(1).max(5),
   runtimeContract: projectCapabilityManifestSchema.nullable().optional(),
-  runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional()
+  runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
+  verificationPlan: verificationPlanSchema
+}).superRefine((input, context) => {
+  const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
+  const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
+  if (!usesTests && input.verificationPlan.testDesign !== 'skip') {
+    context.addIssue({ code: 'custom', path: ['verificationPlan', 'testDesign'], message: '프로젝트 테스트를 사용하지 않을 때 테스트 설계는 건너뛰어야 합니다.' })
+  }
+  if (!usesRuntime && input.verificationPlan.runtimeSource !== 'off') {
+    context.addIssue({ code: 'custom', path: ['verificationPlan', 'runtimeSource'], message: 'Simulator 검증을 사용하지 않을 때 runtime 출처는 사용 안 함이어야 합니다.' })
+  }
+  if (usesRuntime && input.verificationPlan.runtimeSource === 'off') {
+    context.addIssue({ code: 'custom', path: ['verificationPlan', 'runtimeSource'], message: 'Simulator 검증에 사용할 시나리오 출처를 선택하세요.' })
+  }
+  if (input.verificationPlan.runtimeSource === 'task-scenario' && !input.runtimeContract) {
+    context.addIssue({ code: 'custom', path: ['runtimeContract'], message: '작업 시나리오를 생성하고 확인하세요.' })
+  }
 })
 
 const updateProjectSchema = z.object({
@@ -47,6 +72,8 @@ const generateRuntimeScenarioSchema = z.object({
   title: z.string().trim().min(2).max(120),
   prompt: z.string().trim().min(10).max(20_000)
 })
+
+const recommendVerificationPlanSchema = generateRuntimeScenarioSchema
 
 const addNoteSchema = z.object({
   projectId: z.string().uuid(),
@@ -78,6 +105,7 @@ let store: AppStore | null = null
 let runner: AgentRunner | null = null
 let codexAuth: CodexAuthManager | null = null
 let scenarioGenerator: RuntimeScenarioGenerator | null = null
+let verificationPlanRecommender: VerificationPlanRecommender | null = null
 let shutdownStarted = false
 const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
 
@@ -125,6 +153,11 @@ function requireScenarioGenerator(): RuntimeScenarioGenerator {
   return scenarioGenerator
 }
 
+function requireVerificationPlanRecommender(): VerificationPlanRecommender {
+  if (!verificationPlanRecommender) throw new Error('검증 계획 추천기가 준비되지 않았습니다.')
+  return verificationPlanRecommender
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeCodexAuth = codexAuth
@@ -132,6 +165,7 @@ async function shutdownApplication(): Promise<void> {
   runner = null
   codexAuth = null
   scenarioGenerator = null
+  verificationPlanRecommender = null
 
   try {
     await shutdownResources({ runner: activeRunner, codexAuth: activeCodexAuth, store: activeStore })
@@ -271,6 +305,21 @@ function registerIpc(): void {
     })
   })
 
+  ipcMain.handle('verification-plan:recommend', async (_event, rawInput: RecommendVerificationPlanInput) => {
+    const input = recommendVerificationPlanSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('검증 계획을 추천받으려면 먼저 Codex에 로그인하세요.')
+    const project = requireStore().getProject(input.projectId)
+    return requireVerificationPlanRecommender().recommend({
+      projectPath: project.path,
+      title: input.title,
+      prompt: input.prompt,
+      testCommand: project.testCommand,
+      runtimeAvailable: Boolean(project.runtimeAdapter),
+      runtimeConfigSource: project.runtimeConfigSource ?? null
+    })
+  })
+
   ipcMain.handle('project:remove', async (_event, projectId: string) => {
     z.string().uuid().parse(projectId)
     await requireRunner().removeProject(projectId)
@@ -278,13 +327,26 @@ function registerIpc(): void {
 
   ipcMain.handle('task:create', (_event, rawInput: CreateTaskInput) => {
     const input = createTaskSchema.parse(rawInput)
+    const project = requireStore().getProject(input.projectId)
+    const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
+    const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
+    if (usesTests && !project.testCommand.trim()) {
+      throw new Error('프로젝트 테스트를 사용하려면 프로젝트 검증 명령을 먼저 등록하세요.')
+    }
+    if (usesRuntime && !project.runtimeAdapter) {
+      throw new Error('Simulator 검증을 사용하려면 iOS 실행 영역을 먼저 연결하세요.')
+    }
+    if (input.verificationPlan.runtimeSource === 'project-default' && project.runtimeConfigSource !== 'manifest') {
+      throw new Error('프로젝트 기본 시나리오를 사용하려면 .agentmonitor/project.json이 필요합니다.')
+    }
     return requireStore().createTask(
       input.projectId,
       input.title,
       input.prompt,
       input.maxAttempts,
       (input.runtimeContract as ApprovedRuntimeContract | null | undefined) ?? null,
-      input.runtimeScenarioSummary ?? null
+      input.runtimeScenarioSummary ?? null,
+      input.verificationPlan
     )
   })
 
@@ -368,6 +430,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   store.recoverInterruptedRuntimeSessions()
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
   scenarioGenerator = new RuntimeScenarioGenerator(codexCommand, codexHome)
+  verificationPlanRecommender = new VerificationPlanRecommender(codexCommand, codexHome)
   runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()
   await createWindow()

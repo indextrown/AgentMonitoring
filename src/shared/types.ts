@@ -3,6 +3,7 @@ export type TaskStatus =
   | 'running'
   | 'testing'
   | 'awaiting_approval'
+  | 'awaiting_manual_validation'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -124,6 +125,54 @@ export interface GeneratedRuntimeScenario {
   contract: ApprovedRuntimeContract
 }
 
+export type VerificationMode =
+  | 'project-tests'
+  | 'simulator-runtime'
+  | 'both'
+  | 'manual-review'
+
+export type TestDesignStrategy =
+  | 'automatic'
+  | 'swift-testing'
+  | 'xctest'
+  | 'existing-tests'
+  | 'skip'
+
+export type RuntimeVerificationSource = 'task-scenario' | 'project-default' | 'off'
+
+export interface TaskVerificationPlan {
+  version: 1
+  mode: VerificationMode
+  testDesign: TestDesignStrategy
+  runtimeSource: RuntimeVerificationSource
+}
+
+export type VerificationStepKey =
+  | 'test-design'
+  | 'project-tests'
+  | 'simulator-runtime'
+  | 'reviewer'
+
+export type VerificationStepStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
+
+export interface VerificationStepResult {
+  status: VerificationStepStatus
+  message: string
+  updatedAt: string
+}
+
+export interface TaskVerificationResult {
+  testDesign: VerificationStepResult
+  projectTests: VerificationStepResult
+  simulatorRuntime: VerificationStepResult
+  reviewer: VerificationStepResult
+}
+
+export interface VerificationPlanRecommendation {
+  summary: string
+  plan: TaskVerificationPlan
+}
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -206,6 +255,8 @@ export interface TaskRecord {
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
   runtimeScenarioApprovedAt?: string | null
+  verificationPlan?: TaskVerificationPlan | null
+  verificationResult?: TaskVerificationResult | null
   createdAt: string
   updatedAt: string
 }
@@ -347,6 +398,7 @@ export interface CreateTaskInput {
   maxAttempts: number
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
+  verificationPlan: TaskVerificationPlan
 }
 
 export interface UpdateProjectInput {
@@ -362,7 +414,13 @@ export interface GenerateRuntimeScenarioInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 2
+export interface RecommendVerificationPlanInput {
+  projectId: string
+  title: string
+  prompt: string
+}
+
+export const AGENT_MONITORING_BRIDGE_VERSION = 3
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -376,6 +434,9 @@ export interface AgentMonitoringBridge {
   inspectProject: (projectId: string) => Promise<ProjectInspection>
   autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
+  recommendVerificationPlan: (
+    input: RecommendVerificationPlanInput
+  ) => Promise<VerificationPlanRecommendation>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>

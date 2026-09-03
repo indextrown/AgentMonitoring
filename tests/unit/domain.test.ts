@@ -14,6 +14,8 @@ describe('task state machine', () => {
     expect(canTransition('testing', 'running')).toBe(true)
     expect(canTransition('testing', 'awaiting_approval')).toBe(true)
     expect(canTransition('awaiting_approval', 'completed')).toBe(true)
+    expect(canTransition('running', 'awaiting_manual_validation')).toBe(true)
+    expect(canTransition('awaiting_manual_validation', 'completed')).toBe(true)
   })
 
   it('does not allow completed work to restart or skip approval', () => {
