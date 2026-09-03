@@ -9,6 +9,7 @@ import type {
   NoteRecord,
   ProjectRecord,
   RuntimeEvidenceRecord,
+  RuntimeArtifactRetentionDays,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   Severity,
@@ -322,6 +323,11 @@ export class AppStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_project_created
         ON tasks(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_project_created
@@ -543,6 +549,14 @@ export class AppStore {
     ).map(taskFromRow)
   }
 
+  listAllTasks(): TaskRecord[] {
+    return (
+      this.database
+        .prepare(`SELECT ${taskColumns} FROM tasks ORDER BY created_at DESC`)
+        .all() as Row[]
+    ).map(taskFromRow)
+  }
+
   transitionTask(taskId: string, status: TaskStatus, attempt?: number): TaskRecord {
     const task = this.getTask(taskId)
     if (task.status !== status) assertTransition(task.status, status)
@@ -563,11 +577,37 @@ export class AppStore {
   }
 
   clearTaskWorktree(taskId: string): TaskRecord {
-    const now = new Date().toISOString()
     this.database
-      .prepare('UPDATE tasks SET worktree_path = NULL, updated_at = ? WHERE id = ?')
-      .run(now, taskId)
+      .prepare('UPDATE tasks SET worktree_path = NULL WHERE id = ?')
+      .run(taskId)
     return this.getTask(taskId)
+  }
+
+  clearTaskBranch(taskId: string): TaskRecord {
+    this.database
+      .prepare('UPDATE tasks SET branch_name = NULL WHERE id = ?')
+      .run(taskId)
+    return this.getTask(taskId)
+  }
+
+  getRuntimeArtifactRetentionDays(): RuntimeArtifactRetentionDays {
+    const row = this.database
+      .prepare("SELECT value FROM app_settings WHERE key = 'runtime_artifact_retention_days'")
+      .get() as Row | undefined
+    const value = Number(row?.value ?? 30)
+    return ([0, 7, 30, 90] as const).includes(value as RuntimeArtifactRetentionDays)
+      ? value as RuntimeArtifactRetentionDays
+      : 30
+  }
+
+  setRuntimeArtifactRetentionDays(days: RuntimeArtifactRetentionDays): RuntimeArtifactRetentionDays {
+    this.database
+      .prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('runtime_artifact_retention_days', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `)
+      .run(String(days))
+    return this.getRuntimeArtifactRetentionDays()
   }
 
   getRuntimeSession(taskId: string): RuntimeSessionRecord | null {
@@ -719,6 +759,18 @@ export class AppStore {
           .prepare(`SELECT ${runtimeEvidenceColumns} FROM runtime_evidence ORDER BY created_at DESC`)
           .all() as Row[])
     return rows.map(runtimeEvidenceFromRow)
+  }
+
+  deleteRuntimeData(taskId: string): void {
+    this.database.exec('BEGIN')
+    try {
+      this.database.prepare('DELETE FROM runtime_evidence WHERE task_id = ?').run(taskId)
+      this.database.prepare('DELETE FROM runtime_sessions WHERE task_id = ?').run(taskId)
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
   }
 
   recoverInterruptedTasks(): TaskRecord[] {

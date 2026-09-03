@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -944,6 +944,81 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     await expect(stat(runtimeSessionPath)).rejects.toThrow()
     expect((await stat(fixture.repository)).isDirectory()).toBe(true)
     expect(fixture.store.getSnapshot().projects).toEqual([])
+    fixture.store.close()
+  })
+
+  it('discards the worktree immediately and keeps runtime evidence until its retention expires', async () => {
+    const fixture = await createApprovalFixture()
+    const task = fixture.store.getTask(fixture.taskId)
+    const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
+    const evidencePath = join(runtimeSessionPath, 'evidence', 'screen.png')
+    await mkdir(join(runtimeSessionPath, 'evidence'), { recursive: true })
+    await writeFile(evidencePath, 'runtime-evidence')
+    fixture.store.setRuntimeSession(task.id, 'stopped', { message: '검증 증거 보관 중' })
+    fixture.store.addRuntimeEvidence(task.id, {
+      kind: 'screen',
+      path: evidencePath,
+      mimeType: 'image/png',
+      sizeBytes: 16,
+      createdAt: new Date().toISOString()
+    })
+
+    await fixture.runner.discard(task.id)
+
+    expect(fixture.store.getTask(task.id)).toMatchObject({ status: 'discarded', worktreePath: null })
+    await expect(stat(fixture.worktreePath)).rejects.toThrow()
+    expect((await stat(evidencePath)).isFile()).toBe(true)
+    expect(fixture.store.getRuntimeSession(task.id)).not.toBeNull()
+
+    const branchBeforeCleanup = await execFileAsync(
+      'git',
+      ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`],
+      { cwd: fixture.repository }
+    )
+    expect(branchBeforeCleanup.stderr).toBe('')
+
+    await fixture.runner.setStoragePolicy({ runtimeArtifactRetentionDays: 0 })
+    const cleanup = await fixture.runner.cleanupStorage({ removeLocalBranches: true })
+
+    expect(cleanup.runtimeArtifactsRemoved).toBe(1)
+    expect(cleanup.branchesRemoved).toBe(1)
+    expect(cleanup.bytesReclaimed).toBeGreaterThan(0)
+    await expect(stat(runtimeSessionPath)).rejects.toThrow()
+    expect(fixture.store.getRuntimeSession(task.id)).toBeNull()
+    expect(fixture.store.listRuntimeEvidence(task.projectId)).toEqual([])
+    expect(fixture.store.getTask(task.id).branchName).toBeNull()
+    await expect(
+      execFileAsync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${task.branchName}`], {
+        cwd: fixture.repository
+      })
+    ).rejects.toThrow()
+    fixture.store.close()
+  })
+
+  it('reconciles missing database pointers and unreferenced managed worktrees', async () => {
+    const fixture = await createApprovalFixture()
+    const worktreesRoot = dirname(fixture.worktreePath)
+    const missingTask = fixture.store.createTask(
+      fixture.store.getTask(fixture.taskId).projectId,
+      '사라진 작업공간',
+      '앱 재시작 시 남은 경로 정보를 안전하게 복구한다.',
+      1
+    )
+    fixture.store.setTaskWorkspace(
+      missingTask.id,
+      'agentmonitor/missing-worktree',
+      join(worktreesRoot, 'missing-worktree')
+    )
+    const orphanPath = join(worktreesRoot, 'orphan-project', 'orphan-task')
+    await mkdir(orphanPath, { recursive: true })
+    await writeFile(join(orphanPath, 'orphan.txt'), 'orphan')
+
+    const cleanup = await fixture.runner.reconcileStorage()
+
+    expect(cleanup.worktreesRemoved).toBe(1)
+    expect(fixture.store.getTask(missingTask.id).worktreePath).toBeNull()
+    await expect(stat(orphanPath)).rejects.toThrow()
+    expect((await stat(fixture.worktreePath)).isDirectory()).toBe(true)
     fixture.store.close()
   })
 })

@@ -14,6 +14,7 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  HardDrive,
   GitCompareArrows,
   GitBranch,
   Image as ImageIcon,
@@ -70,6 +71,9 @@ import type {
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   RuntimeUiAction,
+  RuntimeArtifactRetentionDays,
+  StorageCleanupResult,
+  StorageOverview,
   TaskChanges,
   TaskRecord,
   TaskStatus,
@@ -189,6 +193,7 @@ function shortDate(value: string): string {
 function formatBytes(value: number): string {
   if (value < 1_024) return `${value} B`
   if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KB`
+  if (value >= 1_024 * 1_024 * 1_024) return `${(value / (1_024 * 1_024 * 1_024)).toFixed(1)} GB`
   return `${(value / (1_024 * 1_024)).toFixed(1)} MB`
 }
 
@@ -231,6 +236,7 @@ export function App(): React.JSX.Element {
   const [noteModal, setNoteModal] = useState(false)
   const [editingNote, setEditingNote] = useState<NoteRecord | null>(null)
   const [searchModal, setSearchModal] = useState(false)
+  const [storageModal, setStorageModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null)
   const [taskChanges, setTaskChanges] = useState<TaskChanges | null>(null)
   const [inspection, setInspection] = useState<ProjectInspection | null>(null)
@@ -308,6 +314,7 @@ export function App(): React.JSX.Element {
       }
       if (event.key === 'Escape') {
         setSearchModal(false)
+        setStorageModal(false)
         setTaskModal(false)
         setNoteModal(false)
         setEditingNote(null)
@@ -525,6 +532,7 @@ export function App(): React.JSX.Element {
         onProject={selectProject}
         onAddProject={addProject}
         onSearch={() => setSearchModal(true)}
+        onStorage={() => setStorageModal(true)}
         onFeedback={() => void bridge.openFeedback().catch((feedbackError) => setError(String(feedbackError)))}
       />
 
@@ -660,6 +668,9 @@ export function App(): React.JSX.Element {
             setSearchModal(false)
           }}
         />
+      )}
+      {storageModal && (
+        <StorageModal onClose={() => setStorageModal(false)} />
       )}
       {selectedTask && (
         <TaskDrawer
@@ -1007,6 +1018,7 @@ function Sidebar({
   onProject,
   onAddProject,
   onSearch,
+  onStorage,
   onFeedback
 }: {
   snapshot: DashboardSnapshot
@@ -1018,6 +1030,7 @@ function Sidebar({
   onProject: (id: string) => void
   onAddProject: () => void
   onSearch: () => void
+  onStorage: () => void
   onFeedback: () => void
 }): React.JSX.Element {
   const activeCount = snapshot.tasks.filter(isActiveTask).length
@@ -1092,6 +1105,10 @@ function Sidebar({
         실제 Git 프로젝트 추가
       </button>
 
+      <button className="storage-button" onClick={onStorage}>
+        <HardDrive size={14} />
+        저장 공간
+      </button>
       <button className="feedback-button" onClick={onFeedback}>
         <MessageSquare size={14} />
         앱 피드백
@@ -1481,6 +1498,154 @@ function Modal({ title, description, onClose, children, wide = false }: { title:
   )
 }
 
+function StorageModal({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const [overview, setOverview] = useState<StorageOverview | null>(null)
+  const [retentionDays, setRetentionDays] = useState<RuntimeArtifactRetentionDays>(30)
+  const [removeLocalBranches, setRemoveLocalBranches] = useState(false)
+  const [result, setResult] = useState<StorageCleanupResult | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
+
+  const refresh = useCallback(async (): Promise<void> => {
+    setLoading(true)
+    setStorageError(null)
+    try {
+      const next = await bridge.getStorageOverview()
+      setOverview(next)
+      setRetentionDays(next.policy.runtimeArtifactRetentionDays)
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const savePolicy = async (): Promise<void> => {
+    setBusy(true)
+    setStorageError(null)
+    setResult(null)
+    try {
+      setOverview(await bridge.setStoragePolicy({ runtimeArtifactRetentionDays: retentionDays }))
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const cleanup = async (): Promise<void> => {
+    const warning = removeLocalBranches
+      ? '완료·폐기 작업의 agentmonitor 로컬 브랜치도 삭제합니다. 폐기한 변경은 복구할 수 없습니다. 계속할까요?'
+      : '현재 보관 정책이 지난 실행 증거와 사용하지 않는 격리 작업공간을 정리할까요?'
+    if (!window.confirm(warning)) return
+    setBusy(true)
+    setStorageError(null)
+    setResult(null)
+    try {
+      await bridge.setStoragePolicy({ runtimeArtifactRetentionDays: retentionDays })
+      const cleanupResult = await bridge.cleanupStorage({ removeLocalBranches })
+      setResult(cleanupResult)
+      setOverview(cleanupResult.overview)
+    } catch (error) {
+      setStorageError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal
+      wide
+      title="저장 공간 관리"
+      description="격리 작업공간은 작업 상태에 맞춰 정리하고, 실행 증거는 선택한 기간 동안 보관합니다."
+      onClose={onClose}
+    >
+      <div className="storage-manager">
+        {loading && <div className="storage-loading"><LoaderCircle className="spin" size={16} />사용량 계산 중</div>}
+        {!loading && overview && (
+          <>
+            <div className="storage-summary">
+              <article>
+                <span>전체 사용량</span>
+                <strong>{formatBytes(overview.totalBytes)}</strong>
+                <small>{timeAgo(overview.scannedAt)} 확인</small>
+              </article>
+              <article>
+                <span>격리 작업공간</span>
+                <strong>{formatBytes(overview.worktreeBytes)}</strong>
+                <small>{overview.worktreeCount}개 · 승인·폐기 시 즉시 정리</small>
+              </article>
+              <article>
+                <span>실행 증거 · 빌드</span>
+                <strong>{formatBytes(overview.runtimeArtifactBytes)}</strong>
+                <small>{overview.runtimeArtifactCount}개 작업 기록</small>
+              </article>
+            </div>
+
+            <section className="storage-policy">
+              <div>
+                <strong>Simulator 실행 기록 보관</strong>
+                <p>화면 캡처, 접근성 트리, UI 조작 결과와 작업별 DerivedData를 보관합니다.</p>
+              </div>
+              <select
+                aria-label="Simulator 실행 기록 보관 기간"
+                value={retentionDays}
+                onChange={(event) => setRetentionDays(Number(event.target.value) as RuntimeArtifactRetentionDays)}
+              >
+                <option value={0}>작업 종료 후 바로 삭제</option>
+                <option value={7}>7일</option>
+                <option value={30}>30일 (기본값)</option>
+                <option value={90}>90일</option>
+              </select>
+              <button className="secondary-button" disabled={busy} onClick={() => void savePolicy()}>
+                {busy ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}정책 저장
+              </button>
+            </section>
+
+            <label className="branch-cleanup-option">
+              <input
+                type="checkbox"
+                checked={removeLocalBranches}
+                onChange={(event) => setRemoveLocalBranches(event.target.checked)}
+              />
+              <span>
+                <strong>완료·폐기된 로컬 작업 브랜치도 삭제</strong>
+                <small>대상 {overview.branchCandidateCount}개 · 폐기 작업의 미병합 변경은 복구할 수 없습니다.</small>
+              </span>
+            </label>
+
+            <div className="storage-cleanup-row">
+              <div>
+                <strong>지금 정리할 항목 {overview.cleanupCandidateCount}개</strong>
+                <p>실행 중이거나 다시 실행할 수 있는 실패·중단 작업은 자동으로 삭제하지 않습니다.</p>
+              </div>
+              <button className="primary-button" disabled={busy} onClick={() => void cleanup()}>
+                {busy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}지금 정리
+              </button>
+            </div>
+          </>
+        )}
+        {result && (
+          <div className={`storage-result${result.warnings.length > 0 ? ' warning' : ''}`} role="status">
+            <CheckCircle2 size={15} />
+            <div>
+              <strong>{formatBytes(result.bytesReclaimed)} 확보했습니다.</strong>
+              <p>작업공간 {result.worktreesRemoved}개 · 실행 기록 {result.runtimeArtifactsRemoved}개 · 브랜치 {result.branchesRemoved}개 정리</p>
+              {result.warnings.map((warning) => <small key={warning}>{warning}</small>)}
+            </div>
+          </div>
+        )}
+        {storageError && <div className="storage-error" role="alert"><AlertTriangle size={14} />{storageError}</div>}
+      </div>
+    </Modal>
+  )
+}
+
 function TaskModal({
   project,
   onClose,
@@ -1851,6 +2016,7 @@ function TaskDrawer({
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
+          {['failed', 'stopped'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
           {task.status === 'awaiting_approval' && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />원본에 적용</button></>}
         </footer>

@@ -140,7 +140,11 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗한지 확인하고, worktree 변경을 작업 브랜치에 커밋한 뒤 현재 로컬 브랜치에 `git merge --ff-only`로 반영한다. 원본이 dirty하거나 브랜치가 분기되었으면 상태를 `awaiting_approval`로 유지하고 적용을 중단한다.
 
-성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. 작업 브랜치는 승인 후에도 로컬 감사 기록으로 남기며 원격 push는 수행하지 않는다.
+성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. 실패·중단 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
+
+앱 시작 시 DB가 가리키는 worktree가 실제로 존재하는지 확인하고, 끊어진 포인터와 앱 관리 경로 안의 고아 디렉터리를 정리한다. 작업 브랜치는 기본적으로 로컬 감사·복구 기록으로 남긴다. 사용자가 저장 공간 화면에서 명시적으로 선택한 경우에만 완료 작업은 `git branch -d`, 폐기 작업은 `git branch -D`로 삭제하며 원격 브랜치는 건드리지 않는다.
+
+Simulator 실행 증거와 DerivedData는 기본 30일 보관한다. 사용자는 0·7·30·90일 중 하나를 선택할 수 있다. 보관 기간 정리는 `completed`·`discarded` 작업에만 적용하고, 재실행할 수 있는 `failed`·`stopped` 작업의 자료는 자동 삭제하지 않는다. 프로젝트 연결을 삭제할 때는 보관 기간과 관계없이 해당 프로젝트의 runtime 자료를 제거한다.
 
 ## 데이터 모델
 
@@ -153,6 +157,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 | `notes` | 사람의 결정과 프로젝트 문맥 |
 | `runtime_sessions` | 작업별 Simulator 단계, 기기, 앱, PID와 진단 |
 | `runtime_evidence` | 작업별 실행 ID·시도·판정 결과와 화면·접근성·UI action·Debug state·fixture·runtime verification 증거의 로컬 경로, MIME type, 크기와 생성 시각 |
+| `app_settings` | Simulator 실행 기록 보관 기간 등 앱 전체 로컬 설정 |
 
 대시보드의 수치와 최근 활동은 `events`, `tasks`, `findings`에서 계산한다. JSONL 원문 전체 대신 UI에 필요한 redacted 메시지만 최대 길이를 제한해 저장한다.
 

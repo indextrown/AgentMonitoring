@@ -292,3 +292,23 @@ test('removes monitoring data while preserving the source-repository boundary', 
   await page.getByRole('button', { name: '연결 삭제' }).click()
   await expect(page.getByRole('heading', { name: '첫 Git 프로젝트를 연결하세요' })).toBeVisible()
 })
+
+test('shows storage usage and runs retention-based cleanup', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: '저장 공간' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: '저장 공간 관리' })).toBeVisible()
+  await expect(dialog.getByText('610.0 MB')).toBeVisible()
+  await expect(dialog.getByText('승인·폐기 시 즉시 정리')).toBeVisible()
+  await dialog.getByLabel('Simulator 실행 기록 보관 기간').selectOption('7')
+  await dialog.getByRole('button', { name: '정책 저장' }).click()
+
+  page.once('dialog', async (confirmation) => {
+    expect(confirmation.message()).toContain('현재 보관 정책')
+    await confirmation.accept()
+  })
+  await dialog.getByRole('button', { name: '지금 정리' }).click()
+  await expect(dialog.getByText('256.0 MB 확보했습니다.')).toBeVisible()
+  await expect(dialog.getByText('작업공간 1개 · 실행 기록 2개 · 브랜치 0개 정리')).toBeVisible()
+})

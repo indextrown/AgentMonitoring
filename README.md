@@ -259,6 +259,10 @@ AgentMonitoring은 Electron의 `userData` 아래에 다음 데이터를 저장�
 | Swift 빌드 | `runtime-sessions/<task-id>/DerivedData`에 작업별 산출물을 저장해요. |
 | 실행 증거 | `runtime-sessions/<task-id>/evidence`에 화면과 JSON 결과를 저장해요. |
 
+승인하거나 폐기한 작업의 격리 worktree는 바로 지워요. 실패하거나 중단한 작업은 다시 실행할 수 있도록 유지하며, 더 이상 필요하지 않으면 작업 상세에서 **폐기**할 수 있어요.
+
+Simulator 실행 기록은 기본 30일 동안 보관해요. 왼쪽 아래 **저장 공간**에서 보관 기간을 즉시 삭제·7일·30일·90일 중 선택하고, 현재 사용량을 확인하거나 오래된 기록을 바로 정리할 수 있어요. 완료·폐기된 `agentmonitor/*` 로컬 브랜치는 복구 가능성을 위해 자동으로 지우지 않으며 같은 화면에서 선택해 정리해요.
+
 AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우드로 전송하는 자체 백엔드가 없어요. 다만 Codex가 처리하는 코드와 실행 증거에는 로그인한 ChatGPT 계정과 조직의 데이터 정책이 적용돼요.
 
 화면은 Reviewer의 이미지 입력으로 전달할 수 있어요. 접근성·Debug 상태·fixture 결과는 길이를 제한해 Reviewer에게 전달해요. 실제 서비스 토큰, 비밀번호와 고객 데이터를 테스트 fixture나 Debug 상태에 넣지 마세요.

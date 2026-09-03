@@ -289,6 +289,7 @@ let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
       runtimeEvidence: []
     }
   : buildSnapshot()
+let runtimeArtifactRetentionDays: 0 | 7 | 30 | 90 = 30
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
 let demoAuth: CodexAuthStatus = searchParams.get('auth') === 'signed-out'
@@ -597,6 +598,39 @@ export const demoBridge: AgentMonitoringBridge = {
     const task = updateTask(taskId, 'discarded', { worktreePath: null })
     emit(task, 'task_discarded', 'human', `${task.title} 변경 폐기`)
   },
+  getStorageOverview: async () => ({
+    policy: { runtimeArtifactRetentionDays },
+    worktreeBytes: 184 * 1_024 * 1_024,
+    runtimeArtifactBytes: 426 * 1_024 * 1_024,
+    totalBytes: 610 * 1_024 * 1_024,
+    worktreeCount: 2,
+    runtimeArtifactCount: 7,
+    cleanupCandidateCount: 3,
+    branchCandidateCount: 4,
+    scannedAt: new Date().toISOString()
+  }),
+  setStoragePolicy: async (policy) => {
+    runtimeArtifactRetentionDays = policy.runtimeArtifactRetentionDays
+    return demoBridge.getStorageOverview()
+  },
+  cleanupStorage: async (input) => ({
+    worktreesRemoved: 1,
+    runtimeArtifactsRemoved: 2,
+    branchesRemoved: input.removeLocalBranches ? 4 : 0,
+    bytesReclaimed: 256 * 1_024 * 1_024,
+    warnings: [],
+    overview: {
+      policy: { runtimeArtifactRetentionDays },
+      worktreeBytes: 0,
+      runtimeArtifactBytes: 354 * 1_024 * 1_024,
+      totalBytes: 354 * 1_024 * 1_024,
+      worktreeCount: 0,
+      runtimeArtifactCount: 5,
+      cleanupCandidateCount: 0,
+      branchCandidateCount: input.removeLocalBranches ? 0 : 4,
+      scannedAt: new Date().toISOString()
+    }
+  }),
   setFindingResolved: async (findingId, resolved) => {
     let updated: DashboardSnapshot['findings'][number] | undefined
     state = {
