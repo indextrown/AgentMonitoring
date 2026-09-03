@@ -26,6 +26,14 @@ export type EventKind =
   | 'task_timed_out'
   | 'task_recovered'
   | 'task_discarded'
+  | 'runtime_started'
+  | 'runtime_ready'
+  | 'runtime_acted'
+  | 'runtime_observed'
+  | 'runtime_verified'
+  | 'runtime_repair_started'
+  | 'runtime_failed'
+  | 'runtime_stopped'
   | 'project_created'
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low'
@@ -121,6 +129,48 @@ export interface TaskRecord {
   updatedAt: string
 }
 
+export type RuntimeSessionStatus =
+  | 'preparing'
+  | 'booting'
+  | 'building'
+  | 'installing'
+  | 'launching'
+  | 'acting'
+  | 'observing'
+  | 'verifying'
+  | 'running'
+  | 'failed'
+  | 'stopped'
+
+export interface RuntimeSessionRecord {
+  taskId: string
+  projectId: string
+  status: RuntimeSessionStatus
+  adapterKind: 'ios-simulator'
+  deviceId: string | null
+  deviceName: string | null
+  bundleIdentifier: string | null
+  processId: number | null
+  message: string
+  startedAt: string
+  updatedAt: string
+}
+
+export interface RuntimeEvidenceRecord {
+  id: string
+  taskId: string
+  projectId: string
+  runId: string
+  attempt: number
+  kind: 'screen' | 'accessibility' | 'ui-actions' | 'debug-state' | 'runtime-verification'
+  outcome: 'captured' | 'passed' | 'failed'
+  summary: string | null
+  path: string
+  mimeType: 'image/png' | 'application/json'
+  sizeBytes: number
+  createdAt: string
+}
+
 export interface EventRecord {
   id: number
   projectId: string
@@ -174,6 +224,8 @@ export interface DashboardSnapshot {
   events: EventRecord[]
   findings: FindingRecord[]
   notes: NoteRecord[]
+  runtimeSessions: RuntimeSessionRecord[]
+  runtimeEvidence: RuntimeEvidenceRecord[]
 }
 
 export interface CreateTaskInput {

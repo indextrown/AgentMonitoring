@@ -257,6 +257,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const codexCommand = await resolveCodexCommand()
   store = new AppStore(databasePath)
   store.recoverInterruptedTasks()
+  store.recoverInterruptedRuntimeSessions()
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
   runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
   registerIpc()

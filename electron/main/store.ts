@@ -7,6 +7,9 @@ import type {
   FindingRecord,
   NoteRecord,
   ProjectRecord,
+  RuntimeEvidenceRecord,
+  RuntimeSessionRecord,
+  RuntimeSessionStatus,
   Severity,
   TaskRecord,
   TaskStatus,
@@ -70,6 +73,35 @@ const noteColumns = `
   created_at AS createdAt
 `
 
+const runtimeSessionColumns = `
+  task_id AS taskId,
+  project_id AS projectId,
+  status,
+  adapter_kind AS adapterKind,
+  device_id AS deviceId,
+  device_name AS deviceName,
+  bundle_identifier AS bundleIdentifier,
+  process_id AS processId,
+  message,
+  started_at AS startedAt,
+  updated_at AS updatedAt
+`
+
+const runtimeEvidenceColumns = `
+  id,
+  task_id AS taskId,
+  project_id AS projectId,
+  run_id AS runId,
+  attempt,
+  kind,
+  outcome,
+  summary,
+  path,
+  mime_type AS mimeType,
+  size_bytes AS sizeBytes,
+  created_at AS createdAt
+`
+
 function projectFromRow(row: Row): ProjectRecord {
   return {
     id: String(row.id),
@@ -130,6 +162,39 @@ function noteFromRow(row: Row): NoteRecord {
     projectId: String(row.projectId),
     title: String(row.title),
     body: String(row.body),
+    createdAt: String(row.createdAt)
+  }
+}
+
+function runtimeSessionFromRow(row: Row): RuntimeSessionRecord {
+  return {
+    taskId: String(row.taskId),
+    projectId: String(row.projectId),
+    status: String(row.status) as RuntimeSessionStatus,
+    adapterKind: 'ios-simulator',
+    deviceId: row.deviceId ? String(row.deviceId) : null,
+    deviceName: row.deviceName ? String(row.deviceName) : null,
+    bundleIdentifier: row.bundleIdentifier ? String(row.bundleIdentifier) : null,
+    processId: row.processId === null || row.processId === undefined ? null : Number(row.processId),
+    message: String(row.message),
+    startedAt: String(row.startedAt),
+    updatedAt: String(row.updatedAt)
+  }
+}
+
+function runtimeEvidenceFromRow(row: Row): RuntimeEvidenceRecord {
+  return {
+    id: String(row.id),
+    taskId: String(row.taskId),
+    projectId: String(row.projectId),
+    runId: String(row.runId),
+    attempt: Math.max(1, Number(row.attempt) || 1),
+    kind: String(row.kind) as RuntimeEvidenceRecord['kind'],
+    outcome: String(row.outcome) as RuntimeEvidenceRecord['outcome'],
+    summary: row.summary ? String(row.summary) : null,
+    path: String(row.path),
+    mimeType: String(row.mimeType) as RuntimeEvidenceRecord['mimeType'],
+    sizeBytes: Number(row.sizeBytes),
     createdAt: String(row.createdAt)
   }
 }
@@ -204,13 +269,64 @@ export class AppStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS runtime_sessions (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        adapter_kind TEXT NOT NULL,
+        device_id TEXT,
+        device_name TEXT,
+        bundle_identifier TEXT,
+        process_id INTEGER,
+        message TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS runtime_evidence (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL DEFAULT 'legacy',
+        attempt INTEGER NOT NULL DEFAULT 1,
+        kind TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'captured',
+        summary TEXT,
+        path TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_project_created
         ON tasks(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_project_created
         ON events(project_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_findings_project_created
         ON findings(project_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_runtime_sessions_project_updated
+        ON runtime_sessions(project_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_runtime_evidence_task_created
+        ON runtime_evidence(task_id, created_at DESC);
     `)
+
+    const runtimeEvidenceColumnNames = new Set(
+      (this.database.prepare('PRAGMA table_info(runtime_evidence)').all() as Row[]).map((row) =>
+        String(row.name)
+      )
+    )
+    if (!runtimeEvidenceColumnNames.has('run_id')) {
+      this.database.exec("ALTER TABLE runtime_evidence ADD COLUMN run_id TEXT NOT NULL DEFAULT 'legacy'")
+    }
+    if (!runtimeEvidenceColumnNames.has('attempt')) {
+      this.database.exec('ALTER TABLE runtime_evidence ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+    }
+    if (!runtimeEvidenceColumnNames.has('outcome')) {
+      this.database.exec("ALTER TABLE runtime_evidence ADD COLUMN outcome TEXT NOT NULL DEFAULT 'captured'")
+    }
+    if (!runtimeEvidenceColumnNames.has('summary')) {
+      this.database.exec('ALTER TABLE runtime_evidence ADD COLUMN summary TEXT')
+    }
   }
 
   private removeLegacyDemoData(): void {
@@ -333,6 +449,157 @@ export class AppStore {
       .prepare('UPDATE tasks SET worktree_path = NULL, updated_at = ? WHERE id = ?')
       .run(now, taskId)
     return this.getTask(taskId)
+  }
+
+  getRuntimeSession(taskId: string): RuntimeSessionRecord | null {
+    const row = this.database
+      .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions WHERE task_id = ?`)
+      .get(taskId) as Row | undefined
+    return row ? runtimeSessionFromRow(row) : null
+  }
+
+  listRuntimeSessions(projectId?: string): RuntimeSessionRecord[] {
+    const rows = projectId
+      ? (this.database
+          .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions WHERE project_id = ? ORDER BY updated_at DESC`)
+          .all(projectId) as Row[])
+      : (this.database
+          .prepare(`SELECT ${runtimeSessionColumns} FROM runtime_sessions ORDER BY updated_at DESC`)
+          .all() as Row[])
+    return rows.map(runtimeSessionFromRow)
+  }
+
+  setRuntimeSession(
+    taskId: string,
+    status: RuntimeSessionStatus,
+    update: Partial<
+      Pick<RuntimeSessionRecord, 'deviceId' | 'deviceName' | 'bundleIdentifier' | 'processId' | 'message'>
+    > = {}
+  ): RuntimeSessionRecord {
+    const task = this.getTask(taskId)
+    const existing = this.getRuntimeSession(taskId)
+    const now = new Date().toISOString()
+    const next: RuntimeSessionRecord = {
+      taskId,
+      projectId: task.projectId,
+      status,
+      adapterKind: 'ios-simulator',
+      deviceId: 'deviceId' in update ? update.deviceId ?? null : existing?.deviceId ?? null,
+      deviceName: 'deviceName' in update ? update.deviceName ?? null : existing?.deviceName ?? null,
+      bundleIdentifier: 'bundleIdentifier' in update
+        ? update.bundleIdentifier ?? null
+        : existing?.bundleIdentifier ?? null,
+      processId: 'processId' in update ? update.processId ?? null : existing?.processId ?? null,
+      message: (update.message ?? existing?.message ?? '').slice(0, 8_000),
+      startedAt: status === 'preparing' && existing?.status !== 'preparing' ? now : existing?.startedAt ?? now,
+      updatedAt: now
+    }
+    this.database
+      .prepare(`
+        INSERT INTO runtime_sessions (
+          task_id, project_id, status, adapter_kind, device_id, device_name,
+          bundle_identifier, process_id, message, started_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          status = excluded.status,
+          adapter_kind = excluded.adapter_kind,
+          device_id = excluded.device_id,
+          device_name = excluded.device_name,
+          bundle_identifier = excluded.bundle_identifier,
+          process_id = excluded.process_id,
+          message = excluded.message,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        next.taskId,
+        next.projectId,
+        next.status,
+        next.adapterKind,
+        next.deviceId,
+        next.deviceName,
+        next.bundleIdentifier,
+        next.processId,
+        next.message,
+        next.startedAt,
+        next.updatedAt
+      )
+    return this.getRuntimeSession(taskId)!
+  }
+
+  recoverInterruptedRuntimeSessions(): RuntimeSessionRecord[] {
+    const interrupted = this.listRuntimeSessions().filter(
+      (session) => !['failed', 'stopped'].includes(session.status)
+    )
+    return interrupted.map((session) => {
+      const recovered = this.setRuntimeSession(session.taskId, 'stopped', {
+        message: '앱이 다시 시작되어 runtime session을 중단 상태로 복구했습니다.',
+        processId: null
+      })
+      this.addEvent(
+        session.projectId,
+        session.taskId,
+        'runtime_stopped',
+        'runtime',
+        recovered.message,
+        'low'
+      )
+      return recovered
+    })
+  }
+
+  addRuntimeEvidence(
+    taskId: string,
+    input: Pick<RuntimeEvidenceRecord, 'kind' | 'path' | 'mimeType' | 'sizeBytes' | 'createdAt'> &
+      Partial<Pick<RuntimeEvidenceRecord, 'runId' | 'outcome' | 'summary'>>
+  ): RuntimeEvidenceRecord {
+    const task = this.getTask(taskId)
+    const evidence: RuntimeEvidenceRecord = {
+      id: randomUUID(),
+      taskId,
+      projectId: task.projectId,
+      runId: input.runId ?? 'legacy',
+      attempt: Math.max(1, task.attempt),
+      outcome: input.outcome ?? 'captured',
+      summary: input.summary?.trim().slice(0, 1_000) || null,
+      kind: input.kind,
+      path: input.path,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      createdAt: input.createdAt
+    }
+    this.database
+      .prepare(`
+        INSERT INTO runtime_evidence (
+          id, task_id, project_id, run_id, attempt, kind, outcome, summary,
+          path, mime_type, size_bytes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        evidence.id,
+        evidence.taskId,
+        evidence.projectId,
+        evidence.runId,
+        evidence.attempt,
+        evidence.kind,
+        evidence.outcome,
+        evidence.summary,
+        evidence.path,
+        evidence.mimeType,
+        evidence.sizeBytes,
+        evidence.createdAt
+      )
+    return evidence
+  }
+
+  listRuntimeEvidence(projectId?: string): RuntimeEvidenceRecord[] {
+    const rows = projectId
+      ? (this.database
+          .prepare(`SELECT ${runtimeEvidenceColumns} FROM runtime_evidence WHERE project_id = ? ORDER BY created_at DESC`)
+          .all(projectId) as Row[])
+      : (this.database
+          .prepare(`SELECT ${runtimeEvidenceColumns} FROM runtime_evidence ORDER BY created_at DESC`)
+          .all() as Row[])
+    return rows.map(runtimeEvidenceFromRow)
   }
 
   recoverInterruptedTasks(): TaskRecord[] {
@@ -481,7 +748,9 @@ export class AppStore {
         tasks: [],
         events: [],
         findings: [],
-        notes: []
+        notes: [],
+        runtimeSessions: [],
+        runtimeEvidence: []
       }
     }
     const selectedProject = projects.find((project) => project.id === projectId) ?? projects[0]
@@ -501,7 +770,9 @@ export class AppStore {
         .prepare(`SELECT ${noteColumns} FROM notes WHERE project_id = ? ORDER BY created_at DESC`)
         .all(selectedProject.id) as Row[]
     ).map(noteFromRow)
+    const runtimeSessions = this.listRuntimeSessions(selectedProject.id)
+    const runtimeEvidence = this.listRuntimeEvidence(selectedProject.id)
 
-    return { projects, selectedProject, tasks, events, findings, notes }
+    return { projects, selectedProject, tasks, events, findings, notes, runtimeSessions, runtimeEvidence }
   }
 }

@@ -20,6 +20,10 @@ function atOffset(days: number, hours: number, minutes = 0): string {
 }
 
 function buildSnapshot(): DashboardSnapshot {
+  const runtimeRunning = searchParams.get('runtime') === 'running'
+  const runtimeDeviceName = searchParams.get('device') === 'iphone'
+    ? 'iPhone 16 Pro'
+    : 'iPad Pro 13-inch'
   const projects: ProjectRecord[] = [
     {
       id: projectId,
@@ -54,7 +58,7 @@ function buildSnapshot(): DashboardSnapshot {
       status: 'completed' as const,
       provider: 'codex' as const,
       maxAttempts: 3,
-      attempt: 1,
+      attempt: index === 31 && runtimeRunning ? 2 : 1,
       branchName: null,
       worktreePath: null,
       createdAt,
@@ -122,13 +126,153 @@ function buildSnapshot(): DashboardSnapshot {
     severity: kinds[index % kinds.length].includes('finding') ? 'medium' : null,
     createdAt: new Date(Date.now() - index * 38 * 60 * 1000).toISOString()
   }))
+  if (runtimeRunning) {
+    events.unshift({
+      id: 100,
+      projectId,
+      taskId: tasks[0].id,
+      kind: 'runtime_repair_started',
+      actor: 'orchestrator',
+      message: 'runtime 실패 증거를 Implementer에 전달 · 다음 시도 2/3',
+      severity: null,
+      createdAt: atOffset(0, 8, 46)
+    })
+  }
+  const runtimeSessions = runtimeRunning
+    ? [
+        {
+          taskId: tasks[0].id,
+          projectId,
+          status: 'running' as const,
+          adapterKind: 'ios-simulator' as const,
+          deviceId: '00000000-0000-0000-0000-000000000001',
+          deviceName: runtimeDeviceName,
+          bundleIdentifier: 'com.example.ElmwoodOnline',
+          processId: 43120,
+          message: `${runtimeDeviceName}에서 com.example.ElmwoodOnline 실행 완료 · PID 43120`,
+          startedAt: atOffset(0, 8, 30),
+          updatedAt: atOffset(0, 8, 58)
+        }
+      ]
+    : []
+  const runtimeEvidence = runtimeRunning
+    ? [
+        {
+          id: '00000000-0000-4000-8000-000000000101',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
+          kind: 'screen' as const,
+          outcome: 'captured' as const,
+          summary: '최종 Simulator 화면 캡처',
+          path: 'demo://runtime/evidence/screen-latest.png',
+          mimeType: 'image/png' as const,
+          sizeBytes: 1_284_192,
+          createdAt: atOffset(0, 8, 58)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000102',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
+          kind: 'accessibility' as const,
+          outcome: 'captured' as const,
+          summary: '접근성 요소 42개',
+          path: 'demo://runtime/evidence/accessibility-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 42_816,
+          createdAt: atOffset(0, 8, 59)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000103',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
+          kind: 'ui-actions' as const,
+          outcome: 'captured' as const,
+          summary: 'identifier UI 조작 2단계 성공',
+          path: 'demo://runtime/evidence/ui-actions-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 3_584,
+          createdAt: atOffset(0, 8, 57)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000104',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
+          kind: 'debug-state' as const,
+          outcome: 'captured' as const,
+          summary: 'fixture signed-in-home 적용 · 최종 Debug 상태 수집',
+          path: 'demo://runtime/evidence/debug-state-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 8_192,
+          createdAt: atOffset(0, 8, 56)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000105',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 2,
+          kind: 'runtime-verification' as const,
+          outcome: 'passed' as const,
+          summary: 'runtime acceptance 3/3 통과',
+          path: 'demo://runtime/evidence/runtime-verification-latest.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 2_048,
+          createdAt: atOffset(0, 9, 0)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000106',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 1,
+          kind: 'screen' as const,
+          outcome: 'captured' as const,
+          summary: '실패 시점 Simulator 화면 캡처',
+          path: 'demo://runtime/evidence/screen-attempt-1.png',
+          mimeType: 'image/png' as const,
+          sizeBytes: 1_192_640,
+          createdAt: atOffset(0, 8, 44)
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000107',
+          taskId: tasks[0].id,
+          projectId,
+          runId: 'demo-runtime-run-1',
+          attempt: 1,
+          kind: 'runtime-verification' as const,
+          outcome: 'failed' as const,
+          summary: 'runtime acceptance 2/3 통과 · 실패: 홈 탭 유지',
+          path: 'demo://runtime/evidence/runtime-verification-attempt-1.json',
+          mimeType: 'application/json' as const,
+          sizeBytes: 2_304,
+          createdAt: atOffset(0, 8, 45)
+        }
+      ]
+    : []
 
-  return { projects, selectedProject: projects[0], tasks, events, findings, notes }
+  return { projects, selectedProject: projects[0], tasks, events, findings, notes, runtimeSessions, runtimeEvidence }
 }
 
 const searchParams = new URLSearchParams(window.location.search)
 let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
-  ? { projects: [], selectedProject: null, tasks: [], events: [], findings: [], notes: [] }
+  ? {
+      projects: [],
+      selectedProject: null,
+      tasks: [],
+      events: [],
+      findings: [],
+      notes: [],
+      runtimeSessions: [],
+      runtimeEvidence: []
+    }
   : buildSnapshot()
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
@@ -202,7 +346,9 @@ export const demoBridge: AgentMonitoringBridge = {
       tasks: state.tasks.filter((task) => task.projectId === selectedProject.id),
       events: state.events.filter((event) => event.projectId === selectedProject.id),
       findings: state.findings.filter((finding) => finding.projectId === selectedProject.id),
-      notes: state.notes.filter((note) => note.projectId === selectedProject.id)
+      notes: state.notes.filter((note) => note.projectId === selectedProject.id),
+      runtimeSessions: state.runtimeSessions.filter((session) => session.projectId === selectedProject.id),
+      runtimeEvidence: state.runtimeEvidence.filter((evidence) => evidence.projectId === selectedProject.id)
     }
   },
   addProject: async () => {
@@ -239,6 +385,7 @@ export const demoBridge: AgentMonitoringBridge = {
     const dirty = connected && searchParams.get('inspection') === 'dirty'
     const hasTestCommand = Boolean(project.testCommand.trim())
     const hasIosContract = connected && searchParams.get('contract') === 'ios'
+    const deviceFamilyLabel = searchParams.get('device') === 'iphone' ? 'iPhone' : 'iPad'
     const dirtyFiles = [0, 1, 2, 3, 4].map((index) => ({
       kind: 'untracked' as const,
       path: `fastlane/screenshots/ko/${index}_APP_IPHONE_65_${index}.png`
@@ -272,7 +419,7 @@ export const demoBridge: AgentMonitoringBridge = {
             path: '.agentmonitor/project.json',
             state: 'valid' as const,
             adapterKind: 'ios-simulator' as const,
-            message: 'PopPang.xcworkspace · PopPang · Debug'
+            message: `PopPang.xcworkspace · PopPang · Debug · ${deviceFamilyLabel}`
           }
         : {
             path: '.agentmonitor/project.json',
@@ -287,16 +434,16 @@ export const demoBridge: AgentMonitoringBridge = {
           detail: `Git 추적 파일 ${connected ? 84 : '3,842'}개에 접근 가능`
         },
         hasIosContract
-          ? { key: 'build' as const, status: 'declared' as const, detail: 'PopPang Debug 빌드 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'build' as const, status: 'ready' as const, detail: 'PopPang Debug 빌드 adapter 사용 가능' }
           : { key: 'build' as const, status: 'missing' as const, detail: '프로젝트 계약에 빌드 방식이 없습니다.' },
         hasIosContract
-          ? { key: 'run' as const, status: 'declared' as const, detail: 'iOS Simulator 실행 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'run' as const, status: 'ready' as const, detail: `${deviceFamilyLabel} Simulator 실행 adapter 사용 가능` }
           : { key: 'run' as const, status: 'missing' as const, detail: '프로젝트 계약에 앱 실행 방식이 없습니다.' },
         hasIosContract
-          ? { key: 'observe' as const, status: 'declared' as const, detail: '화면 · 접근성 · 앱 상태 관찰 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'observe' as const, status: 'ready' as const, detail: 'Simulator 화면 캡처 · XCTest 접근성 트리 수집 · Debug bridge 앱 상태 수집 사용 가능' }
           : { key: 'observe' as const, status: 'missing' as const, detail: '화면·접근성·상태 관찰이 선언되지 않았습니다.' },
         hasIosContract
-          ? { key: 'act' as const, status: 'declared' as const, detail: 'UI · fixture 조작 계약 선언 · 실행 어댑터 연결 예정' }
+          ? { key: 'act' as const, status: 'ready' as const, detail: 'accessibility identifier UI 조작 2단계 · Debug fixture signed-in-home 적용 사용 가능' }
           : { key: 'act' as const, status: 'missing' as const, detail: 'UI·fixture 조작이 선언되지 않았습니다.' },
         hasTestCommand
           ? { key: 'verify' as const, status: 'ready' as const, detail: `검증 명령: ${project.testCommand.trim()}` }
@@ -316,7 +463,9 @@ export const demoBridge: AgentMonitoringBridge = {
       tasks: state.tasks.filter((task) => task.projectId !== projectIdToRemove),
       events: state.events.filter((event) => event.projectId !== projectIdToRemove),
       findings: state.findings.filter((finding) => finding.projectId !== projectIdToRemove),
-      notes: state.notes.filter((note) => note.projectId !== projectIdToRemove)
+      notes: state.notes.filter((note) => note.projectId !== projectIdToRemove),
+      runtimeSessions: state.runtimeSessions.filter((session) => session.projectId !== projectIdToRemove),
+      runtimeEvidence: state.runtimeEvidence.filter((evidence) => evidence.projectId !== projectIdToRemove)
     }
   },
   createTask: async (input) => {

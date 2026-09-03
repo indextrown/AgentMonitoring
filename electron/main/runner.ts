@@ -1,11 +1,24 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdir, stat } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { lstat, mkdir, rm, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
-import type { EventRecord, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
+import type { EventRecord, ProjectRecord, RuntimeSessionStatus, Severity, TaskChanges, TaskRecord } from '../../src/shared/types'
 import { isActiveTask } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import {
+  IosRuntimeStageError,
+  iosSimulatorRuntimeAdapter,
+  type IosSimulatorRuntimeAdapter,
+  type RuntimeCommandRequest
+} from './ios-simulator-runtime'
+import { readProjectCapabilityManifest } from './project-capabilities'
+import {
+  evaluateRuntimeAcceptance,
+  summarizeRuntimeAcceptance,
+  writeRuntimeAcceptanceEvidence
+} from './runtime-acceptance'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -39,6 +52,7 @@ interface ActiveRun {
 interface ProcessResult {
   code: number
   output: string
+  stdout: string
   finalMessage: string
 }
 
@@ -46,6 +60,18 @@ interface ProcessDeadline {
   timeoutMs: number
   label: string
 }
+
+interface RuntimeRunResult {
+  summary: string
+  reviewContext: string
+  imagePaths: string[]
+}
+
+const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
+const MAX_UI_ACTION_REVIEW_CHARS = 20_000
+const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
+const MAX_RUNTIME_VERIFICATION_REVIEW_CHARS = 40_000
+const MAX_RUNTIME_REPAIR_CONTEXT_CHARS = 120_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -62,6 +88,16 @@ export const DEFAULT_RUNNER_POLICY: RunnerPolicy = {
 class StoppedError extends Error {
   constructor() {
     super('사용자가 작업을 중단했습니다.')
+  }
+}
+
+class RuntimeAcceptanceStageError extends IosRuntimeStageError {
+  constructor(
+    message: string,
+    readonly repairContext: string,
+    readonly imagePaths: string[]
+  ) {
+    super('verifying', message)
   }
 }
 
@@ -141,7 +177,9 @@ function eventMessage(payload: Record<string, unknown>): string | null {
 
 export class AgentRunner {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly managedRuntimeTaskIds = new Set<string>()
   private readonly policy: RunnerPolicy
+  private readonly runtimeRoot: string
 
   constructor(
     private readonly store: AppStore,
@@ -149,9 +187,11 @@ export class AgentRunner {
     private readonly publish: (event: EventRecord) => void,
     private readonly codexCommand = 'codex',
     private readonly codexHome?: string,
-    policy: Partial<RunnerPolicy> = {}
+    policy: Partial<RunnerPolicy> = {},
+    private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
+    this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
   }
 
   isRunning(taskId: string): boolean {
@@ -288,6 +328,7 @@ export class AgentRunner {
       resolveDone = resolvePromise
     })
     const control: ActiveRun = { child: null, stopped: false, termination: null, done, resolveDone }
+    const runId = randomUUID()
     this.activeRuns.set(taskId, control)
 
     try {
@@ -324,12 +365,19 @@ export class AgentRunner {
       )
 
       let repairContext = ''
-      let testsPassed = false
+      let repairImagePaths: string[] = []
+      let automationPassed = false
+      let runtimeResult: RuntimeRunResult | null = null
       for (let attempt = 1; attempt <= task.maxAttempts; attempt += 1) {
         if (control.stopped) throw new StoppedError()
         if (attempt > 1) {
           this.store.transitionTask(taskId, 'running', attempt)
-          this.emit(task, 'agent', 'orchestrator', `자가 수정 ${attempt}/${task.maxAttempts} 시작`)
+          this.emit(
+            this.store.getTask(taskId),
+            'agent',
+            'orchestrator',
+            `자가 수정 ${attempt}/${task.maxAttempts} 시작`
+          )
         }
 
         await this.runCodexStage(
@@ -346,16 +394,50 @@ export class AgentRunner {
             repairContext
           ]
             .filter(Boolean)
-            .join('\n\n')
+            .join('\n\n'),
+          repairImagePaths
         )
 
         this.store.transitionTask(taskId, 'testing', attempt)
         this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 실행`)
         const testResult = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
         if (testResult.code === 0) {
-          testsPassed = true
           this.emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
-          break
+          try {
+            runtimeResult = await this.runRuntimeIfConfigured(
+              this.store.getTask(taskId),
+              project,
+              worktreePath,
+              control,
+              runId
+            )
+            automationPassed = true
+            break
+          } catch (error) {
+            if (!(error instanceof RuntimeAcceptanceStageError) || attempt >= task.maxAttempts) {
+              throw error
+            }
+            const currentTask = this.store.getTask(taskId)
+            await this.stopRuntimeSession(
+              currentTask,
+              'failed',
+              'runtime acceptance 실패 후 자가 수정을 위해 Simulator 앱을 정리했습니다.'
+            )
+            repairContext = [
+              '직전 runtime acceptance 검증이 실패했습니다.',
+              '아래 증거에서 기대값과 실제값의 차이를 찾아 제품 코드를 수정하세요.',
+              '합격 조건은 원본 checkout의 manifest에서 다시 읽으므로 assertion을 수정하거나 약화하지 마세요.',
+              error.repairContext
+            ].join('\n\n')
+            repairImagePaths = error.imagePaths
+            this.emit(
+              currentTask,
+              'runtime_repair_started',
+              'orchestrator',
+              `runtime 실패 증거를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
+            )
+          }
+          continue
         }
 
         this.emit(
@@ -369,9 +451,10 @@ export class AgentRunner {
           '직전 테스트가 실패했습니다. 아래 출력의 원인을 수정하고 기존 테스트를 유지하세요.',
           testResult.output.slice(-4_000)
         ].join('\n\n')
+        repairImagePaths = []
       }
 
-      if (!testsPassed) {
+      if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
         this.store.addFinding(task.projectId, task.id, `${task.title} 테스트가 재시도 한도를 초과했습니다.`, 'high')
         return
@@ -387,11 +470,21 @@ export class AgentRunner {
           `작업 목표: ${task.prompt}`,
           '당신은 최종 읽기 전용 Reviewer입니다.',
           '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+          runtimeResult
+            ? [
+                `Swift runtime 결과:\n${runtimeResult.summary}`,
+                runtimeResult.reviewContext
+              ].filter(Boolean).join('\n\n')
+            : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
+          runtimeResult?.imagePaths.length
+            ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
+            : '',
           '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
           '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
           '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
           '코드는 수정하지 마세요.'
-        ].join('\n\n')
+        ].filter(Boolean).join('\n\n'),
+        runtimeResult?.imagePaths ?? []
       )
       for (const finding of parseReviewerFindings(review.finalMessage)) {
         this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
@@ -403,13 +496,25 @@ export class AgentRunner {
     } catch (error) {
       const current = this.store.getTask(taskId)
       if (error instanceof StoppedError || control.stopped) {
+        await this.stopRuntimeSession(current, 'stopped', '사용자가 작업을 중단해 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
         this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
       } else if (error instanceof ProcessTimeoutError) {
+        await this.stopRuntimeSession(current, 'failed', '시간 초과로 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
         this.emit(current, 'task_timed_out', 'orchestrator', `시간 초과 · ${error.message}`, 'high')
         this.store.addFinding(current.projectId, current.id, `${current.title} · ${error.label} 시간 초과`, 'high')
+      } else if (error instanceof IosRuntimeStageError) {
+        await this.stopRuntimeSession(current, 'failed', error.message)
+        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+        this.store.addFinding(
+          current.projectId,
+          current.id,
+          `${current.title} · Swift runtime ${error.status} 단계 실패`,
+          'high'
+        )
       } else {
+        await this.stopRuntimeSession(current, 'failed', '작업 실패로 Simulator 앱을 종료했습니다.')
         if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
         this.emit(current, 'agent', 'orchestrator', `실행 실패 · ${redact(String(error))}`, 'high')
         this.store.addFinding(current.projectId, current.id, `${current.title} 실행 실패`, 'high')
@@ -434,6 +539,13 @@ export class AgentRunner {
     for (const control of controls) control.stopped = true
     await Promise.all(controls.map((control) => this.terminateControl(control)))
     await Promise.all(controls.map((control) => control.done))
+    for (const taskId of [...this.managedRuntimeTaskIds]) {
+      await this.stopRuntimeSession(
+        this.store.getTask(taskId),
+        'stopped',
+        'AgentMonitoring 종료로 Simulator 앱을 정리했습니다.'
+      )
+    }
   }
 
   async approve(taskId: string): Promise<void> {
@@ -441,6 +553,8 @@ export class AgentRunner {
     if (task.status !== 'awaiting_approval') throw new Error('승인 대기 중인 작업만 원본에 적용할 수 있습니다.')
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
+
+    await this.stopRuntimeSession(task, 'stopped', '작업 승인으로 Simulator 앱을 정리했습니다.')
 
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
@@ -508,6 +622,7 @@ export class AgentRunner {
   async discard(taskId: string): Promise<void> {
     const task = this.store.getTask(taskId)
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
+    await this.stopRuntimeSession(task, 'stopped', '작업 폐기로 Simulator 앱을 정리했습니다.')
     const discarded = this.store.transitionTask(taskId, 'discarded')
     this.emit(discarded, 'task_discarded', 'human', `${task.title} 변경 폐기`)
 
@@ -531,6 +646,10 @@ export class AgentRunner {
       projectAvailable = false
     }
 
+    for (const task of tasks) {
+      await this.stopRuntimeSession(task, 'stopped', '프로젝트 연결 삭제로 Simulator 앱을 정리했습니다.')
+    }
+
     if (projectAvailable) {
       for (const task of tasks) {
         if (!task.worktreePath) continue
@@ -546,7 +665,30 @@ export class AgentRunner {
       }
     }
 
+    for (const task of tasks) {
+      await this.removeRuntimeArtifacts(task.id)
+    }
+
     this.store.deleteProject(projectId)
+  }
+
+  private async removeRuntimeArtifacts(taskId: string): Promise<void> {
+    const runtimeRoot = resolve(this.runtimeRoot)
+    const sessionPath = resolve(runtimeRoot, taskId)
+    if (!sessionPath.startsWith(`${runtimeRoot}/`)) {
+      throw new Error('안전하지 않은 runtime session 정리 경로입니다.')
+    }
+    let stats: Awaited<ReturnType<typeof lstat>>
+    try {
+      stats = await lstat(sessionPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    await rm(sessionPath, {
+      recursive: stats.isDirectory() && !stats.isSymbolicLink(),
+      force: true
+    })
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {
@@ -579,7 +721,8 @@ export class AgentRunner {
     cwd: string,
     actor: string,
     sandbox: 'read-only' | 'workspace-write',
-    prompt: string
+    prompt: string,
+    imagePaths: string[] = []
   ): Promise<ProcessResult> {
     const control = this.activeRuns.get(task.id)
     if (!control || control.stopped) throw new StoppedError()
@@ -591,6 +734,7 @@ export class AgentRunner {
         ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
         'exec',
         '--json',
+        ...imagePaths.flatMap((path) => ['--image', path]),
         '--sandbox',
         sandbox,
         '--cd',
@@ -626,6 +770,364 @@ export class AgentRunner {
     })
   }
 
+  private async runRuntimeIfConfigured(
+    task: TaskRecord,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun,
+    runId: string
+  ): Promise<RuntimeRunResult | null> {
+    const manifest = await readProjectCapabilityManifest(project.path)
+    if (manifest.state === 'missing') return null
+    if (manifest.state === 'invalid') {
+      this.emit(
+        task,
+        'runtime_failed',
+        'runtime',
+        `Swift runtime 계약 오류로 앱 실행을 건너뜁니다. ${manifest.message}`,
+        'low'
+      )
+      return null
+    }
+    if (!manifest.value.capabilities.build || !manifest.value.capabilities.run) return null
+
+    const startMessage = '작업 전용 Swift runtime session을 준비합니다.'
+    this.store.setRuntimeSession(task.id, 'preparing', {
+      deviceId: null,
+      deviceName: null,
+      bundleIdentifier: null,
+      processId: null,
+      message: startMessage
+    })
+    this.managedRuntimeTaskIds.add(task.id)
+    this.emit(task, 'runtime_started', 'runtime', startMessage)
+
+    try {
+      const uiActions = manifest.value.capabilities.act.includes('ui')
+        ? manifest.value.runtimeScenario?.actions ?? []
+        : []
+      const debugBridge = manifest.value.debugBridge ?? null
+      const debugFixture = debugBridge && manifest.value.capabilities.act.includes('fixture')
+        ? manifest.value.runtimeScenario?.fixture ?? null
+        : null
+      const captureState = Boolean(
+        debugBridge && manifest.value.capabilities.observe.includes('state')
+      )
+      const result = await this.runtimeAdapter.launch({
+        taskId: task.id,
+        worktreePath,
+        runtimeRoot: this.runtimeRoot,
+        contract: manifest.value.adapter,
+        captureScreen: manifest.value.capabilities.observe.includes('screen'),
+        captureAccessibility: manifest.value.capabilities.observe.includes('accessibility'),
+        captureState,
+        uiActions,
+        debugBridge,
+        debugFixture,
+        execute: (request) => this.executeRuntimeCommand(request, control),
+        onProgress: (status, message, update = {}) => {
+          this.store.setRuntimeSession(task.id, status, { ...update, message })
+          this.emit(task, 'runtime_started', 'runtime', message)
+        }
+      })
+      if (manifest.value.capabilities.observe.includes('screen') && !result.screenEvidence) {
+        throw new IosRuntimeStageError('observing', '화면 관찰 계약이 활성화됐지만 화면 증거가 생성되지 않았습니다.')
+      }
+      if (
+        manifest.value.capabilities.observe.includes('accessibility') &&
+        !result.accessibilityEvidence
+      ) {
+        throw new IosRuntimeStageError(
+          'observing',
+          '접근성 관찰 계약이 활성화됐지만 접근성 트리가 생성되지 않았습니다.'
+        )
+      }
+      if (uiActions.length > 0 && !result.uiActionEvidence) {
+        throw new IosRuntimeStageError(
+          'acting',
+          'UI 조작 계약이 활성화됐지만 action 결과가 생성되지 않았습니다.'
+        )
+      }
+      if ((debugFixture || captureState) && !result.debugStateEvidence) {
+        throw new IosRuntimeStageError(
+          captureState ? 'observing' : 'acting',
+          'Debug state·fixture 계약이 활성화됐지만 bridge 증거가 생성되지 않았습니다.'
+        )
+      }
+      const imagePaths: string[] = []
+      if (result.screenEvidence) {
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
+          kind: 'screen',
+          path: result.screenEvidence.path,
+          mimeType: result.screenEvidence.mimeType,
+          sizeBytes: result.screenEvidence.sizeBytes,
+          createdAt: result.screenEvidence.capturedAt,
+          summary: '최종 Simulator 화면 캡처'
+        })
+        imagePaths.push(evidence.path)
+        this.emit(
+          task,
+          'runtime_observed',
+          'runtime',
+          `Simulator 화면 증거 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+        )
+      }
+      const reviewContexts: string[] = []
+      if (result.debugStateEvidence) {
+        const debugState = result.debugStateEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
+          kind: 'debug-state',
+          path: debugState.path,
+          mimeType: debugState.mimeType,
+          sizeBytes: debugState.sizeBytes,
+          createdAt: debugState.capturedAt,
+          summary: [
+            debugState.fixtureId ? `fixture ${debugState.fixtureId} 적용` : '',
+            debugState.hasState ? '최종 Debug 상태 수집' : ''
+          ].filter(Boolean).join(' · ')
+        })
+        if (debugState.fixtureId) {
+          this.emit(
+            task,
+            'runtime_acted',
+            'runtime',
+            `Simulator Debug fixture 적용 완료 · ${debugState.fixtureId} · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+          )
+        }
+        if (debugState.hasState) {
+          this.emit(
+            task,
+            'runtime_observed',
+            'runtime',
+            `Simulator Debug 앱 상태 저장 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+          )
+        }
+        const content = debugState.content.slice(0, MAX_DEBUG_STATE_REVIEW_CHARS)
+        reviewContexts.push([
+          '다음 JSON은 대상 앱의 Debug bridge가 확인한 fixture 적용 결과와 최종 내부 상태입니다. 코드·UI 증거와 함께 요구사항을 검토하세요.',
+          '```json',
+          content,
+          debugState.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+      }
+      if (result.uiActionEvidence) {
+        const actions = result.uiActionEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
+          kind: 'ui-actions',
+          path: actions.path,
+          mimeType: actions.mimeType,
+          sizeBytes: actions.sizeBytes,
+          createdAt: actions.executedAt,
+          summary: `identifier UI 조작 ${actions.actionCount.toLocaleString('ko-KR')}단계 성공`
+        })
+        this.emit(
+          task,
+          'runtime_acted',
+          'runtime',
+          `Simulator identifier UI 조작 완료 · ${actions.actionCount.toLocaleString('ko-KR')}단계 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes`
+        )
+        const content = actions.content.slice(0, MAX_UI_ACTION_REVIEW_CHARS)
+        reviewContexts.push([
+          `다음 JSON은 accessibility identifier로 순서대로 실행해 모두 성공한 UI 조작 결과입니다. (${actions.actionCount.toLocaleString('ko-KR')}단계)`,
+          '```json',
+          content,
+          actions.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+      }
+      if (result.accessibilityEvidence) {
+        const accessibility = result.accessibilityEvidence
+        const evidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
+          kind: 'accessibility',
+          path: accessibility.path,
+          mimeType: accessibility.mimeType,
+          sizeBytes: accessibility.sizeBytes,
+          createdAt: accessibility.capturedAt,
+          summary: `접근성 요소 ${accessibility.nodeCount.toLocaleString('ko-KR')}개${accessibility.truncated ? ' · 일부 생략' : ''}`
+        })
+        this.emit(
+          task,
+          'runtime_observed',
+          'runtime',
+          `Simulator 접근성 트리 저장 · ${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소 · ${evidence.sizeBytes.toLocaleString('ko-KR')} bytes${accessibility.truncated ? ' · 안전 제한으로 일부 생략' : ''}`
+        )
+        const content = accessibility.content.slice(0, MAX_ACCESSIBILITY_REVIEW_CHARS)
+        reviewContexts.push([
+          `다음 JSON은 실행 중인 앱의 접근성 트리입니다. identifier, label, value, frame, enabled·selected 상태와 계층을 이용해 요구사항과 화면 구조를 검토하세요. (${accessibility.nodeCount.toLocaleString('ko-KR')}개 요소${accessibility.truncated ? ', 수집 시 일부 생략' : ''})`,
+          '```json',
+          content,
+          accessibility.content.length > content.length ? '\n... Reviewer 입력 크기 제한으로 이하 생략' : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+      }
+      let verificationSummary = ''
+      const runtimeAssertions = manifest.value.capabilities.verify.includes('runtime-scenario')
+        ? manifest.value.runtimeScenario?.assertions ?? []
+        : []
+      if (runtimeAssertions.length > 0) {
+        const verifyMessage = `runtime acceptance ${runtimeAssertions.length.toLocaleString('ko-KR')}개를 평가합니다.`
+        this.store.setRuntimeSession(task.id, 'verifying', {
+          deviceId: result.deviceId,
+          deviceName: result.deviceName,
+          bundleIdentifier: result.bundleIdentifier,
+          processId: result.processId,
+          message: verifyMessage
+        })
+        this.emit(task, 'runtime_started', 'runtime', verifyMessage)
+
+        const report = evaluateRuntimeAcceptance(runtimeAssertions, result)
+        let verificationEvidence: Awaited<ReturnType<typeof writeRuntimeAcceptanceEvidence>>
+        try {
+          verificationEvidence = await writeRuntimeAcceptanceEvidence(
+            this.runtimeRoot,
+            task.id,
+            report
+          )
+        } catch (error) {
+          throw new IosRuntimeStageError(
+            'verifying',
+            `runtime acceptance 결과를 안전하게 저장하지 못했습니다. ${redact(String(error))}`
+          )
+        }
+        verificationSummary = summarizeRuntimeAcceptance(report)
+        const storedEvidence = this.store.addRuntimeEvidence(task.id, {
+          runId,
+          kind: 'runtime-verification',
+          path: verificationEvidence.path,
+          mimeType: verificationEvidence.mimeType,
+          sizeBytes: verificationEvidence.sizeBytes,
+          createdAt: verificationEvidence.createdAt,
+          outcome: report.passed ? 'passed' : 'failed',
+          summary: verificationSummary
+        })
+        this.emit(
+          task,
+          'runtime_verified',
+          'runtime',
+          `${verificationSummary} · ${storedEvidence.sizeBytes.toLocaleString('ko-KR')} bytes`,
+          report.passed ? null : 'high'
+        )
+        const content = verificationEvidence.content.slice(
+          0,
+          MAX_RUNTIME_VERIFICATION_REVIEW_CHARS
+        )
+        reviewContexts.push([
+          `다음 JSON은 선언된 runtime acceptance assertion을 증거와 결정적으로 비교한 결과입니다. (${report.passedCount.toLocaleString('ko-KR')}/${report.assertionCount.toLocaleString('ko-KR')} 통과)`,
+          '```json',
+          content,
+          verificationEvidence.content.length > content.length
+            ? '\n... Reviewer 입력 크기 제한으로 이하 생략'
+            : '',
+          '```'
+        ].filter(Boolean).join('\n'))
+        if (!report.passed) {
+          const failedReport = JSON.stringify({
+            ...report,
+            results: report.results.filter((item) => !item.passed)
+          }, null, 2)
+          const repairEvidence = [
+            `runtime 판정: ${verificationSummary}`,
+            '실패한 assertion 판정 JSON:',
+            failedReport,
+            '판정에 사용한 보조 runtime 증거:',
+            ...reviewContexts.slice(0, -1)
+          ].join('\n\n').slice(0, MAX_RUNTIME_REPAIR_CONTEXT_CHARS)
+          throw new RuntimeAcceptanceStageError(
+            verificationSummary,
+            repairEvidence,
+            [...imagePaths]
+          )
+        }
+      }
+      const message = [
+        `${result.deviceName}에서 ${result.bundleIdentifier} 실행 완료${result.processId ? ` · PID ${result.processId}` : ''}`,
+        result.screenEvidence ? '화면 증거 1개 저장' : '',
+        result.accessibilityEvidence
+          ? `접근성 요소 ${result.accessibilityEvidence.nodeCount.toLocaleString('ko-KR')}개 저장`
+          : '',
+        result.uiActionEvidence
+          ? `identifier UI 조작 ${result.uiActionEvidence.actionCount.toLocaleString('ko-KR')}단계 완료`
+          : '',
+        result.debugStateEvidence?.fixtureId
+          ? `Debug fixture ${result.debugStateEvidence.fixtureId} 적용`
+          : '',
+        result.debugStateEvidence?.hasState
+          ? 'Debug 앱 상태 저장'
+          : '',
+        verificationSummary
+      ].filter(Boolean).join(' · ')
+      this.store.setRuntimeSession(task.id, 'running', {
+        deviceId: result.deviceId,
+        deviceName: result.deviceName,
+        bundleIdentifier: result.bundleIdentifier,
+        processId: result.processId,
+        message
+      })
+      this.emit(task, 'runtime_ready', 'runtime', message)
+      return { summary: message, reviewContext: reviewContexts.join('\n\n'), imagePaths }
+    } catch (error) {
+      if (error instanceof StoppedError) throw error
+      if (error instanceof ProcessTimeoutError) {
+        this.emit(task, 'runtime_failed', 'runtime', error.message, 'high')
+        throw error
+      }
+      const runtimeError = error instanceof IosRuntimeStageError
+        ? error
+        : new IosRuntimeStageError('failed', redact(String(error)))
+      this.emit(task, 'runtime_failed', 'runtime', runtimeError.message, 'high')
+      throw runtimeError
+    }
+  }
+
+  private async executeRuntimeCommand(
+    request: RuntimeCommandRequest,
+    control: ActiveRun | null
+  ): Promise<ProcessResult> {
+    return this.runProcess(
+      request.command,
+      request.args,
+      request.cwd,
+      control,
+      undefined,
+      process.env,
+      { timeoutMs: request.timeoutMs, label: request.label }
+    )
+  }
+
+  private async stopRuntimeSession(
+    task: TaskRecord,
+    status: Extract<RuntimeSessionStatus, 'failed' | 'stopped'>,
+    message: string
+  ): Promise<void> {
+    const session = this.store.getRuntimeSession(task.id)
+    if (!session || ['failed', 'stopped'].includes(session.status)) {
+      this.managedRuntimeTaskIds.delete(task.id)
+      return
+    }
+
+    let cleanupMessage = message
+    if (session.deviceId && session.bundleIdentifier) {
+      try {
+        await this.runtimeAdapter.stop({
+          session,
+          cwd: this.runtimeRoot,
+          execute: (request) => this.executeRuntimeCommand(request, null)
+        })
+      } catch (error) {
+        cleanupMessage = `${message} 종료 명령 경고: ${redact(String(error))}`
+      }
+    }
+
+    this.store.setRuntimeSession(task.id, status, { message: cleanupMessage, processId: null })
+    this.managedRuntimeTaskIds.delete(task.id)
+    this.emit(task, 'runtime_stopped', 'runtime', cleanupMessage, status === 'failed' ? 'high' : null)
+  }
+
   private runProcess(
     command: string,
     args: string[],
@@ -645,6 +1147,7 @@ export class AgentRunner {
       if (control) control.child = child
 
       let output = ''
+      let stdout = ''
       let finalMessage = ''
       let stdoutBuffer = ''
       let timedOut = false
@@ -662,6 +1165,7 @@ export class AgentRunner {
 
       const consumeLine = (rawLine: string): void => {
         const line = redact(rawLine)
+        stdout = `${stdout}${line}\n`.slice(-1_000_000)
         output = `${output}${line}\n`.slice(-80_000)
         onLine?.(line)
         try {
@@ -706,7 +1210,7 @@ export class AgentRunner {
           reject(new ProcessTimeoutError(deadline.label, deadline.timeoutMs))
           return
         }
-        resolvePromise({ code: code ?? 1, output, finalMessage })
+        resolvePromise({ code: code ?? 1, output, stdout, finalMessage })
       })
 
       if (deadline && deadline.timeoutMs > 0) {

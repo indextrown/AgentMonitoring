@@ -30,6 +30,49 @@ test('opens search and task detail interactions', async ({ page }) => {
   await expect(page.getByText('작업 계약')).toBeVisible()
 })
 
+test('shows the task-scoped Swift runtime session target', async ({ page }) => {
+  await page.goto('/?runtime=running&device=iphone')
+  await page.locator('.search-trigger').click()
+  await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
+  await page.locator('.search-results button').first().click()
+
+  const runtime = page.locator('.runtime-session')
+  await expect(runtime.getByText('Swift runtime')).toBeVisible()
+  await expect(runtime.getByText('실행 중')).toBeVisible()
+  await expect(runtime.getByText('iPhone 16 Pro', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('com.example.ElmwoodOnline', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('PID 43120', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('실행 보고서', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('복구 후 통과', { exact: true })).toBeVisible()
+  await expect(runtime.getByText('판정 통과 1 · 실패 1', { exact: true })).toBeVisible()
+  await expect(runtime.locator('.runtime-report-attempt')).toHaveCount(2)
+  await expect(runtime.getByRole('button', { name: /Simulator 화면 증거/ })).toContainText('1.2 MB')
+  await expect(runtime.getByRole('button', { name: /Simulator 접근성 트리/ })).toContainText(
+    '41.8 KB'
+  )
+  await expect(runtime.getByRole('button', { name: /Simulator UI 조작 결과/ })).toContainText(
+    '3.5 KB'
+  )
+  await expect(runtime.getByRole('button', { name: /Simulator Debug state·fixture/ })).toContainText(
+    '8.0 KB'
+  )
+  await expect(runtime.getByRole('button', { name: /Runtime 인수 검증 결과/ })).toContainText(
+    'runtime acceptance 3/3 통과'
+  )
+
+  const repairedAttempt = runtime.locator('.runtime-report-attempt').nth(1)
+  await repairedAttempt.locator('summary').click()
+  await expect(repairedAttempt.getByText('실패 · 복구됨', { exact: true })).toBeVisible()
+  await expect(repairedAttempt.getByRole('button', { name: /Runtime 인수 검증 결과/ })).toContainText(
+    'runtime acceptance 2/3 통과'
+  )
+  await expect(page).toHaveScreenshot('runtime-report.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+})
+
 test('shows repository readiness when selecting a project without tasks', async ({ page }) => {
   await page.goto('/')
   await page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' }).click()
@@ -168,14 +211,15 @@ test('explains dirty repositories with exact file categories and paths', async (
   })
 })
 
-test('distinguishes declared iOS capabilities from features available now', async ({ page }) => {
+test('distinguishes supported iOS runtime capabilities from planned access', async ({ page }) => {
   await page.goto('/?workspace=empty&contract=ios')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
 
   await expect(page.getByText('계약 확인됨')).toBeVisible()
-  await expect(page.getByText('현재 1개 사용 가능 · 5개는 프로젝트 선언 후 연결 대기')).toBeVisible()
-  await expect(page.locator('.capability-item.declared')).toHaveCount(5)
-  await expect(page.getByText('이 계약은 접근 범위만 선언합니다. 앱 빌드·실행·관찰 연결은 다음 단계에서 추가합니다.')).toBeVisible()
+  await expect(page.getByText('현재 5개 사용 가능 · 1개는 프로젝트 선언 후 연결 대기')).toBeVisible()
+  await expect(page.locator('.capability-item.ready')).toHaveCount(5)
+  await expect(page.locator('.capability-item.declared')).toHaveCount(1)
+  await expect(page.getByText('Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.')).toBeVisible()
 })
 
 test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {

@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -22,6 +23,7 @@ describe('AppStore', () => {
     expect(initial.selectedProject).toBeNull()
     expect(initial.tasks).toEqual([])
     expect(initial.events).toEqual([])
+    expect(initial.runtimeEvidence).toEqual([])
 
     const project = store.addProject('Fixture', join(directory, 'fixture'))
     const task = store.createTask(project.id, '테스트 작업', '테스트 작업의 완료 조건을 검증한다.', 3)
@@ -94,6 +96,167 @@ describe('AppStore', () => {
     store.deleteProject(project.id)
     expect(store.getSnapshot().projects).toEqual([])
     expect(() => store.getTask(running.id)).toThrow('작업을 찾을 수 없습니다.')
+    store.close()
+  })
+
+  it('persists task runtime sessions and recovers active sessions as stopped', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Swift project', join(directory, 'swift-project'))
+    const task = store.createTask(project.id, 'Swift 실행', 'iPad Simulator에서 앱을 실행한다.', 2)
+
+    store.setRuntimeSession(task.id, 'preparing', { message: 'runtime 준비 중' })
+    store.setRuntimeSession(task.id, 'running', {
+      deviceId: 'IPAD-UDID',
+      deviceName: 'iPad Pro 13-inch',
+      bundleIdentifier: 'com.example.App',
+      processId: 4242,
+      message: '앱 실행 완료'
+    })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'screen',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'screen.png'),
+      mimeType: 'image/png',
+      sizeBytes: 1_024,
+      createdAt: new Date().toISOString()
+    })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'accessibility',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'accessibility.json'),
+      mimeType: 'application/json',
+      sizeBytes: 2_048,
+      createdAt: new Date(Date.now() + 1_000).toISOString()
+    })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'ui-actions',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'ui-actions.json'),
+      mimeType: 'application/json',
+      sizeBytes: 3_072,
+      createdAt: new Date(Date.now() + 2_000).toISOString()
+    })
+    store.addRuntimeEvidence(task.id, {
+      kind: 'debug-state',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'debug-state.json'),
+      mimeType: 'application/json',
+      sizeBytes: 4_096,
+      createdAt: new Date(Date.now() + 3_000).toISOString()
+    })
+    store.addRuntimeEvidence(task.id, {
+      runId: 'runtime-run-1',
+      kind: 'runtime-verification',
+      outcome: 'passed',
+      summary: 'runtime acceptance 3/3 통과',
+      path: join(directory, 'runtime-sessions', task.id, 'evidence', 'runtime-verification.json'),
+      mimeType: 'application/json',
+      sizeBytes: 5_120,
+      createdAt: new Date(Date.now() + 4_000).toISOString()
+    })
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getSnapshot(project.id).runtimeSessions).toMatchObject([
+      {
+        taskId: task.id,
+        status: 'running',
+        deviceId: 'IPAD-UDID',
+        bundleIdentifier: 'com.example.App',
+        processId: 4242
+      }
+    ])
+    expect(reopened.getSnapshot(project.id).runtimeEvidence).toMatchObject([
+      {
+        taskId: task.id,
+        runId: 'runtime-run-1',
+        attempt: 1,
+        kind: 'runtime-verification',
+        outcome: 'passed',
+        summary: 'runtime acceptance 3/3 통과',
+        mimeType: 'application/json',
+        sizeBytes: 5_120
+      },
+      {
+        taskId: task.id,
+        runId: 'legacy',
+        attempt: 1,
+        kind: 'debug-state',
+        outcome: 'captured',
+        mimeType: 'application/json',
+        sizeBytes: 4_096
+      },
+      {
+        taskId: task.id,
+        kind: 'ui-actions',
+        mimeType: 'application/json',
+        sizeBytes: 3_072
+      },
+      {
+        taskId: task.id,
+        kind: 'accessibility',
+        mimeType: 'application/json',
+        sizeBytes: 2_048
+      },
+      {
+        taskId: task.id,
+        kind: 'screen',
+        mimeType: 'image/png',
+        sizeBytes: 1_024
+      }
+    ])
+
+    const recovered = reopened.recoverInterruptedRuntimeSessions()
+    expect(recovered).toHaveLength(1)
+    expect(reopened.getRuntimeSession(task.id)).toMatchObject({
+      status: 'stopped',
+      processId: null
+    })
+    expect(reopened.getSnapshot(project.id).events.some((event) => event.kind === 'runtime_stopped')).toBe(true)
+    reopened.close()
+  })
+
+  it('adds runtime report columns to databases created before report metadata', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'legacy.sqlite')
+    const legacy = new DatabaseSync(databasePath)
+    legacy.exec(`
+      CREATE TABLE runtime_evidence (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_evidence (
+        id, task_id, project_id, kind, path, mime_type, size_bytes, created_at
+      ) VALUES (
+        'legacy-evidence', 'legacy-task', 'legacy-project', 'screen',
+        '/tmp/legacy-screen.png', 'image/png', 100, '2026-09-03T00:00:00.000Z'
+      );
+    `)
+    legacy.close()
+
+    const store = new AppStore(databasePath)
+    const columns = store.database
+      .prepare('PRAGMA table_info(runtime_evidence)')
+      .all()
+      .map((row) => String((row as Record<string, unknown>).name))
+    expect(columns).toEqual(
+      expect.arrayContaining(['run_id', 'attempt', 'outcome', 'summary'])
+    )
+    expect(store.listRuntimeEvidence()).toMatchObject([
+      {
+        id: 'legacy-evidence',
+        runId: 'legacy',
+        attempt: 1,
+        outcome: 'captured',
+        summary: null
+      }
+    ])
     store.close()
   })
 })

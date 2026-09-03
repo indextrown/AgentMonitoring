@@ -1,0 +1,38 @@
+{
+  "configurations": [
+    {
+      "id": "AA000000-0000-4000-8000-000000000001",
+      "name": "Accessibility",
+      "options": {
+        "environmentVariableEntries": [
+          {
+            "key": "AGENTMONITOR_TARGET_BUNDLE_ID",
+            "value": "com.example.AgentMonitoringTarget",
+            "enabled": true
+          },
+          {
+            "key": "AGENTMONITOR_CAPTURE_ACCESSIBILITY",
+            "value": "1",
+            "enabled": true
+          },
+          {
+            "key": "AGENTMONITOR_UI_ACTIONS_BASE64",
+            "value": "W10=",
+            "enabled": true
+          }
+        ]
+      }
+    }
+  ],
+  "defaultOptions": {},
+  "testTargets": [
+    {
+      "target": {
+        "containerPath": "container:AgentMonitoringAccessibility.xcodeproj",
+        "identifier": "AA0000000000000000000001",
+        "name": "AgentMonitoringAccessibilityTests"
+      }
+    }
+  ],
+  "version": 1
+}

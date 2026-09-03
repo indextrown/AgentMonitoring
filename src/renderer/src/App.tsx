@@ -9,12 +9,14 @@ import {
   Circle,
   Clock3,
   Command,
+  FileJson,
   FileText,
   Folder,
   FolderOpen,
   Gauge,
   GitCompareArrows,
   GitBranch,
+  Image as ImageIcon,
   LayoutDashboard,
   ListTodo,
   LogIn,
@@ -44,7 +46,12 @@ import {
   XAxis,
   YAxis
 } from 'recharts'
-import { buildDailySeries, buildHourlyActivity, isActiveTask } from '../../shared/domain'
+import {
+  buildDailySeries,
+  buildHourlyActivity,
+  buildRuntimeTaskReport,
+  isActiveTask
+} from '../../shared/domain'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -57,6 +64,9 @@ import type {
   ProjectChangeKind,
   ProjectRecord,
   ProjectInspection,
+  RuntimeEvidenceRecord,
+  RuntimeSessionRecord,
+  RuntimeSessionStatus,
   TaskChanges,
   TaskRecord,
   TaskStatus
@@ -122,6 +132,34 @@ const PROJECT_CAPABILITY_STATUS_LABELS: Record<ProjectCapabilityStatus, string> 
   missing: '미설정'
 }
 
+const RUNTIME_SESSION_STATUS_LABELS: Record<RuntimeSessionStatus, string> = {
+  preparing: '준비 중',
+  booting: 'Simulator 부팅',
+  building: '앱 빌드',
+  installing: '앱 설치',
+  launching: '앱 실행',
+  acting: 'UI 조작',
+  observing: '증거 수집',
+  verifying: '인수 검증',
+  running: '실행 중',
+  failed: '실패',
+  stopped: '종료됨'
+}
+
+const RUNTIME_EVIDENCE_LABELS: Record<RuntimeEvidenceRecord['kind'], string> = {
+  screen: 'Simulator 화면 증거',
+  accessibility: 'Simulator 접근성 트리',
+  'ui-actions': 'Simulator UI 조작 결과',
+  'debug-state': 'Simulator Debug state·fixture',
+  'runtime-verification': 'Runtime 인수 검증 결과'
+}
+
+const RUNTIME_REPORT_OUTCOME_LABELS: Record<RuntimeEvidenceRecord['outcome'], string> = {
+  captured: '증거 수집',
+  passed: '통과',
+  failed: '실패'
+}
+
 const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard }> = [
   { page: 'dashboard', label: '대시보드', icon: LayoutDashboard },
   { page: 'tasks', label: '작업', icon: ListTodo },
@@ -142,6 +180,12 @@ function timeAgo(value: string): string {
 function shortDate(value: string): string {
   const date = new Date(value)
   return `${date.getMonth() + 1}월 ${date.getDate()}일`
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${value} B`
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KB`
+  return `${(value / (1_024 * 1_024)).toFixed(1)} MB`
 }
 
 function duration(task: TaskRecord): string {
@@ -611,11 +655,14 @@ export function App(): React.JSX.Element {
         <TaskDrawer
           task={selectedTask}
           changes={taskChanges}
+          runtime={snapshot.runtimeSessions.find((session) => session.taskId === selectedTask.id) ?? null}
+          evidence={snapshot.runtimeEvidence.filter((item) => item.taskId === selectedTask.id)}
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
+          onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
         />
       )}
       {error && (
@@ -810,7 +857,7 @@ function ProjectStartPage({
             <code>{inspection.capabilityManifest.path}</code>
             <span>{inspection.capabilityManifest.message}</span>
             {inspection.capabilityManifest.state === 'valid' && (
-              <small>이 계약은 접근 범위만 선언합니다. 앱 빌드·실행·관찰 연결은 다음 단계에서 추가합니다.</small>
+              <small>Build·Run, 화면·접근성·Debug 상태 관찰과 identifier UI·fixture 조작은 작업별 Swift runtime에서 사용합니다.</small>
             )}
           </footer>
         </article>
@@ -1475,24 +1522,115 @@ function TaskDrawer({
   task,
   events,
   changes,
+  runtime,
+  evidence,
   onClose,
   onRun,
   onAction,
-  onOpenPath
+  onOpenPath,
+  onOpenEvidence
 }: {
   task: TaskRecord
   events: EventRecord[]
   changes: TaskChanges | null
+  runtime: RuntimeSessionRecord | null
+  evidence: RuntimeEvidenceRecord[]
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
   onOpenPath: () => void
+  onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
+  const runtimeReport = buildRuntimeTaskReport(evidence, events)
+  const runtimeReportOutcome = runtimeReport?.recovered
+    ? '복구 후 통과'
+    : runtimeReport
+      ? RUNTIME_REPORT_OUTCOME_LABELS[runtimeReport.latestOutcome]
+      : null
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {runtime && (
+          <section className={`runtime-session runtime-${runtime.status}`}>
+            <div className="drawer-section-title">
+              <strong>Swift runtime</strong>
+              <span>{RUNTIME_SESSION_STATUS_LABELS[runtime.status]}</span>
+            </div>
+            <div className="runtime-session-target">
+              <SquareTerminal size={15} />
+              <div>
+                <strong>{runtime.deviceName ?? 'iOS Simulator 확인 중'}</strong>
+                <small>{runtime.bundleIdentifier ?? '앱 산출물 확인 전'}</small>
+              </div>
+              {runtime.processId && <code>PID {runtime.processId}</code>}
+            </div>
+            <p>{runtime.message}</p>
+            {runtimeReport && (
+              <div className="runtime-report">
+                <div className="runtime-report-heading">
+                  <div>
+                    <strong>실행 보고서</strong>
+                    <small>판정 통과 {runtimeReport.passedCount} · 실패 {runtimeReport.failedCount}</small>
+                  </div>
+                  <span className={`runtime-report-outcome outcome-${runtimeReport.latestOutcome}`}>
+                    {runtimeReportOutcome}
+                  </span>
+                </div>
+                <div className="runtime-report-stats">
+                  <span><strong>{runtimeReport.runCount}</strong>실행</span>
+                  <span><strong>{runtimeReport.attempts.length}</strong>시도</span>
+                  <span><strong>{runtimeReport.repairCount}</strong>복구</span>
+                  <span><strong>{runtimeReport.evidenceCount}</strong>증거</span>
+                </div>
+                <div className="runtime-report-attempts">
+                  {runtimeReport.attempts.map((attempt, index) => (
+                    <details
+                      className={`runtime-report-attempt outcome-${attempt.outcome}`}
+                      open={index === 0 || undefined}
+                      key={`${attempt.runId}-${attempt.attempt}`}
+                    >
+                      <summary>
+                        <span>
+                          <strong>실행 {attempt.executionNumber} · 시도 {attempt.attempt}</strong>
+                          <small>{timeAgo(attempt.createdAt)} · 증거 {attempt.evidence.length}개</small>
+                        </span>
+                        <em>
+                          {attempt.repaired
+                            ? '실패 · 복구됨'
+                            : RUNTIME_REPORT_OUTCOME_LABELS[attempt.outcome]}
+                        </em>
+                        <ChevronDown size={13} />
+                      </summary>
+                      {attempt.summary && <p>{attempt.summary}</p>}
+                      <div className="runtime-evidence-list">
+                        {attempt.evidence.map((item) => {
+                          const isJsonEvidence = item.kind !== 'screen'
+                          const EvidenceIcon = isJsonEvidence ? FileJson : ImageIcon
+                          return (
+                            <button key={item.id} onClick={() => onOpenEvidence(item.path)}>
+                              <EvidenceIcon size={14} />
+                              <span>
+                                <strong>{RUNTIME_EVIDENCE_LABELS[item.kind]}</strong>
+                                <small>
+                                  {item.summary ? `${item.summary} · ` : ''}
+                                  {isJsonEvidence ? 'JSON' : 'PNG'} · {formatBytes(item.sizeBytes)}
+                                </small>
+                              </span>
+                              <span className="runtime-evidence-action"><FolderOpen size={12} />열기</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </div>
+            )}
+            <small>작업별 격리 build · {timeAgo(runtime.updatedAt)}</small>
+          </section>
+        )}
         {task.worktreePath && (
           <section className="task-changes">
             <div className="drawer-section-title"><strong>변경 내역</strong><span>{changes ? `${changes.files.length}개 파일` : '불러오는 중'}</span></div>

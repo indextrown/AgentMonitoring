@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { inspectProjectCapabilities } from '../../electron/main/project-capabilities'
+import {
+  inspectProjectCapabilities,
+  projectCapabilityManifestSchema
+} from '../../electron/main/project-capabilities'
 import { inspectProject, parseGitStatus } from '../../electron/main/project-inspector'
 import type { ProjectRecord } from '../../src/shared/types'
 
@@ -128,7 +131,8 @@ describe('inspectProject', () => {
           kind: 'ios-simulator',
           container: 'PopPang.xcworkspace',
           scheme: 'PopPang',
-          configuration: 'Debug'
+          configuration: 'Debug',
+          deviceFamily: 'iphone'
         },
         capabilities: {
           build: true,
@@ -136,6 +140,39 @@ describe('inspectProject', () => {
           observe: ['screen', 'accessibility', 'state'],
           act: ['ui', 'fixture'],
           verify: ['test-command', 'runtime-scenario']
+        },
+        debugBridge: {
+          protocol: 'file-v1',
+          responseTimeoutSeconds: 15
+        },
+        runtimeScenario: {
+          actions: [
+            { kind: 'tap', identifier: 'start-navigation', timeoutSeconds: 12 },
+            {
+              kind: 'type-text',
+              identifier: 'destination-search',
+              text: '부산항'
+            }
+          ],
+          fixture: {
+            id: 'signed-in-home',
+            payload: { accountID: 'fixture-user', selectedTab: 'home' }
+          },
+          assertions: [
+            {
+              kind: 'state',
+              path: ['selectedTab'],
+              operator: 'equals',
+              expected: 'home'
+            },
+            {
+              kind: 'accessibility',
+              identifier: 'start-navigation',
+              property: 'enabled',
+              expected: true
+            },
+            { kind: 'evidence', target: 'screen' }
+          ]
         }
       })
     )
@@ -160,16 +197,28 @@ describe('inspectProject', () => {
       path: '.agentmonitor/project.json',
       state: 'valid',
       adapterKind: 'ios-simulator',
-      message: 'PopPang.xcworkspace · PopPang · Debug'
+      message: 'PopPang.xcworkspace · PopPang · Debug · iPhone'
     })
     expect(inspection.capabilities.map(({ key, status }) => ({ key, status }))).toEqual([
       { key: 'code', status: 'ready' },
-      { key: 'build', status: 'declared' },
-      { key: 'run', status: 'declared' },
-      { key: 'observe', status: 'declared' },
-      { key: 'act', status: 'declared' },
+      { key: 'build', status: 'ready' },
+      { key: 'run', status: 'ready' },
+      { key: 'observe', status: 'ready' },
+      { key: 'act', status: 'ready' },
       { key: 'verify', status: 'ready' }
     ])
+    expect(inspection.capabilities.find(({ key }) => key === 'run')?.detail).toBe(
+      'iPhone Simulator 실행 adapter 사용 가능'
+    )
+    expect(inspection.capabilities.find(({ key }) => key === 'observe')?.detail).toBe(
+      'Simulator 화면 캡처 · XCTest 접근성 트리 수집 · Debug bridge 앱 상태 수집 사용 가능'
+    )
+    expect(inspection.capabilities.find(({ key }) => key === 'act')?.detail).toBe(
+      'accessibility identifier UI 조작 2단계 · Debug fixture signed-in-home 적용 사용 가능'
+    )
+    expect(inspection.capabilities.find(({ key }) => key === 'verify')?.detail).toBe(
+      '검증 명령: tuist test · runtime acceptance 3개'
+    )
   })
 
   it('reports invalid capability contracts without failing repository inspection', async () => {
@@ -200,6 +249,93 @@ describe('inspectProject', () => {
       message: 'JSON 문법이 올바르지 않습니다.'
     })
     expect(inspection.capabilities.find((capability) => capability.key === 'code')?.status).toBe('ready')
+  })
+
+  it('rejects runtime UI actions unless the ui act capability is enabled', () => {
+    expect(() =>
+      projectCapabilityManifestSchema.parse({
+        version: 1,
+        adapter: {
+          kind: 'ios-simulator',
+          container: 'PopPang.xcodeproj',
+          scheme: 'PopPang'
+        },
+        capabilities: {
+          build: true,
+          run: true,
+          observe: [],
+          act: [],
+          verify: ['test-command']
+        },
+        runtimeScenario: {
+          actions: [{ kind: 'tap', identifier: 'start-navigation' }]
+        }
+      })
+    ).toThrow('runtimeScenario.actions를 실행하려면 act에 ui가 필요합니다.')
+  })
+
+  it('rejects runtime fixtures without the fixture capability or Debug bridge', () => {
+    const manifest = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'PopPang.xcodeproj',
+        scheme: 'PopPang'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: [],
+        act: [],
+        verify: ['test-command']
+      },
+      runtimeScenario: {
+        fixture: { id: 'signed-in-home', payload: { accountID: 'fixture-user' } }
+      }
+    }
+
+    expect(() => projectCapabilityManifestSchema.parse(manifest)).toThrow(
+      'runtimeScenario.fixture를 적용하려면 act에 fixture가 필요합니다.'
+    )
+    expect(() => projectCapabilityManifestSchema.parse({
+      ...manifest,
+      capabilities: { ...manifest.capabilities, act: ['fixture'] }
+    })).toThrow('runtimeScenario.fixture를 적용하려면 debugBridge 계약이 필요합니다.')
+  })
+
+  it('rejects runtime assertions without their declared evidence channels', () => {
+    const manifest = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'PopPang.xcodeproj',
+        scheme: 'PopPang'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: [],
+        act: [],
+        verify: ['runtime-scenario']
+      },
+      runtimeScenario: {
+        assertions: [
+          {
+            kind: 'accessibility',
+            identifier: 'start-navigation',
+            property: 'exists'
+          }
+        ]
+      }
+    }
+
+    expect(() => projectCapabilityManifestSchema.parse(manifest)).toThrow(
+      'accessibility assertion에는 observe.accessibility가 필요합니다.'
+    )
+    expect(() => projectCapabilityManifestSchema.parse({
+      ...manifest,
+      capabilities: { ...manifest.capabilities, observe: ['accessibility'], verify: [] }
+    })).toThrow('runtimeScenario.assertions를 평가하려면 verify에 runtime-scenario가 필요합니다.')
   })
 
   it('rejects capability manifests larger than the inspection boundary', async () => {
