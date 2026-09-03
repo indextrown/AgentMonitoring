@@ -31,6 +31,7 @@ export type EventKind =
   | 'runtime_acted'
   | 'runtime_observed'
   | 'runtime_verified'
+  | 'runtime_repair_started'
   | 'runtime_failed'
   | 'runtime_stopped'
   | 'project_created'

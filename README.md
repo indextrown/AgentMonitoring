@@ -27,10 +27,10 @@ AI가 작업을 끝냈다고 바로 원본 코드를 바꾸지는 않아요. Age
 | ChatGPT 로그인 | Codex app-server로 로그인하고 앱 전용 인증 상태를 관리해요. OpenAI API 키는 필요하지 않아요. |
 | 로컬 프로젝트 연결 | 실제 Git 저장소를 등록하고 브랜치, 변경 파일, 언어, 빌드 도구, 테스트 파일을 검사해요. |
 | AI 접근성 진단 | 프로젝트가 Code, Build, Run, Observe, Act, Verify 중 어느 영역을 제공하도록 구성됐는지 확인해요. |
-| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad·iPhone Simulator에 실행하고, Debug fixture·identifier UI 조작과 화면·접근성·앱 상태 증거 수집을 수행해요. |
+| Swift runtime session | 계약을 연결한 Swift 앱을 작업별 worktree에서 빌드해 iPad·iPhone Simulator에 실행하고, Debug fixture·identifier UI 조작, 화면·접근성·앱 상태 수집, runtime 판정과 실패 복구를 수행해요. |
 | 작업 등록 | 구현 목표, 완료 조건, 최대 자가 수정 횟수를 작업별로 저장해요. |
 | 다중 역할 실행 | Test Designer, Critic, Implementer, Test Runner, Reviewer를 정해진 순서로 실행해요. |
-| 테스트와 자가 수정 | 프로젝트 검증 명령을 실행하고, 실패 원인을 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
+| 테스트와 자가 수정 | 프로젝트 테스트 또는 runtime assertion이 실패하면 로그·JSON·화면 증거를 다음 구현 시도에 전달해 정해진 횟수만큼 다시 수정해요. |
 | 격리된 코드 변경 | 작업마다 Git worktree와 `agentmonitor/*` 브랜치를 만들고 역할별 읽기·쓰기 권한을 제한해요. |
 | 실시간 모니터링 | 진행 상태, 역할별 로그, 테스트 결과, 최근 활동을 대시보드와 작업 상세 화면에서 확인해요. |
 | 변경 검토 | 변경 파일, 줄 증감, Git patch, Reviewer finding을 확인하고 작업 폴더를 외부 IDE로 열 수 있어요. |
@@ -233,7 +233,9 @@ fixture payload와 state는 JSON dictionary여야 해요. 요청은 64KB, 응답
 
 runtime assertion은 최대 50개까지 선언할 수 있어요. `state`는 Debug state의 제한된 path에 `exists`·`equals`·`not-equals`를 적용하고, `accessibility`는 정확한 identifier의 존재 여부나 label·value·enabled·selected 같은 속성을 비교해요. `evidence`는 화면·접근성·상태·UI 조작·fixture 증거가 실제로 만들어졌는지 확인해요. JSON path 표현식, 정규식, JavaScript, shell 같은 실행 가능한 입력은 받지 않아요.
 
-판정 결과는 assertion별 기대값·실제값·통과 여부를 `runtime-verification-*.json`에 남겨요. 하나라도 실패하면 `verifying` 단계에서 작업을 중단하고 high finding을 만들어요. 이 단계는 결과를 판정할 뿐, 실패한 코드를 다시 수정하는 Repair 루프는 아직 실행하지 않아요.
+판정 결과는 assertion별 기대값·실제값·통과 여부를 `runtime-verification-*.json`에 남겨요. 하나라도 실패하고 재시도 횟수가 남아 있으면 Simulator 앱을 정리한 뒤 판정 JSON, 접근성·상태 증거, 당시 화면 PNG를 다음 Implementer에 전달해요. Implementer가 제품 코드를 수정하면 프로젝트 테스트부터 Simulator 실행과 같은 assertion 판정까지 다시 수행해요. 마지막 시도도 실패하면 `verifying` 단계의 high finding을 만들고 작업을 종료해요.
+
+Repair 중에도 합격 조건은 매번 원본 checkout의 manifest에서 다시 읽어요. Implementer가 worktree 안의 assertion을 수정하거나 약화해 통과할 수는 없어요. 빌드·설치·관찰 자체의 실패는 잘못된 자동 수정을 반복하지 않도록 Repair 대상에 포함하지 않고 즉시 진단해요.
 
 ## 실제 앱과 브라우저 미리보기 구분하기
 
@@ -259,6 +261,8 @@ runtime assertion은 최대 50개까지 선언할 수 있어요. `state`는 Debu
           ├─ Observe state·accessibility 계약이 있으면 최종 내부 상태·접근성 트리 저장
           ├─ Observe screen 계약이 있으면 최종 화면 증거 저장
           └─ Verify runtime assertion을 증거와 비교해 결과 저장
+              ├─ 실패·재시도 가능: JSON·화면 증거를 Implementer에 전달하고 다시 테스트
+              └─ 통과: 최종 Reviewer로 진행
   → 읽기 전용 Reviewer가 코드, runtime 결과, 첨부 화면 검토
   → 사람의 최종 승인 대기
 ```
@@ -380,7 +384,6 @@ AgentMonitoring에는 저장소 파일이나 인증 토큰을 별도 클라우�
 - 원격 팀 협업
 - 여러 공급자 또는 계정 순환
 - 병렬 작업 스케줄러
-- 실패한 runtime assertion을 Implementer에 되돌리는 자가 수정 루프
 - 앱 자동 업데이트와 코드 서명
 
 ## 저장소 정책

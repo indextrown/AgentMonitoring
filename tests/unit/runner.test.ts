@@ -47,6 +47,7 @@ async function createExecutionFixture(options: {
   withDebugState?: boolean
   withDebugFixture?: boolean
   runtimeAssertions?: Array<Record<string, unknown>>
+  maxAttempts?: number
   runtimeAdapter?: IosSimulatorRuntimeAdapter
 }): Promise<{
   directory: string
@@ -138,7 +139,12 @@ async function createExecutionFixture(options: {
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Runtime fixture', repository)
   store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
-  const task = store.createTask(project.id, '실행 수명주기', '중단과 시간 초과를 안전하게 처리한다.', 1)
+  const task = store.createTask(
+    project.id,
+    '실행 수명주기',
+    '중단과 시간 초과를 안전하게 처리한다.',
+    options.maxAttempts ?? 1
+  )
   const runner = new AgentRunner(
     store,
     worktrees,
@@ -655,6 +661,114 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
         expect.objectContaining({ title: expect.stringContaining('Swift runtime verifying 단계 실패') })
       ])
     )
+    fixture.store.close()
+  })
+
+  it('returns failed runtime evidence to the implementer and verifies the repaired app again', async () => {
+    let launchCount = 0
+    const stoppedBundles: string[] = []
+    const runtimeAdapter: IosSimulatorRuntimeAdapter = {
+      launch: async (input) => {
+        launchCount += 1
+        const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')
+        await mkdir(evidenceDirectory, { recursive: true })
+        const screenPath = join(evidenceDirectory, `screen-${launchCount}.png`)
+        await writeFile(screenPath, `screen-${launchCount}`)
+        const accessibilityPath = join(
+          evidenceDirectory,
+          `accessibility-${launchCount}.json`
+        )
+        const accessibilityContent = JSON.stringify({
+          schemaVersion: 1,
+          root: {
+            identifier: 'root',
+            children: launchCount === 1
+              ? []
+              : [{ identifier: 'error-banner', label: '연결 실패', children: [] }]
+          }
+        })
+        await writeFile(accessibilityPath, accessibilityContent)
+        return {
+          deviceId: 'IPHONE-UDID',
+          deviceName: 'iPhone 17 Pro',
+          bundleIdentifier: 'com.example.App',
+          processId: 4242 + launchCount,
+          appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+          screenEvidence: {
+            path: screenPath,
+            mimeType: 'image/png',
+            sizeBytes: Buffer.byteLength(`screen-${launchCount}`),
+            capturedAt: new Date().toISOString()
+          },
+          accessibilityEvidence: {
+            path: accessibilityPath,
+            mimeType: 'application/json',
+            sizeBytes: Buffer.byteLength(accessibilityContent),
+            capturedAt: new Date().toISOString(),
+            nodeCount: launchCount === 1 ? 1 : 2,
+            truncated: false,
+            content: accessibilityContent
+          },
+          uiActionEvidence: null,
+          debugStateEvidence: null
+        }
+      },
+      stop: async ({ session }) => {
+        stoppedBundles.push(session.bundleIdentifier ?? '')
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(join(directory, 'repair-codex-argv.jsonl'))}, JSON.stringify(process.argv.slice(2)) + '\\n')
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      withRuntimeManifest: true,
+      withScreenObservation: true,
+      withAccessibilityObservation: true,
+      runtimeAssertions: [
+        {
+          kind: 'accessibility',
+          name: '오류 배너 표시',
+          identifier: 'error-banner',
+          property: 'exists',
+          expected: true
+        }
+      ],
+      maxAttempts: 2,
+      runtimeAdapter
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const snapshot = fixture.store.getSnapshot(task.projectId)
+    const reports = await Promise.all(
+      snapshot.runtimeEvidence
+        .filter((item) => item.kind === 'runtime-verification')
+        .map(async (item) => JSON.parse(await readFile(item.path, 'utf8')) as { passed: boolean })
+    )
+    expect(task).toMatchObject({ status: 'awaiting_approval', attempt: 2 })
+    expect(launchCount).toBe(2)
+    expect(reports.map((report) => report.passed).sort()).toEqual([false, true])
+    expect(snapshot.events.some((event) => event.kind === 'runtime_repair_started')).toBe(true)
+    expect(snapshot.events.filter((event) => event.kind === 'runtime_verified')).toHaveLength(2)
+    expect(snapshot.findings).toEqual([])
+
+    const codexCalls = (await readFile(join(fixture.directory, 'repair-codex-argv.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[])
+    const repairCall = codexCalls.find((call) =>
+      call.join('\n').includes('직전 runtime acceptance 검증이 실패했습니다.')
+    )
+    expect(repairCall).toEqual(expect.arrayContaining(['--image']))
+    expect(repairCall?.join('\n')).toContain('오류 배너 표시')
+    expect(repairCall?.join('\n')).toContain('"actual": "false"')
+
+    await fixture.runner.discard(task.id)
+    expect(stoppedBundles).toEqual(['com.example.App', 'com.example.App'])
     fixture.store.close()
   })
 

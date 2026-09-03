@@ -70,6 +70,7 @@ const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
 const MAX_UI_ACTION_REVIEW_CHARS = 20_000
 const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
 const MAX_RUNTIME_VERIFICATION_REVIEW_CHARS = 40_000
+const MAX_RUNTIME_REPAIR_CONTEXT_CHARS = 120_000
 
 export interface RunnerPolicy {
   codexStageTimeoutMs: number
@@ -86,6 +87,16 @@ export const DEFAULT_RUNNER_POLICY: RunnerPolicy = {
 class StoppedError extends Error {
   constructor() {
     super('사용자가 작업을 중단했습니다.')
+  }
+}
+
+class RuntimeAcceptanceStageError extends IosRuntimeStageError {
+  constructor(
+    message: string,
+    readonly repairContext: string,
+    readonly imagePaths: string[]
+  ) {
+    super('verifying', message)
   }
 }
 
@@ -352,12 +363,19 @@ export class AgentRunner {
       )
 
       let repairContext = ''
-      let testsPassed = false
+      let repairImagePaths: string[] = []
+      let automationPassed = false
+      let runtimeResult: RuntimeRunResult | null = null
       for (let attempt = 1; attempt <= task.maxAttempts; attempt += 1) {
         if (control.stopped) throw new StoppedError()
         if (attempt > 1) {
           this.store.transitionTask(taskId, 'running', attempt)
-          this.emit(task, 'agent', 'orchestrator', `자가 수정 ${attempt}/${task.maxAttempts} 시작`)
+          this.emit(
+            this.store.getTask(taskId),
+            'agent',
+            'orchestrator',
+            `자가 수정 ${attempt}/${task.maxAttempts} 시작`
+          )
         }
 
         await this.runCodexStage(
@@ -374,16 +392,49 @@ export class AgentRunner {
             repairContext
           ]
             .filter(Boolean)
-            .join('\n\n')
+            .join('\n\n'),
+          repairImagePaths
         )
 
         this.store.transitionTask(taskId, 'testing', attempt)
         this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 실행`)
         const testResult = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
         if (testResult.code === 0) {
-          testsPassed = true
           this.emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
-          break
+          try {
+            runtimeResult = await this.runRuntimeIfConfigured(
+              this.store.getTask(taskId),
+              project,
+              worktreePath,
+              control
+            )
+            automationPassed = true
+            break
+          } catch (error) {
+            if (!(error instanceof RuntimeAcceptanceStageError) || attempt >= task.maxAttempts) {
+              throw error
+            }
+            const currentTask = this.store.getTask(taskId)
+            await this.stopRuntimeSession(
+              currentTask,
+              'failed',
+              'runtime acceptance 실패 후 자가 수정을 위해 Simulator 앱을 정리했습니다.'
+            )
+            repairContext = [
+              '직전 runtime acceptance 검증이 실패했습니다.',
+              '아래 증거에서 기대값과 실제값의 차이를 찾아 제품 코드를 수정하세요.',
+              '합격 조건은 원본 checkout의 manifest에서 다시 읽으므로 assertion을 수정하거나 약화하지 마세요.',
+              error.repairContext
+            ].join('\n\n')
+            repairImagePaths = error.imagePaths
+            this.emit(
+              currentTask,
+              'runtime_repair_started',
+              'orchestrator',
+              `runtime 실패 증거를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
+            )
+          }
+          continue
         }
 
         this.emit(
@@ -397,15 +448,15 @@ export class AgentRunner {
           '직전 테스트가 실패했습니다. 아래 출력의 원인을 수정하고 기존 테스트를 유지하세요.',
           testResult.output.slice(-4_000)
         ].join('\n\n')
+        repairImagePaths = []
       }
 
-      if (!testsPassed) {
+      if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
         this.store.addFinding(task.projectId, task.id, `${task.title} 테스트가 재시도 한도를 초과했습니다.`, 'high')
         return
       }
 
-      const runtimeResult = await this.runRuntimeIfConfigured(task, project, worktreePath, control)
       this.store.resolveTaskFindings(task.id)
       const review = await this.runCodexStage(
         this.store.getTask(taskId),
@@ -957,7 +1008,22 @@ export class AgentRunner {
           '```'
         ].filter(Boolean).join('\n'))
         if (!report.passed) {
-          throw new IosRuntimeStageError('verifying', verificationSummary)
+          const failedReport = JSON.stringify({
+            ...report,
+            results: report.results.filter((item) => !item.passed)
+          }, null, 2)
+          const repairEvidence = [
+            `runtime 판정: ${verificationSummary}`,
+            '실패한 assertion 판정 JSON:',
+            failedReport,
+            '판정에 사용한 보조 runtime 증거:',
+            ...reviewContexts.slice(0, -1)
+          ].join('\n\n').slice(0, MAX_RUNTIME_REPAIR_CONTEXT_CHARS)
+          throw new RuntimeAcceptanceStageError(
+            verificationSummary,
+            repairEvidence,
+            [...imagePaths]
+          )
         }
       }
       const message = [
