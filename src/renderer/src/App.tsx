@@ -1777,7 +1777,7 @@ function TaskModal({
           </section>
         )}
         {!project.runtimeAdapter && <p className="scenario-unavailable"><FileJson size={13} />iOS 프로젝트가 아니거나 실행 설정이 없습니다. 코드와 테스트만 검증합니다.</p>}
-        <label><span>최대 자가 수정 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /></label>
+        <label><span>최대 구현 시도 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /><small>최초 구현을 포함합니다. 테스트·Simulator 검증이나 Reviewer 검토에서 문제가 발견되면 남은 횟수만큼 다시 수정합니다.</small></label>
         <div className="workflow-preview"><span><FileText size={13} />테스트 설계</span><i /><span><Search size={13} />비평</span><i /><span><Bot size={13} />구현</span><i /><span><CheckCircle2 size={13} />검증</span></div>
         <button className="primary-button" disabled={submitting || generating || project.isDemo || (includeRuntime && Boolean(project.runtimeAdapter) && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : includeRuntime && generated ? '검증 조건 승인하고 작업 등록' : '작업 등록'}</button>
       </form>
@@ -1896,7 +1896,7 @@ function TaskDrawer({
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
-        <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
         {task.runtimeContract && (
           <section className="approved-scenario">
             <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>

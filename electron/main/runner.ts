@@ -467,8 +467,6 @@ export class AgentRunner {
               control,
               runId
             )
-            automationPassed = true
-            break
           } catch (error) {
             if (!(error instanceof RuntimeAcceptanceStageError) || attempt >= task.maxAttempts) {
               throw error
@@ -492,7 +490,56 @@ export class AgentRunner {
               'orchestrator',
               `runtime 실패 증거를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
             )
+            continue
           }
+
+          const review = await this.runReviewer(
+            this.store.getTask(taskId),
+            worktreePath,
+            approvedRuntimeContract,
+            runtimeResult
+          )
+          const reviewerFindings = parseReviewerFindings(review.finalMessage)
+          this.store.resolveTaskFindings(task.id)
+          for (const finding of reviewerFindings) {
+            this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
+          }
+
+          if (reviewerFindings.length === 0) {
+            automationPassed = true
+            break
+          }
+
+          if (attempt >= task.maxAttempts) {
+            automationPassed = true
+            this.emit(
+              this.store.getTask(taskId),
+              'agent',
+              'orchestrator',
+              `Reviewer finding ${reviewerFindings.length}개가 남은 채 최대 구현 시도 횟수에 도달했습니다. 사람의 판단을 기다립니다.`,
+              'low'
+            )
+            break
+          }
+
+          const currentTask = this.store.getTask(taskId)
+          await this.stopRuntimeSession(
+            currentTask,
+            'stopped',
+            'Reviewer 수정 요청을 다음 구현 시도에 전달하기 위해 Simulator 앱을 정리했습니다.'
+          )
+          repairContext = [
+            '직전 Reviewer가 자동 검증을 통과한 변경에서 다음 문제를 찾았습니다.',
+            'Reviewer 보고를 근거로 제품 코드와 테스트를 수정하세요. finding을 숨기거나 검토 기준을 약화하지 마세요.',
+            review.finalMessage || reviewerFindings.map((finding) => `[${finding.severity}] ${finding.title}`).join('\n')
+          ].join('\n\n')
+          repairImagePaths = runtimeResult?.imagePaths ?? []
+          this.emit(
+            currentTask,
+            'agent',
+            'orchestrator',
+            `Reviewer finding ${reviewerFindings.length}개를 Implementer에 전달 · 다음 시도 ${attempt + 1}/${task.maxAttempts}`
+          )
           continue
         }
 
@@ -512,39 +559,8 @@ export class AgentRunner {
 
       if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
-        this.store.addFinding(task.projectId, task.id, `${task.title} 테스트가 재시도 한도를 초과했습니다.`, 'high')
+        this.store.addFinding(task.projectId, task.id, `${task.title} 자동 검증이 최대 구현 시도 횟수를 초과했습니다.`, 'high')
         return
-      }
-
-      this.store.resolveTaskFindings(task.id)
-      const review = await this.runCodexStage(
-        this.store.getTask(taskId),
-        worktreePath,
-        'reviewer',
-        'read-only',
-        [
-          `작업 목표: ${task.prompt}`,
-          '당신은 최종 읽기 전용 Reviewer입니다.',
-          '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
-          approvedRuntimeContract,
-          runtimeResult
-            ? [
-                `Swift runtime 결과:\n${runtimeResult.summary}`,
-                runtimeResult.reviewContext
-              ].filter(Boolean).join('\n\n')
-            : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
-          runtimeResult?.imagePaths.length
-            ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
-            : '',
-          '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
-          '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
-          '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
-          '코드는 수정하지 마세요.'
-        ].filter(Boolean).join('\n\n'),
-        runtimeResult?.imagePaths ?? []
-      )
-      for (const finding of parseReviewerFindings(review.finalMessage)) {
-        this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
       }
 
       if (control.stopped) throw new StoppedError()
@@ -995,6 +1011,40 @@ export class AgentRunner {
     this.store.setTaskWorkspace(task.id, branchName, worktreePath)
     this.emit(task, 'agent', 'git', `격리 작업공간 생성 · ${basename(worktreePath)} · ${branchName}`)
     return worktreePath
+  }
+
+  private runReviewer(
+    task: TaskRecord,
+    worktreePath: string,
+    approvedRuntimeContract: string,
+    runtimeResult: RuntimeRunResult | null
+  ): Promise<ProcessResult> {
+    return this.runCodexStage(
+      task,
+      worktreePath,
+      'reviewer',
+      'read-only',
+      [
+        `작업 목표: ${task.prompt}`,
+        '당신은 최종 읽기 전용 Reviewer입니다.',
+        '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+        approvedRuntimeContract,
+        runtimeResult
+          ? [
+              `Swift runtime 결과:\n${runtimeResult.summary}`,
+              runtimeResult.reviewContext
+            ].filter(Boolean).join('\n\n')
+          : '이 프로젝트는 Swift runtime 실행 대상이 아닙니다.',
+        runtimeResult?.imagePaths.length
+          ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
+          : '',
+        '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
+        '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
+        '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
+        '코드는 수정하지 마세요.'
+      ].filter(Boolean).join('\n\n'),
+      runtimeResult?.imagePaths ?? []
+    )
   }
 
   private async runCodexStage(

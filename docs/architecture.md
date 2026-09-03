@@ -82,6 +82,8 @@ awaiting_approval/failed/stopped → discarded
 | Reviewer | read-only | 없음 | diff, runtime 화면·접근성 구조, 회귀, 보안, 테스트 공백 보고 |
 | Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
 
+`maxAttempts`는 최초 구현을 포함한 Implementer 호출 횟수다. 프로젝트 테스트나 runtime assertion이 실패하면 제한된 실패 증거를 다음 Implementer에 전달한다. 자동 검증이 통과해도 Reviewer가 명시적인 finding을 보고하면 같은 시도 한도 안에서 Reviewer 보고와 화면 증거를 다음 Implementer에 전달하고 테스트·runtime·Reviewer를 다시 실행한다. 마지막 시도에도 finding이 남으면 자동으로 승인하거나 실패 처리하지 않고, finding을 유지한 채 사람의 최종 판단을 기다린다.
+
 ## Swift runtime session
 
 AgentRunner는 검증 명령이 통과한 뒤 유효한 Build·Run 계약이 있을 때만 `IosSimulatorRuntimeAdapter`를 호출한다. 새 흐름은 작업 등록 때 사람이 승인한 SQLite 스냅샷을 읽는다. 스냅샷이 없는 기존 흐름은 AI가 수정할 수 있는 worktree가 아니라 사용자가 연결한 원본 checkout에서 계약을 읽는다.
@@ -175,12 +177,12 @@ Simulator 실행 증거와 DerivedData는 기본 30일 보관한다. 사용자�
 - 선택한 iPad·iPhone 기기군이 없음: 새 기기를 만들지 않고 Xcode에서 해당 기기를 준비하도록 안내한다.
 - 테스트 실패: 출력 마지막 4,000자를 다음 Implementer에게 전달한다.
 - 검증 명령 누락: worktree를 만들기 전에 실행을 거절하고 프로젝트 설정으로 안내한다.
-- 재시도 한도 초과: 작업을 `failed`로 전환한다.
+- 테스트·runtime 검증이 최대 구현 시도 횟수 안에 통과하지 못함: 작업을 `failed`로 전환한다.
 - 사용자 중단: 현재 child process에 `SIGTERM`을 보내고 `stopped`로 전환한다.
 - 프로세스 종료: macOS와 Linux에서는 격리된 프로세스 그룹에 `SIGTERM`을 보내고 3초 뒤에도 살아 있으면 `SIGKILL`한다.
 - 앱 종료: `AgentRunner.dispose()`로 active run의 상태 전이와 이벤트 기록을 마친 다음 Codex 인증 세션과 SQLite를 닫는다.
 - 앱 종료·비정상 재시작: 남아 있는 `running`·`testing` 작업과 활성 runtime session을 `stopped`로 전환하고 복구 이벤트를 기록한다. 기존 worktree는 보존해 사용자가 검토하거나 재실행할 수 있다.
-- Reviewer 보고: 명시적인 `[critical|high|medium|low] 제목` 행을 finding으로 등록하고 다음 검토 전에 같은 작업의 기존 미해결 finding을 해결 처리한다.
+- Reviewer 보고: 명시적인 `[critical|high|medium|low] 제목` 행을 finding으로 등록한다. 남은 구현 시도가 있으면 보고를 다음 Implementer에 전달한다. 다음 Reviewer가 문제를 보고하지 않으면 이전 미해결 finding을 해결 처리한다.
 
 ## 보안 경계
 

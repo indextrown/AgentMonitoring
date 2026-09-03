@@ -401,7 +401,7 @@ setInterval(() => undefined, 1_000)
     fixture.store.close()
   })
 
-  it('runs role-separated stages inside a git worktree and stops for approval', async () => {
+  it('feeds Reviewer findings back to the Implementer before stopping for approval', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-runner-'))
     temporaryDirectories.push(directory)
     const repository = join(directory, 'repository')
@@ -419,14 +419,17 @@ setInterval(() => undefined, 1_000)
     await writeFile(
       fakeCodex,
       `#!/usr/bin/env node
-import { writeFileSync } from 'node:fs'
-const prompt = process.argv.at(-1) ?? ''
-console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
-if (prompt.includes('구현 담당자')) {
-  writeFileSync('agent-output.txt', 'implemented\\n')
-  writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
-}
-const message = prompt.includes('최종 읽기 전용 Reviewer') ? '[medium] 빈 입력 회귀 검토 필요' : 'stage complete'
+  import { existsSync, writeFileSync } from 'node:fs'
+  const prompt = process.argv.at(-1) ?? ''
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
+  if (prompt.includes('구현 담당자')) {
+    writeFileSync('agent-output.txt', 'implemented\\n')
+    writeFileSync('agent-codex-home.txt', process.env.CODEX_HOME ?? '')
+    if (prompt.includes('직전 Reviewer')) writeFileSync('review-fix.txt', 'reviewed\\n')
+  }
+  const message = prompt.includes('최종 읽기 전용 Reviewer')
+    ? existsSync('review-fix.txt') ? 'VERDICT: PASS' : '[medium] 빈 입력 회귀 검토 필요'
+    : 'stage complete'
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `
@@ -437,9 +440,9 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const project = store.addProject('Fixture', repository)
     store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
-    const published: string[] = []
+    const published: Array<{ actor: string; message: string }> = []
     const codexHome = join(directory, 'codex-home')
-    const runner = new AgentRunner(store, worktrees, (event) => published.push(event.actor), fakeCodex, codexHome)
+    const runner = new AgentRunner(store, worktrees, (event) => published.push(event), fakeCodex, codexHome)
 
     await runner.run(task.id)
 
@@ -448,11 +451,15 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(awaitingApproval.worktreePath).toBeTruthy()
     expect(await readFile(join(awaitingApproval.worktreePath!, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(awaitingApproval.worktreePath!, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
-    expect(published).toContain('test-designer')
-    expect(published).toContain('critic')
-    expect(published).toContain('reviewer')
+    expect(await readFile(join(awaitingApproval.worktreePath!, 'review-fix.txt'), 'utf8')).toBe('reviewed\n')
+    expect(awaitingApproval.attempt).toBe(2)
+    expect(published.some((event) => event.actor === 'test-designer')).toBe(true)
+    expect(published.some((event) => event.actor === 'critic')).toBe(true)
+    expect(
+      published.filter((event) => event.actor === 'reviewer' && event.message === 'reviewer 단계 시작')
+    ).toHaveLength(2)
     expect(store.getSnapshot(project.id).findings).toMatchObject([
-      { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: false }
+      { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: true }
     ])
 
     const changes = await runner.getChanges(task.id)
@@ -469,6 +476,37 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(await readFile(join(repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(repository, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
     store.close()
+  })
+
+  it('keeps final Reviewer findings for human judgment after the implementation limit', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer')
+  ? '[high] 사용자 승인 전에 확인할 회귀 위험'
+  : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      maxAttempts: 1
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const snapshot = fixture.store.getSnapshot(task.projectId)
+    expect(task).toMatchObject({ status: 'awaiting_approval', attempt: 1 })
+    expect(snapshot.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: '사용자 승인 전에 확인할 회귀 위험',
+          severity: 'high',
+          resolved: false
+        })
+      ])
+    )
+    expect(snapshot.events.some((event) => event.message.includes('사람의 판단을 기다립니다.'))).toBe(true)
+    fixture.store.close()
   })
 
   it('launches an iPad runtime and gives UI action, screen, and accessibility evidence to the reviewer', async () => {

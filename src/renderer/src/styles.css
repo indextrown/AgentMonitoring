@@ -2018,6 +2018,12 @@ kbd {
   font-weight: 600;
 }
 
+.modal-form label > small {
+  color: #59636d;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
 .settings-form input,
 .modal-form input,
 .modal-form textarea,
