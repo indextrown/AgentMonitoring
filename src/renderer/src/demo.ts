@@ -577,10 +577,37 @@ export const demoBridge: AgentMonitoringBridge = {
     return updated
   },
   autoConfigureProjectRuntime: async (projectIdToConfigure) => {
-    if (searchParams.get('runtime-discovery') === 'missing') {
-      throw new Error('Xcode 프로젝트 또는 Workspace를 찾지 못했습니다. 프로젝트 설정에서 직접 입력하세요.')
-    }
+    const discoveryMode = searchParams.get('runtime-discovery')
     let updated: ProjectRecord | undefined
+    const projectToConfigure = state.projects.find((project) => project.id === projectIdToConfigure)
+    if (!projectToConfigure) throw new Error('프로젝트를 찾을 수 없습니다.')
+    if (discoveryMode === 'missing') {
+      return {
+        project: projectToConfigure,
+        discovery: {
+          state: 'unavailable' as const,
+          container: null,
+          appSchemes: [],
+          selectedScheme: null,
+          message: 'Xcode 프로젝트 또는 Workspace를 찾지 못했습니다. 프로젝트 설정에서 직접 입력하세요.'
+        }
+      }
+    }
+    if (discoveryMode === 'multiple') {
+      return {
+        project: projectToConfigure,
+        discovery: {
+          state: 'selection-required' as const,
+          container: `${projectToConfigure.name}.xcworkspace`,
+          appSchemes: [
+            { scheme: `${projectToConfigure.name}Dev`, targets: [`${projectToConfigure.name}Dev`] },
+            { scheme: `${projectToConfigure.name}Prod`, targets: [`${projectToConfigure.name}Prod`] }
+          ],
+          selectedScheme: null,
+          message: '실행 가능한 iOS 앱 Scheme 2개를 찾았습니다. 사용할 앱을 선택하세요.'
+        }
+      }
+    }
     state = {
       ...state,
       projects: state.projects.map((project) => {
@@ -600,7 +627,16 @@ export const demoBridge: AgentMonitoringBridge = {
       })
     }
     if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
-    return updated
+    return {
+      project: updated,
+      discovery: {
+        state: 'ready' as const,
+        container: updated.runtimeAdapter!.container,
+        appSchemes: [{ scheme: updated.runtimeAdapter!.scheme, targets: [updated.runtimeAdapter!.scheme] }],
+        selectedScheme: updated.runtimeAdapter!.scheme,
+        message: `${updated.runtimeAdapter!.scheme} iOS 앱 Scheme을 찾았습니다.`
+      }
+    }
   },
   inspectProject: async (requestedProjectId) => {
     const project = state.projects.find((item) => item.id === requestedProjectId)

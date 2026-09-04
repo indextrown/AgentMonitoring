@@ -138,6 +138,22 @@ test('automatically connects missing iOS access areas without changing repositor
   await expect(capabilities.getByText('저장소 파일은 바꾸지 않습니다.', { exact: false })).not.toBeVisible()
 })
 
+test('asks the user to choose when multiple iOS app schemes are available', async ({ page }) => {
+  await page.goto('/?workspace=empty&runtime-discovery=multiple')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: 'iOS 자동 연결' }).click()
+
+  await expect(page.getByRole('heading', { name: '프로젝트 설정' })).toBeVisible()
+  await expect(page.getByText('실행 가능한 iOS 앱 Scheme 2개를 찾았습니다. 사용할 앱을 선택하세요.')).toBeVisible()
+  const scheme = page.getByLabel('Scheme')
+  await expect(scheme).toHaveValue('ConnectedRepositoryDev')
+  await expect(scheme.locator('option')).toHaveCount(2)
+  await scheme.selectOption('ConnectedRepositoryProd')
+  await page.getByRole('button', { name: '설정 저장' }).click()
+
+  await expect(page.getByText('ConnectedRepositoryProd Debug 빌드 adapter 사용 가능')).toBeVisible()
+})
+
 test('launches, restarts, and stops a connected iOS app from the dashboard', async ({ page }) => {
   await page.goto('/?workspace=empty&contract=ios')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

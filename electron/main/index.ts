@@ -24,7 +24,10 @@ import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
 import { detectProjectSetupCommand } from './project-environment'
 import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
-import { resolveProjectRuntimeConfig } from './project-runtime-config'
+import {
+  discoverProjectRuntimeConfig,
+  resolveProjectRuntimeConfig
+} from './project-runtime-config'
 import { ProjectSimulatorService } from './project-simulator'
 import { AgentRunner } from './runner'
 import { GitOperationCoordinator } from './git-operation-coordinator'
@@ -333,9 +336,15 @@ function registerIpc(): void {
       const setupCommand = await detectProjectSetupCommand(project.path)
       if (setupCommand) project = requireStore().setProjectSetupCommand(project.id, setupCommand)
     }
-    if (!project.runtimeAdapter) {
+    if (!project.runtimeAdapter || project.runtimeConfigSource === 'detected') {
       const resolvedRuntime = await resolveProjectRuntimeConfig(project.path)
-      if (resolvedRuntime) {
+      if (
+        resolvedRuntime &&
+        (
+          project.runtimeConfigSource !== resolvedRuntime.source ||
+          JSON.stringify(project.runtimeAdapter) !== JSON.stringify(resolvedRuntime.adapter)
+        )
+      ) {
         project = requireStore().setProjectRuntimeAdapter(
           project.id,
           resolvedRuntime.adapter,
@@ -435,19 +444,34 @@ function registerIpc(): void {
 
   ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
-    const project = requireStore().getProject(validProjectId)
-    if (project.runtimeAdapter) return project
-    const resolvedRuntime = await resolveProjectRuntimeConfig(project.path)
-    if (!resolvedRuntime) {
-      throw new Error(
-        'Xcode 프로젝트 또는 Workspace를 찾지 못했습니다. Tuist 프로젝트라면 `tuist generate`를 한 번 실행한 뒤 다시 시도하거나 프로젝트 설정에서 직접 입력하세요.'
+    let project = requireStore().getProject(validProjectId)
+    if (project.runtimeAdapter && project.runtimeConfigSource === 'manifest') {
+      return {
+        project,
+        discovery: {
+          state: 'ready',
+          container: project.runtimeAdapter.container,
+          appSchemes: [{ scheme: project.runtimeAdapter.scheme, targets: [] }],
+          selectedScheme: project.runtimeAdapter.scheme,
+          message: '.agentmonitor/project.json에 선언된 iOS 앱 실행 설정을 사용합니다.'
+        }
+      }
+    }
+    const discovery = await discoverProjectRuntimeConfig(project.path, { force: true })
+    if (discovery.state === 'ready' && discovery.container && discovery.selectedScheme) {
+      project = requireStore().setProjectRuntimeAdapter(
+        project.id,
+        {
+          kind: 'ios-simulator',
+          container: discovery.container,
+          scheme: discovery.selectedScheme,
+          configuration: 'Debug',
+          deviceFamily: project.runtimeAdapter?.deviceFamily ?? 'iphone'
+        },
+        'detected'
       )
     }
-    return requireStore().setProjectRuntimeAdapter(
-      project.id,
-      resolvedRuntime.adapter,
-      resolvedRuntime.source
-    )
+    return { project, discovery }
   })
 
   ipcMain.handle('runtime-scenario:generate', async (_event, rawInput: GenerateRuntimeScenarioInput) => {

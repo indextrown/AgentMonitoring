@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  discoverProjectRuntimeConfig,
   findXcodeContainersOnDisk,
   findTrackedXcodeContainers,
+  parseIosAppTargets,
   parseXcodeSchemes,
+  selectAppSchemeCandidates,
   selectXcodeContainer
 } from '../../electron/main/project-runtime-config'
 import { buildApprovedRuntimeContract } from '../../electron/main/runtime-scenario-generator'
@@ -66,6 +69,116 @@ describe('runtime scenario generation', () => {
       'WorkspaceApp'
     ])
     expect(parseXcodeSchemes('not-json')).toEqual([])
+  })
+
+  it('keeps only installable iOS app products from Xcode build settings', () => {
+    expect(parseIosAppTargets(JSON.stringify([
+      {
+        target: 'Core',
+        buildSettings: {
+          PRODUCT_TYPE: 'com.apple.product-type.framework',
+          WRAPPER_EXTENSION: 'framework',
+          PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Core'
+        }
+      },
+      {
+        target: 'YeobaekApp',
+        buildSettings: {
+          PRODUCT_TYPE: 'com.apple.product-type.application',
+          WRAPPER_EXTENSION: 'app',
+          PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Yeobaek',
+          SUPPORTED_PLATFORMS: 'iphoneos iphonesimulator'
+        }
+      }
+    ]))).toEqual(['YeobaekApp'])
+  })
+
+  it('prefers a direct app scheme over workspace schemes that only include the app target', () => {
+    expect(selectAppSchemeCandidates([
+      { scheme: 'Yeobaek-Workspace', targets: ['YeobaekApp'] },
+      { scheme: 'YeobaekApp', targets: ['YeobaekApp'] }
+    ])).toEqual([{ scheme: 'YeobaekApp', targets: ['YeobaekApp'] }])
+  })
+
+  it('detects the app scheme instead of the first framework scheme in a Tuist workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-tuist-runtime-'))
+    try {
+      await mkdir(join(root, 'Yeobaek.xcworkspace'), { recursive: true })
+      await writeFile(join(root, 'Yeobaek.xcworkspace', 'contents.xcworkspacedata'), '<Workspace />')
+      const execute = async (_command: string, args: string[]) => {
+        if (args[0] === '-C') return { stdout: '' }
+        if (args.includes('-list')) {
+          return { stdout: JSON.stringify({ workspace: { schemes: ['Core', 'Yeobaek-Workspace', 'YeobaekApp'] } }) }
+        }
+        const scheme = args[args.indexOf('-scheme') + 1]
+        if (scheme === 'Core') {
+          return {
+            stdout: JSON.stringify([{
+              target: 'Core',
+              buildSettings: {
+                PRODUCT_TYPE: 'com.apple.product-type.framework',
+                WRAPPER_EXTENSION: 'framework',
+                PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Core'
+              }
+            }])
+          }
+        }
+        return {
+          stdout: JSON.stringify([{
+            target: 'YeobaekApp',
+            buildSettings: {
+              PRODUCT_TYPE: 'com.apple.product-type.application',
+              WRAPPER_EXTENSION: 'app',
+              PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Yeobaek',
+              SUPPORTED_PLATFORMS: 'iphoneos iphonesimulator'
+            }
+          }])
+        }
+      }
+
+      await expect(discoverProjectRuntimeConfig(root, { execute })).resolves.toEqual({
+        state: 'ready',
+        container: 'Yeobaek.xcworkspace',
+        appSchemes: [{ scheme: 'YeobaekApp', targets: ['YeobaekApp'] }],
+        selectedScheme: 'YeobaekApp',
+        message: 'YeobaekApp iOS 앱 Scheme을 찾았습니다.'
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('requires selection when a workspace has multiple direct app schemes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-multiple-apps-'))
+    try {
+      await mkdir(join(root, 'Multi.xcworkspace'), { recursive: true })
+      await writeFile(join(root, 'Multi.xcworkspace', 'contents.xcworkspacedata'), '<Workspace />')
+      const execute = async (_command: string, args: string[]) => {
+        if (args[0] === '-C') return { stdout: '' }
+        if (args.includes('-list')) {
+          return { stdout: JSON.stringify({ workspace: { schemes: ['Consumer', 'Enterprise'] } }) }
+        }
+        const scheme = args[args.indexOf('-scheme') + 1]
+        return {
+          stdout: JSON.stringify([{
+            target: scheme,
+            buildSettings: {
+              PRODUCT_TYPE: 'com.apple.product-type.application',
+              WRAPPER_EXTENSION: 'app',
+              PRODUCT_BUNDLE_IDENTIFIER: `com.example.${scheme}`,
+              SUPPORTED_PLATFORMS: 'iphonesimulator'
+            }
+          }])
+        }
+      }
+
+      const discovery = await discoverProjectRuntimeConfig(root, { execute })
+      expect(discovery.state).toBe('selection-required')
+      expect(discovery.selectedScheme).toBeNull()
+      expect(discovery.appSchemes.map((candidate) => candidate.scheme)).toEqual(['Consumer', 'Enterprise'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('builds a frozen contract with UI actions, acceptance checks, and evidence', () => {

@@ -34,7 +34,9 @@ Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되�
 
 manifest가 없으면 `ProjectRuntimeConfigDetector`가 저장소 내부 `.xcworkspace`와 `.xcodeproj`를 찾는다. Git 추적 파일을 먼저 확인하고, 생성 결과가 Git에 없는 프로젝트를 위해 실제 디렉터리도 최대 깊이 4와 최대 2,000개 폴더 안에서 탐색한다. 심볼릭 링크, 숨김 폴더, 빌드 산출물과 의존성 폴더는 건너뛴다. 후보가 여러 개면 Workspace, 루트에 가까운 경로, 이름순으로 하나를 고른다.
 
-Detector는 `xcodebuild -list -json`으로 Scheme을 확인한다. 감지 결과는 `projects.runtime_adapter_json`에 저장하며 기본 기기군은 iPhone이다. Renderer는 Build·Run·Observe·Act가 연결되지 않았을 때 **iOS 자동 연결**을 제공한다. 사용자는 프로젝트 설정에서 container, Scheme, iPhone·iPad 선택을 수정하거나 runtime을 끌 수도 있다. 이 과정은 대상 저장소에 파일을 쓰지 않는다.
+Detector는 `xcodebuild -list -json`으로 Scheme을 확인한 뒤 각 Scheme의 Debug·`iphonesimulator` build settings를 최대 3개씩 검사한다. `PRODUCT_TYPE`이 application이고 `.app` wrapper, bundle identifier와 Simulator 플랫폼을 가진 target만 실행 후보로 남긴다. Scheme 이름과 앱 target 이름이 직접 일치하는 후보가 있으면 workspace나 테스트 Scheme에 간접 포함된 앱보다 우선한다. 검사 결과는 5분 동안 메모리에 보관하며 build settings 원문은 Renderer나 로그에 전달하지 않는다.
+
+실행 가능한 앱 Scheme이 하나면 `projects.runtime_adapter_json`에 자동 저장하고 기본 기기군을 iPhone으로 설정한다. 여러 개면 임의로 고르지 않고 Renderer가 프로젝트 설정의 목록에서 선택하도록 한다. Renderer는 Build·Run·Observe·Act가 연결되지 않았을 때 **iOS 자동 연결**을 제공하고, 저장된 감지 설정이 있어도 **실행 설정 다시 찾기**를 제공한다. 사용자는 container, Scheme, iPhone·iPad 선택을 직접 수정하거나 runtime을 끌 수도 있다. 이 과정은 대상 저장소에 파일을 쓰지 않는다.
 
 Renderer는 다음 상태를 구분한다.
 
@@ -169,7 +171,7 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
 
-`ProjectSimulatorService`는 작업 runtime과 별도로 사람이 현재 원본 앱을 빠르게 확인하는 개발 실행 세션을 관리한다. 프로젝트에 저장된 iOS adapter를 사용해 원본 checkout을 전용 DerivedData에 빌드하고, 설정된 iPhone 또는 iPad Simulator를 부팅해 앱을 설치·실행한다. 재실행은 설치된 bundle identifier에 `simctl launch --terminate-running-process`만 실행하고, 종료는 해당 앱에만 `simctl terminate`를 호출한다. 프로젝트별 명령은 하나씩만 실행하며 container와 앱 산출물이 각각 저장소와 전용 DerivedData 안에 있는지 확인한다. 빌드 산출물은 설치 직후 삭제하고, 앱 종료 시 추적한 앱 프로세스만 정리하며 Simulator 기기는 종료하지 않는다. 상태 변화는 별도 IPC 이벤트로 Renderer에 전달한다.
+`ProjectSimulatorService`는 작업 runtime과 별도로 사람이 현재 원본 앱을 빠르게 확인하는 개발 실행 세션을 관리한다. 프로젝트에 저장된 iOS adapter를 사용하며 전체 빌드와 Simulator 부팅 전에 선택한 Scheme의 build settings에서 설치 가능한 iOS 앱 target을 확인한다. Framework나 테스트 Scheme이면 즉시 중단하고 프로젝트 설정에서 앱 Scheme을 다시 선택하도록 안내한다. 사전 검사를 통과하면 원본 checkout을 전용 DerivedData에 빌드하고, 설정된 iPhone 또는 iPad Simulator를 부팅해 앱을 설치·실행한다. 재실행은 설치된 bundle identifier에 `simctl launch --terminate-running-process`만 실행하고, 종료는 해당 앱에만 `simctl terminate`를 호출한다. 프로젝트별 명령은 하나씩만 실행하며 container와 앱 산출물이 각각 저장소와 전용 DerivedData 안에 있는지 확인한다. 빌드 산출물은 설치 직후 삭제하고, 앱 종료 시 추적한 앱 프로세스만 정리하며 Simulator 기기는 종료하지 않는다. 상태 변화는 별도 IPC 이벤트로 Renderer에 전달한다.
 
 소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
 
