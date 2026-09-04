@@ -45,6 +45,7 @@ function buildSnapshot(): DashboardSnapshot {
           }
         : null,
       runtimeConfigSource: searchParams.get('contract') === 'ios' ? 'detected' : null,
+      publishStrategy: 'pull-request' as const,
       isDemo: true,
       createdAt: atOffset(-30, 9)
     },
@@ -56,6 +57,7 @@ function buildSnapshot(): DashboardSnapshot {
       testCommand: '',
       runtimeAdapter: null,
       runtimeConfigSource: null,
+      publishStrategy: 'pull-request' as const,
       isDemo: true,
       createdAt: atOffset(-10, 9)
     }
@@ -81,6 +83,9 @@ function buildSnapshot(): DashboardSnapshot {
       worktreePath: null,
       sourceBranch: null,
       baseCommit: null,
+      verificationBaseCommit: null,
+      publishStrategy: 'pull-request' as const,
+      publication: null,
       runtimeContract: null,
       runtimeScenarioSummary: null,
       runtimeScenarioApprovedAt: null,
@@ -108,6 +113,30 @@ function buildSnapshot(): DashboardSnapshot {
         'failed',
         'Tuist 외부 의존성이 준비되지 않았습니다.'
       )
+    }
+  }
+  if (searchParams.get('publication') === 'local-sync') {
+    tasks[0] = {
+      ...tasks[0],
+      status: 'awaiting_approval',
+      branchName: `agentmonitor/demo-${tasks[0].id.slice(0, 6)}`,
+      worktreePath: `demo://worktrees/${tasks[0].id}`,
+      sourceBranch: 'main',
+      baseCommit: '1111111111111111111111111111111111111111',
+      verificationBaseCommit: '1111111111111111111111111111111111111111',
+      publishStrategy: 'direct',
+      publication: {
+        strategy: 'direct',
+        status: 'awaiting_local_sync',
+        remoteName: 'origin',
+        baseBranch: 'main',
+        remoteBranch: 'main',
+        pullRequestUrl: null,
+        publishedCommit: '2222222222222222222222222222222222222222',
+        mergeCommit: null,
+        message: '원격 origin/main 게시 완료 · 로컬 동기화 대기',
+        updatedAt: new Date().toISOString()
+      }
     }
   }
   const findings = Array.from({ length: 6 }, (_, index) => ({
@@ -337,6 +366,14 @@ let demoSourceControlFiles: SourceControlFile[] = [
   }
 ]
 let demoSourceControlIdentity = { name: '김동현', email: 'developer@example.com', complete: true }
+let demoSourceControlRemote: NonNullable<SourceControlStatus['remote']> = {
+  name: 'origin',
+  url: 'git@github.com:example/AgentMonitoring.git',
+  upstream: searchParams.get('source-remote') === 'unconnected' ? null : 'origin/main',
+  ahead: ['ahead', 'diverged'].includes(searchParams.get('source-remote') ?? '') ? 2 : 0,
+  behind: ['behind', 'diverged'].includes(searchParams.get('source-remote') ?? '') ? 1 : 0,
+  diverged: searchParams.get('source-remote') === 'diverged'
+}
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
 let demoAuth: CodexAuthStatus = searchParams.get('auth') === 'signed-out'
@@ -360,6 +397,7 @@ function sourceControlStatus(requestedProjectId: string): SourceControlStatus {
     stagedCount: files.filter((file) => file.staged).length,
     workingCount: files.filter((file) => file.working).length,
     conflictedCount: files.filter((file) => file.conflicted).length,
+    remote: demoSourceControlRemote,
     inspectedAt: new Date().toISOString()
   }
 }
@@ -384,7 +422,10 @@ function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: 
 function updateTask(
   taskId: string,
   status: TaskStatus,
-  changes: Partial<Pick<TaskRecord, 'branchName' | 'worktreePath'>> = {}
+  changes: Partial<Pick<
+    TaskRecord,
+    'branchName' | 'worktreePath' | 'sourceBranch' | 'baseCommit' | 'verificationBaseCommit'
+  >> = {}
 ): TaskRecord {
   let updated: TaskRecord | undefined
   state = {
@@ -469,6 +510,7 @@ export const demoBridge: AgentMonitoringBridge = {
           }
         : null,
       runtimeConfigSource: hasIosRuntime ? 'detected' : null,
+      publishStrategy: 'pull-request',
       isDemo: false,
       createdAt: now
     }
@@ -493,7 +535,8 @@ export const demoBridge: AgentMonitoringBridge = {
                 JSON.stringify(project.runtimeAdapter) === JSON.stringify(input.runtimeAdapter)
               ? 'manifest'
               : 'detected'
-            : null
+            : null,
+          publishStrategy: input.publishStrategy ?? project.publishStrategy ?? 'pull-request'
         }
         return updated
       })
@@ -660,6 +703,20 @@ export const demoBridge: AgentMonitoringBridge = {
       status: sourceControlStatus(input.projectId)
     }
   },
+  fetchSourceControlRemote: async (requestedProjectId) => sourceControlStatus(requestedProjectId),
+  pushSourceControlRemote: async (requestedProjectId) => {
+    demoSourceControlRemote = {
+      ...demoSourceControlRemote,
+      upstream: demoSourceControlRemote.upstream ?? 'origin/main',
+      ahead: 0,
+      diverged: false
+    }
+    return sourceControlStatus(requestedProjectId)
+  },
+  syncSourceControlRemote: async (requestedProjectId) => {
+    demoSourceControlRemote = { ...demoSourceControlRemote, behind: 0, diverged: false }
+    return sourceControlStatus(requestedProjectId)
+  },
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
@@ -745,6 +802,9 @@ export const demoBridge: AgentMonitoringBridge = {
       worktreePath: null,
       sourceBranch: null,
       baseCommit: null,
+      verificationBaseCommit: null,
+      publishStrategy: input.publishStrategy,
+      publication: null,
       runtimeContract: input.runtimeContract ?? null,
       runtimeScenarioSummary: input.runtimeScenarioSummary ?? null,
       runtimeScenarioApprovedAt: input.runtimeContract ? now : null,
@@ -779,7 +839,10 @@ export const demoBridge: AgentMonitoringBridge = {
   runTask: async (taskId) => {
     const task = updateTask(taskId, 'running', {
       branchName: `agentmonitor/demo-${taskId.slice(0, 6)}`,
-      worktreePath: `demo://worktrees/${taskId}`
+      worktreePath: `demo://worktrees/${taskId}`,
+      sourceBranch: 'main',
+      baseCommit: '1111111111111111111111111111111111111111',
+      verificationBaseCommit: '1111111111111111111111111111111111111111'
     })
     emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
     const plan = task.verificationPlan
@@ -825,9 +888,53 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(task, 'task_stopped', 'human', '작업을 중단했습니다.')
   },
   approveTask: async (taskId) => {
+    const current = state.tasks.find((task) => task.id === taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if ((current.publishStrategy ?? 'pull-request') === 'pull-request') {
+      const publication = {
+        strategy: 'pull-request' as const,
+        status: 'awaiting_merge' as const,
+        remoteName: 'origin',
+        baseBranch: 'main',
+        remoteBranch: current.branchName,
+        pullRequestUrl: 'https://github.com/example/AgentMonitoring/pull/42',
+        publishedCommit: 'd4e5f6a7',
+        mergeCommit: null,
+        message: 'PR을 만들었습니다. GitHub에서 병합한 뒤 상태를 확인하세요.',
+        updatedAt: new Date().toISOString()
+      }
+      state = { ...state, tasks: state.tasks.map((task) => task.id === taskId ? { ...task, publication } : task) }
+      const task = updateTask(taskId, 'awaiting_merge')
+      emit(task, 'agent', 'git', '원격 브랜치 게시 및 PR 생성')
+      return { outcome: 'pr_opened', message: '작업 브랜치를 원격에 올리고 PR을 만들었습니다.' }
+    }
     const task = updateTask(taskId, 'completed', { worktreePath: null })
-    emit(task, 'task_completed', 'human', `${task.title} 변경을 원본 브랜치에 적용`)
-    return { outcome: 'applied', message: 'AI 작업을 원본 브랜치에 적용했습니다.' }
+    emit(task, 'task_completed', 'human', `${task.title} 변경을 원격 main에 게시`)
+    return { outcome: 'published', message: '원격 main에 게시하고 로컬 브랜치도 동기화했습니다.' }
+  },
+  refreshTaskPublication: async (taskId) => {
+    const task = updateTask(taskId, 'completed', { worktreePath: null })
+    state = {
+      ...state,
+      tasks: state.tasks.map((item) => item.id === taskId && item.publication
+        ? { ...item, publication: { ...item.publication, status: 'published', message: 'PR 병합과 로컬 동기화를 완료했습니다.', updatedAt: new Date().toISOString() } }
+        : item)
+    }
+    emit(task, 'task_completed', 'human', `${task.title} PR 병합 확인 및 로컬 동기화`)
+    return { outcome: 'published', message: 'PR 병합을 확인하고 로컬 main을 동기화했습니다.' }
+  },
+  switchTaskPublicationToPullRequest: async (taskId) => {
+    let updated: TaskRecord | undefined
+    state = {
+      ...state,
+      tasks: state.tasks.map((task) => {
+        if (task.id !== taskId) return task
+        updated = { ...task, publishStrategy: 'pull-request', publication: null, updatedAt: new Date().toISOString() }
+        return updated
+      })
+    }
+    if (!updated) throw new Error('작업을 찾을 수 없습니다.')
+    return updated
   },
   discardTask: async (taskId) => {
     const task = updateTask(taskId, 'discarded', { worktreePath: null })
@@ -913,6 +1020,7 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(null, 'note_deleted', 'human', `${note.title} 메모 삭제`)
   },
   openPath: async () => undefined,
+  openExternalUrl: async () => undefined,
   openFeedback: async () => undefined,
   onCodexAuthChanged: (listener) => {
     authListeners.add(listener)

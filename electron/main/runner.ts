@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
+import { z } from 'zod'
 import type {
   EventRecord,
   ProjectRecord,
@@ -36,6 +37,7 @@ import {
   type RuntimeCommandRequest
 } from './ios-simulator-runtime'
 import { projectCapabilityManifestSchema, readProjectCapabilityManifest } from './project-capabilities'
+import { redactProcessOutput } from './process-output'
 import {
   detectProjectSetupCommand,
   environmentFailureMessage,
@@ -67,7 +69,28 @@ const ALLOWED_TEST_COMMANDS = new Set([
   'gradle'
 ])
 
-const ANSI_PATTERN = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
+const GIT_COMMIT_PATTERN = /^[0-9a-f]{40,64}$/i
+const GITHUB_PULL_REQUEST_URL_PATTERN = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/
+const githubPullRequestSchema = z.object({
+  state: z.enum(['OPEN', 'CLOSED', 'MERGED']),
+  mergedAt: z.string().nullable().optional(),
+  url: z.string().regex(GITHUB_PULL_REQUEST_URL_PATTERN),
+  baseRefName: z.string().min(1),
+  headRefName: z.string().min(1),
+  headRefOid: z.string().regex(GIT_COMMIT_PATTERN),
+  mergeCommit: z.object({ oid: z.string().regex(GIT_COMMIT_PATTERN) }).nullable().optional()
+})
+const githubPullRequestListSchema = z.array(githubPullRequestSchema.pick({
+  state: true,
+  mergedAt: true,
+  url: true,
+  baseRefName: true,
+  headRefName: true,
+  headRefOid: true,
+  mergeCommit: true
+}))
+
+type GithubPullRequest = z.infer<typeof githubPullRequestSchema>
 
 interface ActiveRun {
   child: ChildProcess | null
@@ -136,12 +159,14 @@ export interface RunnerPolicy {
   codexStageTimeoutMs: number
   testCommandTimeoutMs: number
   terminationGraceMs: number
+  remoteOperationTimeoutMs: number
 }
 
 export const DEFAULT_RUNNER_POLICY: RunnerPolicy = {
   codexStageTimeoutMs: 30 * 60_000,
   testCommandTimeoutMs: 45 * 60_000,
-  terminationGraceMs: 3_000
+  terminationGraceMs: 3_000,
+  remoteOperationTimeoutMs: 2 * 60_000
 }
 
 class StoppedError extends Error {
@@ -182,11 +207,7 @@ class EnvironmentPreparationError extends Error {
 }
 
 function redact(value: string): string {
-  return value
-    .replace(ANSI_PATTERN, '')
-    .replace(/(?:sk|gho|github_pat|xox[baprs])-[-_A-Za-z0-9]{16,}/g, '[REDACTED]')
-    .replace(/Bearer\s+[-._A-Za-z0-9]{16,}/gi, 'Bearer [REDACTED]')
-    .slice(0, 8_000)
+  return redactProcessOutput(value).slice(0, 8_000)
 }
 
 export function parseReviewerFindings(report: string): Array<{ severity: Severity; title: string }> {
@@ -295,7 +316,8 @@ export class AgentRunner {
     private readonly codexHome?: string,
     policy: Partial<RunnerPolicy> = {},
     private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter,
-    private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator()
+    private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator(),
+    private readonly githubCommand = 'gh'
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
     this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
@@ -317,14 +339,28 @@ export class AgentRunner {
       return { taskId, available: false, files: [], stat: '', patch: '', truncated: false }
     }
 
-    const project = this.store.getProject(task.projectId)
-    const projectHead = await this.requireGit(['rev-parse', 'HEAD'], project.path, '원본 기준 commit을 확인할 수 없습니다.')
-    const mergeBase = await this.requireGit(
-      ['merge-base', 'HEAD', projectHead.output.trim()],
-      task.worktreePath,
-      '작업 변경의 공통 기준 commit을 확인할 수 없습니다.'
-    )
-    const baseCommit = mergeBase.output.trim()
+    let baseCommit = task.verificationBaseCommit ?? task.baseCommit
+    if (baseCommit && GIT_COMMIT_PATTERN.test(baseCommit)) {
+      const verifiedBase = await this.requireGit(
+        ['rev-parse', '--verify', `${baseCommit}^{commit}`],
+        task.worktreePath,
+        '작업 검증 기준 commit을 확인할 수 없습니다.'
+      )
+      baseCommit = verifiedBase.output.trim()
+    } else {
+      const project = this.store.getProject(task.projectId)
+      const projectHead = await this.requireGit(
+        ['rev-parse', 'HEAD'],
+        project.path,
+        '원본 기준 commit을 확인할 수 없습니다.'
+      )
+      const mergeBase = await this.requireGit(
+        ['merge-base', 'HEAD', projectHead.output.trim()],
+        task.worktreePath,
+        '작업 변경의 공통 기준 commit을 확인할 수 없습니다.'
+      )
+      baseCommit = mergeBase.output.trim()
+    }
     const [statusResult, numstatResult, statResult, patchResult] = await Promise.all([
       this.requireGit(
         ['status', '--short', '--untracked-files=all'],
@@ -1043,7 +1079,7 @@ export class AgentRunner {
   private async approveUnlocked(taskId: string): Promise<TaskApprovalResult> {
     const task = this.store.getTask(taskId)
     if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
-      throw new Error('검증 후 사람의 확인을 기다리는 작업만 원본에 적용할 수 있습니다.')
+      throw new Error('검증 후 사람의 확인을 기다리는 작업만 원격에 게시할 수 있습니다.')
     }
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
@@ -1100,52 +1136,482 @@ export class AgentRunner {
     }
 
     await this.assertCleanCheckout(projectRoot)
-    const targetHead = await this.requireGit(
-      ['rev-parse', 'HEAD'],
+    const remoteName = 'origin'
+    const remoteUrl = await this.requireGit(
+      ['remote', 'get-url', remoteName],
       projectRoot,
-      '원본 브랜치의 최신 commit을 확인할 수 없습니다.'
+      'origin 원격 저장소가 설정되지 않았습니다.'
     )
+    await this.requireRemoteGit(
+      ['fetch', remoteName, '--prune'],
+      projectRoot,
+      '원격 저장소의 최신 상태를 가져오지 못했습니다.'
+    )
+    const remoteRef = `refs/remotes/${remoteName}/${currentTargetBranch}`
+    const remoteHead = await this.requireGit(
+      ['rev-parse', '--verify', remoteRef],
+      projectRoot,
+      `원격 ${remoteName}/${currentTargetBranch} 브랜치를 찾을 수 없습니다.`
+    )
+    const localRelation = await this.requireGit(
+      ['rev-list', '--left-right', '--count', `${remoteRef}...HEAD`],
+      projectRoot,
+      '로컬과 원격 브랜치의 관계를 확인할 수 없습니다.'
+    )
+    const [remoteOnly, localOnly] = localRelation.output.trim().split(/\s+/).map(Number)
+    if (localOnly > 0) {
+      throw new Error(
+        `로컬 ${currentTargetBranch}에 원격에 없는 커밋이 ${localOnly}개 있습니다. ` +
+          '소스 제어에서 이 커밋을 먼저 별도로 게시한 뒤 다시 승인하세요.'
+      )
+    }
+    if (remoteOnly > 0) {
+      this.emit(task, 'agent', 'git', `원격 ${remoteName}/${currentTargetBranch} 새 commit ${remoteOnly}개 확인`)
+    }
     const canFastForward = await this.runProcess(
       'git',
-      ['merge-base', '--is-ancestor', targetHead.output.trim(), task.branchName],
+      ['merge-base', '--is-ancestor', remoteHead.output.trim(), task.branchName],
       projectRoot,
       null
     )
     if (canFastForward.code === 1) {
-      await this.rebaseAndReverify(task, currentTargetBranch, targetHead.output.trim())
+      await this.rebaseAndReverify(task, `${remoteName}/${currentTargetBranch}`, remoteHead.output.trim())
       return {
         outcome: 'reverified',
         message:
-          `원본 ${currentTargetBranch} 브랜치의 최신 commit을 작업에 반영하고 검증을 다시 완료했습니다. ` +
-          '변경 내용을 확인한 뒤 한 번 더 적용하세요.'
+          `원격 ${remoteName}/${currentTargetBranch}의 최신 commit을 작업에 반영하고 검증을 다시 완료했습니다. ` +
+          '변경 내용을 확인한 뒤 한 번 더 게시하세요.'
       }
     }
     if (canFastForward.code !== 0) {
       throw new Error('원본과 작업 브랜치의 관계를 확인할 수 없습니다.')
     }
 
-    const mergeResult = await this.runProcess('git', ['merge', '--ff-only', task.branchName], projectRoot, null)
-    if (mergeResult.code !== 0) {
-      throw new Error(
-        `원본 ${currentTargetBranch} 브랜치가 적용 직전에 변경되었습니다. 변경 상태를 확인한 뒤 다시 승인하세요.`
-      )
+    const taskHead = await this.requireGit(
+      ['rev-parse', task.branchName],
+      projectRoot,
+      '게시할 작업 commit을 확인할 수 없습니다.'
+    )
+    const strategy = task.publishStrategy ?? project.publishStrategy ?? 'pull-request'
+    const publication = {
+      strategy,
+      status: 'not_started' as const,
+      remoteName,
+      baseBranch: currentTargetBranch,
+      remoteBranch: strategy === 'pull-request' ? task.branchName : currentTargetBranch,
+      pullRequestUrl: null,
+      publishedCommit: taskHead.output.trim(),
+      mergeCommit: null,
+      message: null,
+      updatedAt: new Date().toISOString()
     }
 
-    const completed = this.store.transitionTask(taskId, 'completed')
-    this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원본 ${currentTargetBranch} 브랜치에 적용`)
+    if (strategy === 'direct') {
+      const push = await this.runRemoteGit(
+        ['push', remoteName, `${task.branchName}:refs/heads/${currentTargetBranch}`],
+        worktreePath,
+        `원격 ${remoteName}/${currentTargetBranch} 직접 게시`
+      )
+      if (push.code !== 0) {
+        this.store.setTaskPublication(taskId, {
+          ...publication,
+          status: 'failed',
+          message: push.output.trim().slice(-2_000),
+          updatedAt: new Date().toISOString()
+        })
+        throw new Error(this.directPushFailureMessage(currentTargetBranch, push.output))
+      }
+      this.store.setTaskPublication(taskId, {
+        ...publication,
+        status: 'awaiting_local_sync',
+        message: `원격 ${remoteName}/${currentTargetBranch} 게시 완료 · 로컬 동기화 대기`,
+        updatedAt: new Date().toISOString()
+      })
+      this.emit(task, 'agent', 'git', `검증된 commit을 원격 ${remoteName}/${currentTargetBranch}에 직접 게시`)
+      return this.finishRemotePublication(taskId)
+    }
 
+    if (!this.isGitHubRemote(remoteUrl.output.trim())) {
+      throw new Error('PR 자동 생성은 현재 GitHub 원격 저장소에서만 지원합니다. 직접 게시를 선택하거나 GitHub origin을 연결하세요.')
+    }
+    const auth = await this.runGh(['auth', 'status'], projectRoot)
+    if (auth.code !== 0) {
+      throw new Error(`PR을 만들려면 GitHub CLI 로그인이 필요합니다. 앱을 다시 시도하기 전에 gh 인증을 완료하세요.\n${auth.output.trim().slice(-1_000)}`)
+    }
+    const branchPush = await this.runRemoteGit(
+      ['push', '--set-upstream', remoteName, task.branchName],
+      worktreePath,
+      `원격 작업 브랜치 ${task.branchName} 게시`
+    )
+    if (branchPush.code !== 0) {
+      throw new Error(`작업 브랜치를 원격에 올리지 못했습니다.\n${branchPush.output.trim().slice(-2_000)}`)
+    }
+    const pullRequestUrl = await this.createOrFindPullRequest(
+      task,
+      currentTargetBranch,
+      taskHead.output.trim(),
+      remoteUrl.output.trim()
+    )
+    this.store.setTaskPublication(taskId, {
+      ...publication,
+      status: 'awaiting_merge',
+      pullRequestUrl,
+      message: 'PR을 만들었습니다. GitHub에서 병합한 뒤 상태를 확인하세요.',
+      updatedAt: new Date().toISOString()
+    })
+    const awaitingMerge = this.store.transitionTask(taskId, 'awaiting_merge')
+    this.emit(awaitingMerge, 'agent', 'git', `원격 브랜치 게시 및 PR 생성 · ${pullRequestUrl}`)
+    return {
+      outcome: 'pr_opened',
+      message: '작업 브랜치를 원격에 올리고 PR을 만들었습니다. 병합 후 “PR 상태 확인”을 누르세요.'
+    }
+  }
+
+  async refreshPublication(taskId: string): Promise<TaskApprovalResult> {
+    const task = this.store.getTask(taskId)
+    return this.gitCoordinator.runExclusive(task.projectId, () => this.refreshPublicationUnlocked(taskId))
+  }
+
+  private async refreshPublicationUnlocked(taskId: string): Promise<TaskApprovalResult> {
+    const task = this.store.getTask(taskId)
+    const publication = task.publication
+    if (!publication) throw new Error('이 작업에는 확인할 원격 게시 기록이 없습니다.')
+    if (publication.status === 'awaiting_local_sync') return this.finishRemotePublication(taskId)
+    if (task.status !== 'awaiting_merge' || !publication.pullRequestUrl) {
+      throw new Error('PR 병합을 기다리는 작업만 상태를 확인할 수 있습니다.')
+    }
+
+    if (!publication.baseBranch || !publication.remoteBranch || !publication.publishedCommit) {
+      throw new Error('PR 게시 commit 정보를 복원할 수 없습니다.')
+    }
+    const status = await this.readPullRequest(publication.pullRequestUrl, task.projectId)
+    const mismatch = this.pullRequestMismatchMessage(
+      status,
+      publication.baseBranch,
+      publication.remoteBranch,
+      publication.publishedCommit,
+      publication.pullRequestUrl
+    )
+    if (mismatch) return this.failPublicationIntegrity(task, publication, mismatch)
+    if (status.state === 'OPEN') {
+      return { outcome: 'awaiting_merge', message: 'PR이 아직 열려 있습니다. GitHub에서 병합한 뒤 다시 확인하세요.' }
+    }
+    if (!status.mergedAt && status.state !== 'MERGED') {
+      this.store.setTaskPublication(taskId, {
+        ...publication,
+        status: 'failed',
+        message: 'PR이 병합되지 않은 채 닫혔습니다.',
+        updatedAt: new Date().toISOString()
+      })
+      this.store.transitionTask(taskId, 'awaiting_approval')
+      return { outcome: 'awaiting_merge', message: 'PR이 병합되지 않은 채 닫혔습니다. 변경을 확인하고 다시 게시하세요.' }
+    }
+
+    const mergeCommit = status.mergeCommit?.oid
+    if (!mergeCommit) {
+      this.store.setTaskPublication(taskId, {
+        ...publication,
+        status: 'awaiting_merge',
+        message: 'PR 병합은 확인했지만 merge commit이 아직 보이지 않습니다. 잠시 후 다시 확인하세요.',
+        updatedAt: new Date().toISOString()
+      })
+      return { outcome: 'awaiting_merge', message: 'PR merge commit을 확인할 때까지 로컬 동기화를 기다립니다.' }
+    }
+
+    this.store.setTaskPublication(taskId, {
+      ...publication,
+      status: 'awaiting_local_sync',
+      mergeCommit,
+      message: 'PR 병합 확인 · 로컬 동기화 대기',
+      updatedAt: new Date().toISOString()
+    })
+    return this.finishRemotePublication(taskId)
+  }
+
+  private async finishRemotePublication(taskId: string): Promise<TaskApprovalResult> {
+    const task = this.store.getTask(taskId)
+    const publication = task.publication
+    if (!publication?.remoteName || !publication.baseBranch) {
+      throw new Error('원격 게시 정보를 복원할 수 없습니다.')
+    }
+    const project = this.store.getProject(task.projectId)
+    const projectRoot = resolve(project.path)
+    await this.assertCleanCheckout(projectRoot)
+    const checkedOutBranch = await this.requireGit(
+      ['branch', '--show-current'],
+      projectRoot,
+      '로컬 브랜치를 확인할 수 없습니다.'
+    )
+    if (checkedOutBranch.output.trim() !== publication.baseBranch) {
+      throw new Error(`${publication.baseBranch} 브랜치를 checkout한 뒤 로컬 동기화를 다시 시도하세요.`)
+    }
+    await this.requireRemoteGit(
+      ['fetch', publication.remoteName, '--prune'],
+      projectRoot,
+      '원격 게시 결과를 가져오지 못했습니다.'
+    )
+    const remoteRef = `refs/remotes/${publication.remoteName}/${publication.baseBranch}`
+    const expectedRemoteCommit = publication.strategy === 'pull-request'
+      ? publication.mergeCommit
+      : publication.publishedCommit
+    if (!expectedRemoteCommit || !GIT_COMMIT_PATTERN.test(expectedRemoteCommit)) {
+      throw new Error('검증할 원격 게시 commit 정보를 복원할 수 없습니다.')
+    }
+    const containsExpectedCommit = await this.runProcess(
+      'git',
+      ['merge-base', '--is-ancestor', expectedRemoteCommit, remoteRef],
+      projectRoot,
+      null
+    )
+    if (containsExpectedCommit.code === 1) {
+      return this.failPublicationIntegrity(
+        task,
+        publication,
+        `원격 ${publication.remoteName}/${publication.baseBranch}에 검증한 게시 결과가 포함되지 않았습니다.`
+      )
+    }
+    if (containsExpectedCommit.code !== 0) {
+      throw new Error('원격 기준 브랜치와 게시 commit의 관계를 확인할 수 없습니다.')
+    }
+    const merge = await this.runProcess('git', ['merge', '--ff-only', remoteRef], projectRoot, null)
+    if (merge.code !== 0) {
+      this.store.setTaskPublication(taskId, {
+        ...publication,
+        status: 'awaiting_local_sync',
+        message: merge.output.trim().slice(-2_000),
+        updatedAt: new Date().toISOString()
+      })
+      return {
+        outcome: 'awaiting_merge',
+        message: `원격 게시에는 성공했지만 로컬 ${publication.baseBranch}을 fast-forward할 수 없습니다. 로컬 상태를 정리한 뒤 다시 확인하세요.`
+      }
+    }
+
+    const completedPublication = {
+      ...publication,
+      status: 'published' as const,
+      message: `원격 게시 및 로컬 ${publication.baseBranch} 동기화 완료`,
+      updatedAt: new Date().toISOString()
+    }
+    this.store.setTaskPublication(taskId, completedPublication)
+    const current = this.store.getTask(taskId)
+    const completed = this.store.transitionTask(taskId, 'completed')
+    this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원격에 게시하고 로컬 ${publication.baseBranch} 동기화`)
     try {
-      await this.cleanupTaskWorktree(completed, false)
-      this.emit(completed, 'agent', 'git', '승인된 격리 작업공간 정리 완료')
+      await this.cleanupTaskWorktree(current, false)
+      this.emit(completed, 'agent', 'git', '게시가 끝난 격리 작업공간 정리 완료')
     } catch (error) {
       this.emit(completed, 'agent', 'git', `격리 작업공간 정리 실패 · ${String(error).slice(-1_000)}`, 'low')
     }
     await this.cleanupTerminalDerivedData(completed)
     await this.removeRuntimeArtifactsWhenExpired(this.store.getTask(taskId))
     return {
-      outcome: 'applied',
-      message: `작업 변경을 원본 ${currentTargetBranch} 브랜치에 적용했습니다.`
+      outcome: 'published',
+      message: `원격 ${publication.remoteName}/${publication.baseBranch}에 게시하고 로컬 브랜치도 동기화했습니다.`
     }
+  }
+
+  private async createOrFindPullRequest(
+    task: TaskRecord,
+    baseBranch: string,
+    expectedHeadCommit: string,
+    remoteUrl: string
+  ): Promise<string> {
+    const existing = await this.runGh(
+      [
+        'pr', 'list',
+        '--head', task.branchName!,
+        '--base', baseBranch,
+        '--state', 'open',
+        '--json', 'state,url,baseRefName,headRefName,headRefOid',
+        '--limit', '1'
+      ],
+      this.store.getProject(task.projectId).path
+    )
+    if (existing.code !== 0) {
+      throw new Error(`기존 PR을 확인하지 못했습니다.\n${existing.output.trim().slice(-1_000)}`)
+    }
+    const records = this.parseGithubJson(
+      githubPullRequestListSchema,
+      existing.stdout.trim() || '[]',
+      '기존 PR 응답이 올바르지 않습니다.'
+    )
+    if (records[0]) {
+      const mismatch = this.pullRequestMismatchMessage(
+        records[0],
+        baseBranch,
+        task.branchName!,
+        expectedHeadCommit
+      )
+      if (mismatch) throw new Error(mismatch)
+      return records[0].url
+    }
+    const body = [
+      '## Summary',
+      '',
+      task.prompt,
+      '',
+      '## Validation',
+      '',
+      '- AgentMonitoring의 작업별 검증 계획과 Reviewer 검토를 통과했습니다.',
+      '- 원격 기준 브랜치 최신 상태를 반영한 뒤 게시했습니다.'
+    ].join('\n')
+    const created = await this.runGh(
+      ['pr', 'create', '--base', baseBranch, '--head', task.branchName!, '--title', task.title, '--body', body],
+      this.store.getProject(task.projectId).path
+    )
+    if (created.code !== 0) {
+      throw new Error(
+        `원격 브랜치는 게시했지만 PR을 만들지 못했습니다. GitHub CLI 인증을 확인하세요.\n` +
+          `${created.output.trim().slice(-2_000)}\n원격: ${this.redactRemoteUrl(remoteUrl)}`
+      )
+    }
+    const url = created.output.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0]
+    if (!url) throw new Error('PR은 생성됐지만 GitHub URL을 확인하지 못했습니다.')
+    const pullRequest = await this.readPullRequest(url, task.projectId)
+    const mismatch = this.pullRequestMismatchMessage(
+      pullRequest,
+      baseBranch,
+      task.branchName!,
+      expectedHeadCommit,
+      url
+    )
+    if (mismatch) throw new Error(mismatch)
+    if (pullRequest.state !== 'OPEN') {
+      throw new Error('생성한 PR이 열린 상태가 아닙니다. GitHub에서 PR 상태를 확인하세요.')
+    }
+    return url
+  }
+
+  private async readPullRequest(pullRequestUrl: string, projectId: string): Promise<GithubPullRequest> {
+    const result = await this.runGh(
+      [
+        'pr', 'view', pullRequestUrl,
+        '--json', 'state,mergedAt,url,baseRefName,headRefName,headRefOid,mergeCommit'
+      ],
+      this.store.getProject(projectId).path
+    )
+    if (result.code !== 0) {
+      throw new Error(`PR 상태를 확인하지 못했습니다. GitHub 인증과 네트워크를 확인하세요.\n${result.output.trim().slice(-1_000)}`)
+    }
+    return this.parseGithubJson(
+      githubPullRequestSchema,
+      result.stdout.trim(),
+      'GitHub PR 응답이 올바르지 않습니다.'
+    )
+  }
+
+  private parseGithubJson<T>(schema: z.ZodType<T>, value: string, failureMessage: string): T {
+    try {
+      return schema.parse(JSON.parse(value))
+    } catch {
+      throw new Error(failureMessage)
+    }
+  }
+
+  private pullRequestMismatchMessage(
+    pullRequest: GithubPullRequest,
+    expectedBaseBranch: string,
+    expectedHeadBranch: string,
+    expectedHeadCommit: string,
+    expectedUrl?: string
+  ): string | null {
+    if (expectedUrl && pullRequest.url !== expectedUrl) {
+      return 'GitHub가 반환한 PR URL이 게시 기록과 다릅니다. 자동 완료하지 않았습니다.'
+    }
+    if (pullRequest.baseRefName !== expectedBaseBranch) {
+      return `PR 기준 브랜치가 ${expectedBaseBranch}이 아닙니다. 자동 완료하지 않았습니다.`
+    }
+    if (pullRequest.headRefName !== expectedHeadBranch) {
+      return `PR 작업 브랜치가 ${expectedHeadBranch}와 다릅니다. 자동 완료하지 않았습니다.`
+    }
+    if (pullRequest.headRefOid !== expectedHeadCommit) {
+      return 'PR head가 사람이 승인하고 검증한 commit에서 변경됐습니다. 자동 완료하지 않았습니다.'
+    }
+    return null
+  }
+
+  private failPublicationIntegrity(
+    task: TaskRecord,
+    publication: NonNullable<TaskRecord['publication']>,
+    message: string
+  ): TaskApprovalResult {
+    this.store.setTaskPublication(task.id, {
+      ...publication,
+      status: 'failed',
+      message,
+      updatedAt: new Date().toISOString()
+    })
+    if (task.status === 'awaiting_merge') this.store.transitionTask(task.id, 'awaiting_approval')
+    return { outcome: 'awaiting_merge', message }
+  }
+
+  private runGh(args: string[], cwd: string): Promise<ProcessResult> {
+    return this.runProcess(
+      this.githubCommand,
+      args,
+      cwd,
+      null,
+      undefined,
+      this.remoteProcessEnvironment(),
+      { timeoutMs: this.policy.remoteOperationTimeoutMs, label: 'GitHub CLI 원격 작업' }
+    ).catch((error) => {
+      if (error instanceof ProcessTimeoutError) throw error
+      throw new Error(`GitHub CLI를 실행할 수 없습니다. gh 설치와 로그인을 확인하세요. ${String(error)}`)
+    })
+  }
+
+  private runRemoteGit(args: string[], cwd: string, label: string): Promise<ProcessResult> {
+    return this.runProcess(
+      'git',
+      args,
+      cwd,
+      null,
+      undefined,
+      this.remoteProcessEnvironment(),
+      { timeoutMs: this.policy.remoteOperationTimeoutMs, label }
+    )
+  }
+
+  private async requireRemoteGit(
+    args: string[],
+    cwd: string,
+    failureMessage: string
+  ): Promise<ProcessResult> {
+    const result = await this.runRemoteGit(args, cwd, failureMessage)
+    if (result.code !== 0) {
+      const detail = result.output.trim()
+      throw new Error(detail ? `${failureMessage}\n${detail.slice(-2_000)}` : failureMessage)
+    }
+    return result
+  }
+
+  private remoteProcessEnvironment(): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GCM_INTERACTIVE: 'Never',
+      GH_PROMPT_DISABLED: '1'
+    }
+  }
+
+  private isGitHubRemote(remoteUrl: string): boolean {
+    return /(^|[/:@])github\.com[/:]/i.test(remoteUrl)
+  }
+
+  private redactRemoteUrl(remoteUrl: string): string {
+    return redactProcessOutput(remoteUrl)
+  }
+
+  private directPushFailureMessage(baseBranch: string, output: string): string {
+    const detail = output.trim().slice(-2_000)
+    if (/protected branch|GH006|pre-receive hook declined/i.test(detail)) {
+      return `${baseBranch} 직접 게시가 브랜치 보호 정책에 의해 거절됐습니다. 작업 게시 방식을 PR로 바꾸세요.\n${detail}`
+    }
+    if (/non-fast-forward|fetch first|rejected/i.test(detail)) {
+      return `게시 직전에 원격 ${baseBranch}이 변경되어 안전하게 중단했습니다. 최신 상태를 반영하고 다시 검증하세요.\n${detail}`
+    }
+    return `원격 ${baseBranch}에 직접 게시하지 못했습니다.\n${detail}`
   }
 
   private async rebaseAndReverify(
@@ -1191,6 +1657,7 @@ export class AgentRunner {
       )
     }
 
+    this.store.setTaskVerificationBaseCommit(task.id, targetHead)
     this.emit(task, 'agent', 'git', `원본 ${targetBranch} 최신 변경 반영 완료 · 검증 다시 시작`)
     await this.retryVerification(task.id)
     const verifiedTask = this.store.getTask(task.id)
@@ -1472,6 +1939,14 @@ export class AgentRunner {
     approvedRuntimeContract: string,
     runtimeResult: RuntimeRunResult | null
   ): Promise<ProcessResult> {
+    const verificationBaseCommit = task.verificationBaseCommit ?? task.baseCommit
+    const diffInstruction = verificationBaseCommit && GIT_COMMIT_PATTERN.test(verificationBaseCommit)
+      ? [
+          `이 작업의 검증 기준 commit은 ${verificationBaseCommit}입니다.`,
+          `작업 변경이 이미 커밋됐을 수 있으므로 \`git diff ${verificationBaseCommit} --\`로 기준 commit 이후의 커밋·stage·미커밋 변경을 모두 검토하세요.`,
+          '기준 commit 이전의 upstream 변경을 이 작업의 변경으로 보고하지 마세요.'
+        ].join('\n')
+      : '현재 작업 브랜치와 원본 브랜치의 공통 기준을 확인해 전체 작업 diff를 검토하세요.'
     return this.runCodexStage(
       task,
       worktreePath,
@@ -1480,7 +1955,8 @@ export class AgentRunner {
       [
         `작업 목표: ${task.prompt}`,
         '당신은 최종 읽기 전용 Reviewer입니다.',
-        '현재 미커밋 diff, 기존 테스트, 실행 결과를 검토하세요.',
+        diffInstruction,
+        '기존 테스트와 실행 결과를 함께 검토하세요.',
         approvedRuntimeContract,
         runtimeResult
           ? [

@@ -12,10 +12,12 @@ import type {
   SourceControlStatus
 } from '../../src/shared/types'
 import { GitOperationCoordinator } from './git-operation-coordinator'
+import { redactProcessOutput } from './process-output'
 
 const execFileAsync = promisify(execFile)
 const MAX_GIT_OUTPUT_BYTES = 8_000_000
 const MAX_DIFF_LENGTH = 120_000
+const REMOTE_GIT_TIMEOUT_MS = 2 * 60_000
 const CONFLICT_CODES = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
 
 interface GitResult {
@@ -26,12 +28,19 @@ interface GitResult {
 async function runGit(
   projectPath: string,
   args: string[],
-  acceptedExitCodes: number[] = [0]
+  acceptedExitCodes: number[] = [0],
+  timeoutMs?: number
 ): Promise<GitResult> {
   try {
     const result = await execFileAsync('git', ['-C', projectPath, ...args], {
       encoding: 'utf8',
-      maxBuffer: MAX_GIT_OUTPUT_BYTES
+      maxBuffer: MAX_GIT_OUTPUT_BYTES,
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GCM_INTERACTIVE: 'Never'
+      }
     })
     return { stdout: result.stdout, stderr: result.stderr }
   } catch (error) {
@@ -39,14 +48,18 @@ async function runGit(
       code?: number | string
       stdout?: string
       stderr?: string
+      killed?: boolean
     }
     if (typeof failure.code === 'number' && acceptedExitCodes.includes(failure.code)) {
       return { stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' }
     }
-    const detail = [failure.stdout, failure.stderr]
+    if (failure.killed && timeoutMs) {
+      throw new Error(`원격 Git 명령 제한 시간 초과 (${Math.ceil(timeoutMs / 1_000)}초)`)
+    }
+    const detail = redactProcessOutput([failure.stdout, failure.stderr]
       .filter(Boolean)
       .join('\n')
-      .trim()
+      .trim())
       .slice(-4_000)
     throw new Error(detail || `Git 명령을 실행할 수 없습니다: git ${args[0] ?? ''}`)
   }
@@ -118,19 +131,38 @@ function identityFromValues(name: string, email: string): SourceControlIdentity 
   }
 }
 
+function redactRemoteUrl(remoteUrl: string): string {
+  return redactProcessOutput(remoteUrl)
+}
+
 export class SourceControlService {
   constructor(private readonly coordinator: GitOperationCoordinator) {}
 
   async getStatus(project: ProjectRecord): Promise<SourceControlStatus> {
     this.assertRealProject(project)
-    const [status, branch, head, name, email] = await Promise.all([
+    const [status, branch, head, name, email, remoteUrl, upstream] = await Promise.all([
       runGit(project.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
       runGit(project.path, ['branch', '--show-current']),
       runGit(project.path, ['rev-parse', '--short', 'HEAD'], [0, 128]),
       runGit(project.path, ['config', '--get', 'user.name'], [0, 1]),
-      runGit(project.path, ['config', '--get', 'user.email'], [0, 1])
+      runGit(project.path, ['config', '--get', 'user.email'], [0, 1]),
+      runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2]),
+      runGit(project.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], [0, 128])
     ])
     const files = parseSourceControlStatus(status.stdout)
+    const upstreamName = upstream.stdout.trim()
+    let ahead = 0
+    let behind = 0
+    if (upstreamName) {
+      const relation = await runGit(
+        project.path,
+        ['rev-list', '--left-right', '--count', `${upstreamName}...HEAD`],
+        [0, 128]
+      )
+      const [remoteOnly, localOnly] = relation.stdout.trim().split(/\s+/).map(Number)
+      behind = Number.isFinite(remoteOnly) ? remoteOnly : 0
+      ahead = Number.isFinite(localOnly) ? localOnly : 0
+    }
     return {
       projectId: project.id,
       branch: branch.stdout.trim() || null,
@@ -140,8 +172,89 @@ export class SourceControlService {
       stagedCount: files.filter((file) => file.staged !== null).length,
       workingCount: files.filter((file) => file.working !== null).length,
       conflictedCount: files.filter((file) => file.conflicted).length,
+      remote: remoteUrl.stdout.trim()
+        ? {
+            name: 'origin',
+            url: redactRemoteUrl(remoteUrl.stdout.trim()),
+            upstream: upstreamName || null,
+            ahead,
+            behind,
+            diverged: ahead > 0 && behind > 0
+          }
+        : null,
       inspectedAt: new Date().toISOString()
     }
+  }
+
+  fetch(project: ProjectRecord): Promise<SourceControlStatus> {
+    return this.coordinator.runExclusive(project.id, async () => {
+      this.assertRealProject(project)
+      const remote = await runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2])
+      if (!remote.stdout.trim()) throw new Error('origin 원격 저장소가 설정되지 않았습니다.')
+      await runGit(project.path, ['fetch', 'origin', '--prune'], [0], REMOTE_GIT_TIMEOUT_MS)
+      return this.getStatus(project)
+    })
+  }
+
+  push(project: ProjectRecord): Promise<SourceControlStatus> {
+    return this.coordinator.runExclusive(project.id, async () => {
+      this.assertRealProject(project)
+      const remote = await runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2])
+      if (!remote.stdout.trim()) throw new Error('origin 원격 저장소가 설정되지 않았습니다.')
+
+      await runGit(project.path, ['fetch', 'origin', '--prune'], [0], REMOTE_GIT_TIMEOUT_MS)
+      const status = await this.getStatus(project)
+      if (!status.branch) throw new Error('브랜치를 checkout한 상태에서만 원격에 push할 수 있습니다.')
+      if (status.conflictedCount > 0) throw new Error('충돌 파일을 해결하고 커밋한 뒤 push하세요.')
+      if (status.remote?.diverged || (status.remote?.behind ?? 0) > 0) {
+        throw new Error('원격 브랜치에 새 커밋이 있습니다. 먼저 원격 변경을 동기화한 뒤 push하세요.')
+      }
+
+      const upstream = status.remote?.upstream
+      let remoteBranch = status.branch
+      if (upstream) {
+        if (!upstream.startsWith('origin/')) {
+          throw new Error(`현재 upstream ${upstream}은 origin이 아닙니다. 외부 IDE에서 원격 연결을 확인하세요.`)
+        }
+        remoteBranch = upstream.slice('origin/'.length)
+      }
+      const refspec = `HEAD:refs/heads/${remoteBranch}`
+      const args = upstream
+        ? ['push', 'origin', refspec]
+        : ['push', '--set-upstream', 'origin', refspec]
+      await runGit(project.path, args, [0], REMOTE_GIT_TIMEOUT_MS)
+      await runGit(project.path, ['fetch', 'origin', '--prune'], [0], REMOTE_GIT_TIMEOUT_MS)
+      return this.getStatus(project)
+    })
+  }
+
+  sync(project: ProjectRecord): Promise<SourceControlStatus> {
+    return this.coordinator.runExclusive(project.id, async () => {
+      this.assertRealProject(project)
+      const remote = await runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2])
+      if (!remote.stdout.trim()) throw new Error('origin 원격 저장소가 설정되지 않았습니다.')
+
+      const before = await this.getStatus(project)
+      if (!before.branch) throw new Error('브랜치를 checkout한 상태에서만 원격 변경을 동기화할 수 있습니다.')
+      if (before.files.length > 0) throw new Error('커밋되지 않은 변경을 먼저 커밋한 뒤 원격 변경을 동기화하세요.')
+      if (!before.remote?.upstream) throw new Error('upstream이 없습니다. 현재 브랜치를 먼저 origin에 push하세요.')
+      if (!before.remote.upstream.startsWith('origin/')) {
+        throw new Error(`현재 upstream ${before.remote.upstream}은 origin이 아닙니다. 외부 IDE에서 원격 연결을 확인하세요.`)
+      }
+
+      await runGit(project.path, ['fetch', 'origin', '--prune'], [0], REMOTE_GIT_TIMEOUT_MS)
+      const status = await this.getStatus(project)
+      if (status.remote?.diverged) {
+        throw new Error('로컬과 원격 브랜치가 서로 다른 커밋을 가지고 있습니다. 외부 IDE에서 merge 또는 rebase 방향을 결정하세요.')
+      }
+      if ((status.remote?.ahead ?? 0) > 0) {
+        throw new Error('원격 동기화 전에 로컬 커밋을 먼저 push하세요.')
+      }
+      if ((status.remote?.behind ?? 0) === 0) return status
+
+      await runGit(project.path, ['merge', '--ff-only', status.remote!.upstream!])
+      return this.getStatus(project)
+    })
   }
 
   async getDiff(

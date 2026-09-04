@@ -68,6 +68,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  PublishStrategy,
   ProjectInspection,
   RuntimeEvidenceRecord,
   RuntimeAcceptanceAssertion,
@@ -110,7 +111,12 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'getSourceControlStatus',
   'getSourceControlDiff',
   'stageSourceControlPaths',
-  'commitSourceControlChanges'
+  'commitSourceControlChanges',
+  'fetchSourceControlRemote',
+  'pushSourceControlRemote',
+  'syncSourceControlRemote',
+  'refreshTaskPublication',
+  'switchTaskPublicationToPullRequest'
 ]
 const bridgeConnectionIssue: BridgeConnectionIssue | null = !electronRuntime
   ? null
@@ -132,6 +138,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   blocked_environment: '환경 확인 필요',
   awaiting_approval: '승인 대기',
   awaiting_manual_validation: '수동 검증 필요',
+  awaiting_merge: 'PR 병합 대기',
   completed: '완료',
   failed: '실패',
   stopped: '중단',
@@ -290,10 +297,21 @@ function statusTone(status: TaskStatus): string {
   if (status === 'failed') return 'red'
   if (status === 'awaiting_approval') return 'violet'
   if (status === 'awaiting_manual_validation') return 'amber'
+  if (status === 'awaiting_merge') return 'violet'
   if (status === 'blocked_environment') return 'amber'
   if (status === 'running' || status === 'testing') return 'blue'
   if (status === 'stopped' || status === 'discarded') return 'muted'
   return 'amber'
+}
+
+function isAwaitingLocalPublicationSync(task: TaskRecord): boolean {
+  return task.publication?.status === 'awaiting_local_sync'
+}
+
+function directPublishLabel(task: TaskRecord): string {
+  return task.sourceBranch
+    ? `${task.sourceBranch} 브랜치에 직접 게시`
+    : '작업 시작 브랜치에 직접 게시'
 }
 
 export function App(): React.JSX.Element {
@@ -495,7 +513,7 @@ export function App(): React.JSX.Element {
     void load(task.projectId)
   }
 
-  const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard'): Promise<void> => {
+  const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr'): Promise<void> => {
     try {
       if (action === 'discard' && !window.confirm('격리 작업공간과 변경을 폐기할까요?')) return
       if (action === 'approve') {
@@ -503,7 +521,7 @@ export function App(): React.JSX.Element {
         if (sourceStatus.files.length > 0) {
           setSelectedTask(null)
           setPage('source-control')
-          setError('원본에 커밋되지 않은 변경이 있습니다. 소스 제어에서 파일을 선택해 커밋한 뒤 다시 적용하세요.')
+          setError('원본에 커밋되지 않은 변경이 있습니다. 소스 제어에서 파일을 선택해 커밋한 뒤 다시 게시하세요.')
           return
         }
       }
@@ -511,8 +529,8 @@ export function App(): React.JSX.Element {
         action === 'approve' &&
         !window.confirm(
           task.status === 'awaiting_manual_validation'
-            ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 원본이 최신이면 바로 적용하고, 원본이 바뀌었다면 최신 변경을 반영한 뒤 다시 검증합니다.'
-            : '원본이 최신이면 작업을 바로 적용합니다. 원본이 바뀌었다면 최신 변경을 반영하고 검증한 뒤 다시 승인을 요청합니다. 계속할까요?'
+            ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 원격이 최신이면 선택한 방식으로 게시하고, 원격이 바뀌었다면 최신 변경을 반영한 뒤 다시 검증합니다.'
+            : `원격 최신 상태를 확인한 뒤 ${(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '작업 브랜치를 올리고 PR을 만듭니다' : `${task.sourceBranch ?? '작업 시작'} 브랜치에 직접 게시합니다`}. 원격이 바뀌었다면 재검증 후 다시 승인을 요청합니다. 계속할까요?`
         )
       ) return
       if (action === 'stop') await bridge.stopTask(task.id)
@@ -521,9 +539,18 @@ export function App(): React.JSX.Element {
         setNotice(result.message)
       }
       if (action === 'discard') await bridge.discardTask(task.id)
+      if (action === 'refresh-publication') {
+        const result = await bridge.refreshTaskPublication(task.id)
+        setNotice(result.message)
+      }
+      if (action === 'switch-to-pr') {
+        await bridge.switchTaskPublicationToPullRequest(task.id)
+        setNotice('이 작업의 게시 방식을 PR로 바꿨습니다. 변경을 다시 확인하고 게시하세요.')
+      }
       await load(task.projectId)
     } catch (actionError) {
       setError(String(actionError))
+      await load(task.projectId)
     }
   }
 
@@ -598,7 +625,8 @@ export function App(): React.JSX.Element {
         name: project.name,
         setupCommand: project.setupCommand,
         testCommand: command,
-        runtimeAdapter: project.runtimeAdapter
+        runtimeAdapter: project.runtimeAdapter,
+        publishStrategy: project.publishStrategy ?? 'pull-request'
       })
       await load(project.id)
       await refreshInspection(project.id)
@@ -634,7 +662,7 @@ export function App(): React.JSX.Element {
   const unresolved = snapshot.findings.filter((finding) => !finding.resolved)
   const activeTask = snapshot.tasks.find(isActiveTask) ?? null
   const awaitingTask = snapshot.tasks.find((task) =>
-    ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)
+    ['awaiting_approval', 'awaiting_manual_validation', 'awaiting_merge'].includes(task.status)
   ) ?? null
   const selectedProject = snapshot.selectedProject
 
@@ -1046,7 +1074,7 @@ function ProjectStartPage({
                 <small>외 {inspection.changeCount - inspection.changePreview.length}개</small>
               )}
             </div>
-            <p>격리 작업은 만들 수 있지만 `원본에 적용`하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
+            <p>격리 작업은 만들 수 있지만 원격에 게시하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
             <button className="secondary-button" onClick={onSourceControl}>
               <GitCompareArrows size={13} /> 소스 제어에서 커밋
             </button>
@@ -1636,7 +1664,7 @@ function ActivityFeed({ events }: { events: EventRecord[] }): React.JSX.Element 
   )
 }
 
-function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskRecord[]; onNewTask: () => void; onOpen: (task: TaskRecord) => void; onRun: (task: TaskRecord) => void; onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void }): React.JSX.Element {
+function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskRecord[]; onNewTask: () => void; onOpen: (task: TaskRecord) => void; onRun: (task: TaskRecord) => void; onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void }): React.JSX.Element {
   return (
     <section className="workspace-page">
       <PageHeading title="작업" description="계획부터 테스트와 승인까지 모든 에이전트 실행을 추적한다." action="새 작업" onAction={onNewTask} />
@@ -1651,7 +1679,8 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <div className="row-actions">
               {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
-              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <button title={task.status === 'awaiting_manual_validation' ? '직접 확인 후 원본에 적용' : '원본에 적용'} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {(task.status === 'awaiting_merge' || isAwaitingLocalPublicationSync(task)) && <button title={isAwaitingLocalPublicationSync(task) ? '로컬 동기화 다시 시도' : 'PR 상태 확인'} onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
             </div>
           </div>
         ))}
@@ -1795,11 +1824,13 @@ function SourceControlPage({
 
   const runStatusAction = async (
     key: string,
-    operation: () => Promise<SourceControlStatus>
+    operation: () => Promise<SourceControlStatus>,
+    successMessage?: string
   ): Promise<void> => {
     setBusyAction(key)
     try {
       updateStatus(await operation())
+      if (successMessage) setSuccess(successMessage)
     } catch (sourceError) {
       onError(String(sourceError))
     } finally {
@@ -1875,6 +1906,38 @@ function SourceControlPage({
           <small>{status?.identity.complete ? `${status.identity.name} · ${status.identity.email}` : '작성자 설정 필요'}</small>
         </div>
       </div>
+
+      <section className={`panel source-remote-status${status?.remote?.diverged ? ' attention' : ''}`}>
+        <div>
+          <strong>원격 저장소</strong>
+          {status?.remote ? (
+            <>
+              <p><code>{status.remote.name}</code> · {status.remote.upstream ?? 'upstream 미설정'} · 앞섬 {status.remote.ahead} / 뒤처짐 {status.remote.behind}</p>
+              {status.remote.diverged && <small>로컬과 원격에 서로 다른 커밋이 있습니다. 외부 IDE에서 merge 또는 rebase 방향을 결정하세요.</small>}
+            </>
+          ) : <p>origin 원격 저장소가 설정되지 않았습니다.</p>}
+        </div>
+        <div className="source-remote-actions">
+          <button className="secondary-button" type="button" disabled={busy || !status?.remote} onClick={() => void runStatusAction('fetch', () => bridge.fetchSourceControlRemote(project.id))}>
+            {busyAction === 'fetch' ? <LoaderCircle className="spin" size={13} /> : <GitCompareArrows size={13} />} 원격 상태 가져오기
+          </button>
+          {status?.remote && status.branch && !status.remote.diverged && !status.remote.upstream && (
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void runStatusAction('push', () => bridge.pushSourceControlRemote(project.id), `${status.branch} 브랜치를 origin에 연결하고 push했습니다.`)}>
+              {busyAction === 'push' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />} 브랜치 연결·Push
+            </button>
+          )}
+          {status?.remote && status.remote.ahead > 0 && status.remote.behind === 0 && !status.remote.diverged && (
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void runStatusAction('push', () => bridge.pushSourceControlRemote(project.id), `${status.remote!.ahead}개 로컬 커밋을 원격에 push했습니다.`)}>
+              {busyAction === 'push' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />} {status.remote.ahead}개 커밋 Push
+            </button>
+          )}
+          {status?.remote && status.remote.behind > 0 && status.remote.ahead === 0 && !status.remote.diverged && (
+            <button className="primary-button" type="button" disabled={busy || status.files.length > 0} onClick={() => void runStatusAction('sync', () => bridge.syncSourceControlRemote(project.id), `${status.remote!.behind}개 원격 커밋을 로컬에 동기화했습니다.`)}>
+              {busyAction === 'sync' ? <LoaderCircle className="spin" size={13} /> : <GitCompareArrows size={13} />} {status.remote.behind}개 커밋 동기화
+            </button>
+          )}
+        </div>
+      </section>
 
       {status && !status.identity.complete && (
         <form className="panel source-identity" onSubmit={(event) => void saveIdentity(event)}>
@@ -2045,11 +2108,13 @@ function ProjectsPage({
   const [setupCommand, setSetupCommand] = useState(project.setupCommand)
   const [testCommand, setTestCommand] = useState(project.testCommand)
   const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
+  const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
   useEffect(() => {
     setName(project.name)
     setSetupCommand(project.setupCommand)
     setTestCommand(project.testCommand)
     setRuntimeAdapter(project.runtimeAdapter)
+    setPublishStrategy(project.publishStrategy ?? 'pull-request')
   }, [project])
   return (
     <section className="workspace-page">
@@ -2067,7 +2132,7 @@ function ProjectsPage({
       )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
-        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter })
+        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter, publishStrategy })
       }}>
         <div className="setting-icon"><Settings2 size={18} /></div>
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -2075,6 +2140,14 @@ function ProjectsPage({
         <label><span>환경 준비 명령</span><input value={setupCommand} placeholder="예: tuist install" onChange={(event) => setSetupCommand(event.target.value)} /><small>새 격리 작업공간을 만든 직후와 의존성 설정이 바뀐 뒤, 테스트보다 먼저 실행한다.</small></label>
         <label><span>검증 명령</span><input value={testCommand} placeholder="예: pnpm check 또는 xcodebuild test ..." onChange={(event) => setTestCommand(event.target.value)} /><small>shell 연산자 없이 허용된 실행 파일과 인자만 입력한다.</small></label>
         <div className="allowed-tools"><strong>허용된 준비·테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
+        <label>
+          <span>기본 결과 게시 방식</span>
+          <select value={publishStrategy} onChange={(event) => setPublishStrategy(event.target.value as PublishStrategy)}>
+            <option value="pull-request">브랜치를 올리고 PR 만들기 (권장)</option>
+            <option value="direct">작업 시작 브랜치에 직접 올리기</option>
+          </select>
+          <small>새 작업에 기본 적용됩니다. 작업을 등록할 때마다 바꿀 수 있습니다.</small>
+        </label>
         <section className="runtime-settings" id="ios-runtime-settings">
           <div className="runtime-settings-heading">
             <div>
@@ -2170,7 +2243,9 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
     ['선택한 자동 검증', '의존성 설정이 바뀌면 환경을 다시 준비한 뒤 프로젝트 테스트, Simulator 또는 두 검증을 실행합니다.'],
     ['자가 수정', '실패하면 로그와 화면 증거를 전달해 남은 횟수만큼 다시 구현합니다.'],
     ['최종 검토', 'Reviewer가 diff, 테스트와 실행 증거를 읽고 문제를 보고합니다.'],
-    ['사람 승인', '결과를 확인한 뒤 원본에 적용하거나 격리 변경을 폐기합니다.']
+    ['사람 승인', '결과를 확인한 뒤 게시하거나 격리 변경을 폐기합니다.'],
+    ['원격 게시', '작업에서 선택한 방식에 따라 브랜치와 PR을 만들거나 작업 시작 브랜치에 직접 게시합니다.'],
+    ['로컬 동기화', '원격 반영이 끝나면 현재 로컬 브랜치를 fast-forward로 맞추고 완료 처리합니다.']
   ]
   const verificationModes = [
     ['프로젝트 테스트만', '로직·데이터·회귀 작업', '테스트 설계(선택) → 구현 → 검증 명령 → Reviewer'],
@@ -2183,7 +2258,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
     <Modal
       wide
       title="처음 작업 시작하기"
-      description="실제 프로젝트 연결부터 Codex 실행과 원본 적용까지 한 번에 확인하세요."
+      description="실제 프로젝트 연결부터 Codex 실행과 원격 게시까지 한 번에 확인하세요."
       onClose={onClose}
     >
       <div className="usage-help">
@@ -2191,7 +2266,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
           <Bot size={20} />
           <div>
             <strong>AgentMonitoring은 코드 편집기가 아니라 AI 개발 작업 관리자예요.</strong>
-            <p>Codex가 별도 작업공간에서 구현하고 검증하는 동안 원본 저장소를 보호하고, 마지막 적용 여부는 사람이 결정해요.</p>
+            <p>Codex가 별도 작업공간에서 구현하고 검증하는 동안 원본 저장소를 보호하고, PR 또는 직접 게시 여부는 사람이 결정해요.</p>
           </div>
         </section>
 
@@ -2243,7 +2318,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
         <section className="usage-boundaries" aria-label="승인 단계 구분">
           <article><ShieldCheck size={15} /><div><strong>검증 계획 확인하고 작업 등록</strong><p>실행할 단계와 합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.</p></div></article>
           <article><Play size={15} /><div><strong>실행</strong><p>격리 작업공간을 만들고 Codex 파이프라인을 시작해요.</p></div></article>
-          <article><GitBranch size={15} /><div><strong>원본에 적용</strong><p>최종 확인한 변경만 현재 로컬 브랜치에 반영해요.</p></div></article>
+          <article><GitBranch size={15} /><div><strong>원격에 게시</strong><p>PR 또는 직접 게시를 실행하고 원격 반영 뒤 로컬 브랜치를 동기화해요.</p></div></article>
         </section>
 
         <footer className="usage-help-footer">
@@ -2419,6 +2494,7 @@ function TaskModal({
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [maxAttempts, setMaxAttempts] = useState(3)
+  const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
   const initialMode: VerificationMode = project.testCommand.trim()
     ? project.runtimeAdapter ? 'both' : 'project-tests'
     : project.runtimeAdapter ? 'simulator-runtime' : 'manual-review'
@@ -2514,7 +2590,8 @@ function TaskModal({
         maxAttempts,
         runtimeContract: usesRuntime && runtimeSource === 'task-scenario' ? generated?.contract ?? null : null,
         runtimeScenarioSummary: usesRuntime && runtimeSource === 'task-scenario' ? generated?.summary ?? null : null,
-        verificationPlan: { version: 1, mode, testDesign, runtimeSource }
+        verificationPlan: { version: 1, mode, testDesign, runtimeSource },
+        publishStrategy
       })
     } finally {
       setSubmitting(false)
@@ -2634,12 +2711,17 @@ function TaskModal({
         )}
         {usesRuntime && runtimeSource === 'project-default' && <p className="scenario-unavailable"><FileJson size={13} />저장소의 `.agentmonitor/project.json`에 고정된 시나리오를 사용합니다.</p>}
         <label><span>최대 구현 시도 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /><small>최초 구현을 포함합니다. 테스트·Simulator 검증이나 Reviewer 검토에서 문제가 발견되면 남은 횟수만큼 다시 수정합니다.</small></label>
+        <section className="publication-selector">
+          <strong>검증이 끝난 변경을 어디에 게시할까요?</strong>
+          <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'pull-request'} onChange={() => setPublishStrategy('pull-request')} /><span><b>브랜치를 올리고 PR 만들기</b><small>작업 브랜치를 origin에 올리고 기준 브랜치 대상 PR을 만듭니다. 권장 방식입니다.</small></span></label>
+          <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'direct'} onChange={() => setPublishStrategy('direct')} /><span><b>작업 시작 브랜치에 직접 올리기</b><small>작업을 시작한 브랜치에 검증된 commit을 fast-forward push합니다. 강제 push는 하지 않습니다.</small></span></label>
+        </section>
         <div className="workflow-preview">
           {usesTests && !['existing-tests', 'skip'].includes(testDesign) && <><span><FileText size={13} />테스트 설계</span><i /></>}
           <span><Bot size={13} />구현</span><i />
           {usesTests && <><span><CheckCircle2 size={13} />프로젝트 테스트</span><i /></>}
           {usesRuntime && <><span><SquareTerminal size={13} />Simulator</span><i /></>}
-          <span><Search size={13} />Reviewer</span><i /><span><ShieldCheck size={13} />사람 확인</span>
+          <span><Search size={13} />Reviewer</span><i /><span><ShieldCheck size={13} />사람 확인</span><i /><span><GitBranch size={13} />{publishStrategy === 'pull-request' ? 'PR' : '원격 게시'}</span>
         </div>
         <button className="primary-button" disabled={submitting || generating || recommending || project.isDemo || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
       </form>
@@ -2746,11 +2828,12 @@ function TaskDrawer({
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onRetryVerification: (task: TaskRecord) => void
-  onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
+  onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
+  const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
     : runtimeReport
@@ -2802,6 +2885,14 @@ function TaskDrawer({
               <span><SquareTerminal size={12} />{task.runtimeContract.adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'}</span>
             </div>
             <small><ShieldCheck size={11} />{task.runtimeScenarioApprovedAt ? `${timeAgo(task.runtimeScenarioApprovedAt)} 승인` : '등록 시 승인'} · 에이전트가 변경할 수 없는 스냅샷</small>
+          </section>
+        )}
+        {task.publication && (
+          <section className="task-publication">
+            <div className="drawer-section-title"><strong>원격 게시</strong><span>{task.publication.strategy === 'pull-request' ? 'PR 방식' : '직접 게시'}</span></div>
+            <p>{task.publication.message ?? '게시를 기다리고 있습니다.'}</p>
+            <div><code>{task.publication.remoteName ?? 'origin'}/{task.publication.baseBranch ?? task.sourceBranch ?? '기준 브랜치'}</code>{task.publication.publishedCommit && <code>{task.publication.publishedCommit.slice(0, 8)}</code>}</div>
+            {task.publication.pullRequestUrl && <button className="secondary-button" onClick={() => void bridge.openExternalUrl(task.publication!.pullRequestUrl!)}><GitBranch size={13} />GitHub PR 열기</button>}
           </section>
         )}
         {runtime && (
@@ -2905,7 +2996,7 @@ function TaskDrawer({
         {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && (
           <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}`}>
             <ShieldCheck size={14} />
-            <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 로컬 적용'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 적용하거나 폐기하세요.' : '원본 checkout이 깨끗하고 fast-forward 가능한 경우에만 변경을 적용합니다.'}</p>
+            <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 원격 게시'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 게시하거나 폐기하세요.' : '원격 최신 상태를 반영하고 fast-forward 가능한 경우에만 게시합니다.'}</p>
           </div>
         )}
         {task.status === 'blocked_environment' && (
@@ -2920,7 +3011,10 @@ function TaskDrawer({
           {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
           {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{task.status === 'awaiting_manual_validation' ? '직접 확인 후 원본에 적용' : '원본에 적용'}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}
+          {task.status === 'awaiting_merge' && !awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
+          {awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />로컬 동기화 다시 시도</button>}
         </footer>
       </aside>
     </div>

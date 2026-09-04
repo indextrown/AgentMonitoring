@@ -37,6 +37,15 @@ async function waitForFile(path: string, timeoutMs = 3_000): Promise<string> {
   throw new Error(`fixture 파일 생성 시간을 초과했습니다: ${path}`)
 }
 
+async function configureOrigin(directory: string, repository: string): Promise<string> {
+  const remote = join(directory, 'github.com', 'example', 'fixture.git')
+  await mkdir(dirname(remote), { recursive: true })
+  await execFileAsync('git', ['init', '--bare', remote])
+  await execFileAsync('git', ['remote', 'add', 'origin', remote], { cwd: repository })
+  await execFileAsync('git', ['push', '--set-upstream', 'origin', 'main'], { cwd: repository })
+  return remote
+}
+
 async function createExecutionFixture(options: {
   codexSource: (directory: string) => string
   makefile?: string
@@ -136,6 +145,7 @@ async function createExecutionFixture(options: {
     ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'],
     { cwd: repository }
   )
+  await configureOrigin(directory, repository)
 
   const fakeCodex = join(directory, 'fake-codex.mjs')
   await writeFile(fakeCodex, options.codexSource(directory))
@@ -143,14 +153,13 @@ async function createExecutionFixture(options: {
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Runtime fixture', repository)
-  if (options.testCommand !== null || options.setupCommand) {
-    store.updateProject({
-      projectId: project.id,
-      name: project.name,
-      setupCommand: options.setupCommand ?? '',
-      testCommand: options.testCommand ?? 'make test'
-    })
-  }
+  store.updateProject({
+    projectId: project.id,
+    name: project.name,
+    setupCommand: options.setupCommand ?? '',
+    testCommand: options.testCommand === null ? '' : options.testCommand ?? 'make test',
+    publishStrategy: 'direct'
+  })
   const task = store.createTask(
     project.id,
     '실행 수명주기',
@@ -173,8 +182,13 @@ async function createExecutionFixture(options: {
   return { directory, repository, store, runner, taskId: task.id }
 }
 
-async function createApprovalFixture(): Promise<{
+async function createApprovalFixture(options: {
+  publishStrategy?: 'pull-request' | 'direct'
+  githubSource?: string
+  policy?: ConstructorParameters<typeof AgentRunner>[5]
+} = {}): Promise<{
   repository: string
+  remote: string
   worktreePath: string
   store: AppStore
   runner: AgentRunner
@@ -193,22 +207,49 @@ async function createApprovalFixture(): Promise<{
   await execFileAsync('git', ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'], {
     cwd: repository
   })
+  const remote = await configureOrigin(directory, repository)
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Fixture', repository)
+  store.updateProject({
+    projectId: project.id,
+    name: project.name,
+    setupCommand: '',
+    testCommand: '',
+    publishStrategy: options.publishStrategy ?? 'direct'
+  })
   const task = store.createTask(project.id, '승인 기능', '작업 변경을 원본 저장소에 안전하게 적용한다.', 2)
   const branchName = 'agentmonitor/approval-fixture'
+  const baseCommit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repository })).stdout.trim()
   await execFileAsync('git', ['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'], { cwd: repository })
   await writeFile(join(worktreePath, 'agent-output.txt'), 'implemented\n')
-  store.setTaskWorkspace(task.id, branchName, worktreePath)
+  store.setTaskWorkspace(task.id, branchName, worktreePath, 'main', baseCommit)
   store.transitionTask(task.id, 'running', 1)
   store.transitionTask(task.id, 'awaiting_approval')
 
+  let githubCommand = 'gh'
+  if (options.githubSource) {
+    githubCommand = join(directory, 'fake-gh.mjs')
+    await writeFile(githubCommand, options.githubSource)
+    await chmod(githubCommand, 0o755)
+  }
+
   return {
     repository,
+    remote,
     worktreePath,
     store,
-    runner: new AgentRunner(store, worktrees, () => undefined),
+    runner: new AgentRunner(
+      store,
+      worktrees,
+      () => undefined,
+      'codex',
+      undefined,
+      options.policy,
+      undefined,
+      undefined,
+      githubCommand
+    ),
     taskId: task.id
   }
 }
@@ -713,6 +754,7 @@ setInterval(() => undefined, 1_000)
     await execFileAsync('git', ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'], {
       cwd: repository
     })
+    await configureOrigin(directory, repository)
 
     const fakeCodex = join(directory, 'fake-codex.mjs')
     await writeFile(
@@ -737,7 +779,13 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     const store = new AppStore(join(directory, 'store.sqlite'))
     const project = store.addProject('Fixture', repository)
-    store.updateProject({ projectId: project.id, name: project.name, setupCommand: '', testCommand: 'make test' })
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: '',
+      testCommand: 'make test',
+      publishStrategy: 'direct'
+    })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
     const published: Array<{ actor: string; message: string }> = []
     const codexHome = join(directory, 'codex-home')
@@ -1246,6 +1294,245 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('publishes the existing task branch, opens a PR, and completes after the remote merge', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      githubSource: `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
+const args = process.argv.slice(2)
+const headBranch = 'agentmonitor/approval-fixture'
+const head = execFileSync('git', ['rev-parse', headBranch], { encoding: 'utf8' }).trim()
+const remoteBase = execFileSync('git', ['ls-remote', 'origin', 'refs/heads/main'], { encoding: 'utf8' }).trim().split(/\\s+/)[0]
+const merged = remoteBase === head
+const pullRequest = {
+  state: merged ? 'MERGED' : 'OPEN',
+  mergedAt: merged ? '2026-09-04T00:00:00Z' : null,
+  url: 'https://github.com/example/fixture/pull/42',
+  baseRefName: 'main',
+  headRefName: headBranch,
+  headRefOid: head,
+  mergeCommit: merged ? { oid: head } : null
+}
+if (args[0] === 'auth' && args[1] === 'status') console.log('github.com authenticated')
+else if (args[0] === 'pr' && args[1] === 'list') console.log('[]')
+else if (args[0] === 'pr' && args[1] === 'create') console.log('https://github.com/example/fixture/pull/42')
+else if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify(pullRequest))
+else process.exit(1)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'pr_opened' })
+    const awaitingMerge = fixture.store.getTask(fixture.taskId)
+    expect(awaitingMerge).toMatchObject({
+      status: 'awaiting_merge',
+      publication: {
+        strategy: 'pull-request',
+        status: 'awaiting_merge',
+        pullRequestUrl: 'https://github.com/example/fixture/pull/42'
+      }
+    })
+    const remoteTaskHead = await execFileAsync(
+      'git',
+      ['--git-dir', fixture.remote, 'rev-parse', `refs/heads/${awaitingMerge.branchName}`]
+    )
+    await execFileAsync(
+      'git',
+      ['--git-dir', fixture.remote, 'update-ref', 'refs/heads/main', remoteTaskHead.stdout.trim()]
+    )
+
+    await expect(fixture.runner.refreshPublication(fixture.taskId)).resolves.toMatchObject({ outcome: 'published' })
+    const completed = fixture.store.getTask(fixture.taskId)
+    expect(completed).toMatchObject({ status: 'completed', worktreePath: null, publication: { status: 'published' } })
+    expect(await readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
+    fixture.store.close()
+  })
+
+  it('does not complete when the PR head changes after publication', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      githubSource: `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+const args = process.argv.slice(2)
+const headBranch = 'agentmonitor/approval-fixture'
+const head = execFileSync('git', ['rev-parse', headBranch], { encoding: 'utf8' }).trim()
+const statePath = fileURLToPath(import.meta.url) + '.state'
+if (args[0] === 'auth' && args[1] === 'status') console.log('github.com authenticated')
+else if (args[0] === 'pr' && args[1] === 'list') console.log('[]')
+else if (args[0] === 'pr' && args[1] === 'create') console.log('https://github.com/example/fixture/pull/42')
+else if (args[0] === 'pr' && args[1] === 'view') {
+  const count = existsSync(statePath) ? Number(readFileSync(statePath, 'utf8')) : 0
+  writeFileSync(statePath, String(count + 1))
+  console.log(JSON.stringify({
+    state: 'OPEN',
+    mergedAt: null,
+    url: 'https://github.com/example/fixture/pull/42',
+    baseRefName: 'main',
+    headRefName: headBranch,
+    headRefOid: count === 0 ? head : '0000000000000000000000000000000000000000',
+    mergeCommit: null
+  }))
+} else process.exit(1)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'pr_opened' })
+    await expect(fixture.runner.refreshPublication(fixture.taskId)).resolves.toMatchObject({
+      outcome: 'awaiting_merge',
+      message: expect.stringContaining('PR head가 사람이 승인하고 검증한 commit에서 변경됐습니다.')
+    })
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({
+      status: 'awaiting_approval',
+      publication: { status: 'failed' }
+    })
+    fixture.store.close()
+  })
+
+  it('accepts a verified squash or rebase merge commit that differs from the PR head', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      githubSource: `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+const args = process.argv.slice(2)
+const headBranch = 'agentmonitor/approval-fixture'
+const head = execFileSync('git', ['rev-parse', headBranch], { encoding: 'utf8' }).trim()
+const remoteBase = execFileSync('git', ['ls-remote', 'origin', 'refs/heads/main'], { encoding: 'utf8' }).trim().split(/\\s+/)[0]
+const statePath = fileURLToPath(import.meta.url) + '.state'
+if (args[0] === 'auth' && args[1] === 'status') console.log('github.com authenticated')
+else if (args[0] === 'pr' && args[1] === 'list') console.log('[]')
+else if (args[0] === 'pr' && args[1] === 'create') console.log('https://github.com/example/fixture/pull/42')
+else if (args[0] === 'pr' && args[1] === 'view') {
+  const count = existsSync(statePath) ? Number(readFileSync(statePath, 'utf8')) : 0
+  writeFileSync(statePath, String(count + 1))
+  console.log(JSON.stringify({
+    state: count === 0 ? 'OPEN' : 'MERGED',
+    mergedAt: count === 0 ? null : '2026-09-04T00:00:00Z',
+    url: 'https://github.com/example/fixture/pull/42',
+    baseRefName: 'main',
+    headRefName: headBranch,
+    headRefOid: head,
+    mergeCommit: count === 0 ? null : { oid: remoteBase }
+  }))
+} else process.exit(1)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'pr_opened' })
+    const publishedHead = fixture.store.getTask(fixture.taskId).publication?.publishedCommit
+    await writeFile(join(fixture.repository, 'agent-output.txt'), 'implemented\n')
+    await execFileAsync('git', ['add', 'agent-output.txt'], { cwd: fixture.repository })
+    await execFileAsync(
+      'git',
+      ['-c', 'user.name=Merge Test', '-c', 'user.email=merge@example.com', 'commit', '-m', 'squash agent output'],
+      { cwd: fixture.repository }
+    )
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: fixture.repository })
+    const mergeCommit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: fixture.repository })).stdout.trim()
+    expect(mergeCommit).not.toBe(publishedHead)
+
+    await expect(fixture.runner.refreshPublication(fixture.taskId)).resolves.toMatchObject({ outcome: 'published' })
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({
+      status: 'completed',
+      publication: { status: 'published', publishedCommit: publishedHead, mergeCommit }
+    })
+    fixture.store.close()
+  })
+
+  it('rejects an existing PR that targets a different base branch', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      githubSource: `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
+const args = process.argv.slice(2)
+const headBranch = 'agentmonitor/approval-fixture'
+const head = execFileSync('git', ['rev-parse', headBranch], { encoding: 'utf8' }).trim()
+if (args[0] === 'auth' && args[1] === 'status') console.log('github.com authenticated')
+else if (args[0] === 'pr' && args[1] === 'list') console.log(JSON.stringify([{
+  state: 'OPEN',
+  url: 'https://github.com/example/fixture/pull/41',
+  baseRefName: 'develop',
+  headRefName: headBranch,
+  headRefOid: head
+}]))
+else process.exit(1)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('PR 기준 브랜치가 main이 아닙니다.')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')
+    fixture.store.close()
+  })
+
+  it('times out an unresponsive GitHub CLI operation without changing the task state', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      policy: { remoteOperationTimeoutMs: 50 },
+      githubSource: `#!/usr/bin/env node
+setInterval(() => undefined, 1_000)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('GitHub CLI 원격 작업 제한 시간 초과')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')
+    fixture.store.close()
+  })
+
+  it('does not synchronize a remote branch that does not contain the published commit', async () => {
+    const fixture = await createApprovalFixture()
+    await execFileAsync('git', ['add', 'agent-output.txt'], { cwd: fixture.worktreePath })
+    await execFileAsync(
+      'git',
+      ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent output'],
+      { cwd: fixture.worktreePath }
+    )
+    const publishedCommit = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: fixture.worktreePath })
+    ).stdout.trim()
+    fixture.store.setTaskPublication(fixture.taskId, {
+      strategy: 'direct',
+      status: 'awaiting_local_sync',
+      remoteName: 'origin',
+      baseBranch: 'main',
+      remoteBranch: 'main',
+      pullRequestUrl: null,
+      publishedCommit,
+      mergeCommit: null,
+      message: '원격 게시 완료 · 로컬 동기화 대기',
+      updatedAt: new Date().toISOString()
+    })
+
+    await expect(fixture.runner.refreshPublication(fixture.taskId)).resolves.toMatchObject({
+      outcome: 'awaiting_merge',
+      message: expect.stringContaining('검증한 게시 결과가 포함되지 않았습니다.')
+    })
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({
+      status: 'awaiting_approval',
+      publication: { status: 'failed' }
+    })
+    await expect(readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).rejects.toThrow()
+    fixture.store.close()
+  })
+
+  it('blocks publishing when local main contains commits that are not on the remote', async () => {
+    const fixture = await createApprovalFixture()
+    await writeFile(join(fixture.repository, 'local-only.txt'), 'not published\n')
+    await execFileAsync('git', ['add', 'local-only.txt'], { cwd: fixture.repository })
+    await execFileAsync(
+      'git',
+      ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'local only'],
+      { cwd: fixture.repository }
+    )
+
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('원격에 없는 커밋이 1개 있습니다')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')
+    const remoteFiles = await execFileAsync('git', ['--git-dir', fixture.remote, 'ls-tree', '--name-only', 'main'])
+    expect(remoteFiles.stdout).not.toContain('local-only.txt')
+    fixture.store.close()
+  })
+
   it('removes DerivedData immediately after approval and keeps runtime evidence', async () => {
     const fixture = await createApprovalFixture()
     const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
@@ -1270,9 +1557,10 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
   it('rebases an agent task onto a newer source commit and re-verifies before approval', async () => {
     const fixture = await createExecutionFixture({
-      codexSource: () => `#!/usr/bin/env node
-import { writeFileSync } from 'node:fs'
+      codexSource: (directory) => `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs'
 const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(join(directory, 'review-prompts.jsonl'))}, JSON.stringify(prompt) + '\\n')
 if (prompt.includes('구현 담당자')) writeFileSync('agent-output.txt', 'implemented\\n')
 const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
@@ -1298,6 +1586,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     )
     await execFileAsync('git', ['config', '--local', 'user.name', ''], { cwd: fixture.repository })
     await execFileAsync('git', ['config', '--local', 'user.email', ''], { cwd: fixture.repository })
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: fixture.repository })
 
     await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'reverified' })
     const reverified = fixture.store.getTask(fixture.taskId)
@@ -1305,13 +1594,25 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     await expect(readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).rejects.toThrow()
     expect(await readFile(join(fixture.repository, 'main-change.txt'), 'utf8')).toBe('advanced\n')
     expect(await readFile(join(reverified.worktreePath!, 'main-change.txt'), 'utf8')).toBe('advanced\n')
+    const remoteHead = (await execFileAsync('git', ['rev-parse', 'origin/main'], { cwd: fixture.repository })).stdout.trim()
+    expect(reverified.verificationBaseCommit).toBe(remoteHead)
     const committedChanges = await fixture.runner.getChanges(fixture.taskId)
     expect(committedChanges.files).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'agent-output.txt', status: 'M', additions: 1, deletions: 0 })
     ]))
+    expect(committedChanges.files).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'main-change.txt' })
+    ]))
     expect(committedChanges.patch).toContain('agent-output.txt')
+    expect(committedChanges.patch).not.toContain('main-change.txt')
+    const reviewerPrompts = (await readFile(join(fixture.directory, 'review-prompts.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string)
+      .filter((prompt) => prompt.includes('최종 읽기 전용 Reviewer'))
+    expect(reviewerPrompts.at(-1)).toContain(`git diff ${remoteHead} --`)
 
-    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'applied' })
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'published' })
     expect(fixture.store.getTask(fixture.taskId).status).toBe('completed')
     expect(await readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     fixture.store.close()
@@ -1343,6 +1644,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'edit source'],
       { cwd: fixture.repository }
     )
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: fixture.repository })
 
     await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('충돌 파일: README.md')
     expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')

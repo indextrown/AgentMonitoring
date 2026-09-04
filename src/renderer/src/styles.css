@@ -3908,6 +3908,119 @@ kbd {
   padding-bottom: 36px;
 }
 
+.source-remote-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+}
+
+.source-remote-status strong,
+.source-remote-status p {
+  display: block;
+  margin: 0;
+}
+
+.source-remote-status p {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.source-remote-status small {
+  display: block;
+  max-width: 720px;
+  margin-top: 7px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.source-remote-status.attention {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.source-remote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.publication-selector {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.publication-selector > strong {
+  font-size: 13px;
+}
+
+.publication-selector label {
+  align-items: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 11px 12px;
+}
+
+.publication-selector label:has(input:checked) {
+  border-color: #4d78a8;
+  box-shadow: inset 0 0 0 1px #4d78a8;
+}
+
+.publication-selector input {
+  margin-top: 3px;
+}
+
+.publication-selector span,
+.publication-selector small {
+  display: block;
+}
+
+.publication-selector small {
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
+.task-publication {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+  padding: 18px 24px;
+}
+
+.task-publication > p {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.task-publication > div:not(.drawer-section-title) {
+  display: flex;
+  gap: 8px;
+}
+
+.task-publication code {
+  background: var(--panel-2);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 7px;
+}
+
+.task-publication button {
+  justify-self: start;
+}
+
 .source-control-overview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

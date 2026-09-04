@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ProjectRecord } from '../../src/shared/types'
 import { GitOperationCoordinator } from '../../electron/main/git-operation-coordinator'
+import { redactProcessOutput } from '../../electron/main/process-output'
 import { parseSourceControlStatus, SourceControlService } from '../../electron/main/source-control'
 
 const execFileAsync = promisify(execFile)
@@ -65,7 +66,38 @@ describe('parseSourceControlStatus', () => {
   })
 })
 
+describe('redactProcessOutput', () => {
+  it('redacts GitHub and bearer tokens from process output', () => {
+    expect(redactProcessOutput(
+      'ghp_1234567890abcdefghijkl Bearer abcdefghijklmnopqrstuvwxyz'
+    )).toBe('[REDACTED] Bearer [REDACTED]')
+  })
+})
+
 describe('SourceControlService', () => {
+  it('does not expose credentials embedded in an HTTPS remote URL', async () => {
+    const { project, repository } = await createRepository()
+    await git(repository, ['remote', 'add', 'origin', 'https://secret-token@github.com/example/private.git'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    expect((await service.getStatus(project)).remote?.url).toBe('https://[REDACTED]@github.com/example/private.git')
+  })
+
+  it('redacts credentials from a failed remote fetch error', async () => {
+    const { project, repository } = await createRepository()
+    await git(repository, ['remote', 'add', 'origin', 'https://secret-token@127.0.0.1:1/private.git'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    let message = ''
+    try {
+      await service.fetch(project)
+    } catch (error) {
+      message = String(error)
+    }
+    expect(message).toBeTruthy()
+    expect(message).not.toContain('secret-token')
+  })
+
   it('serializes mutating Git operations for the same project', async () => {
     const coordinator = new GitOperationCoordinator()
     let releaseFirst = (): void => undefined
@@ -168,5 +200,100 @@ describe('SourceControlService', () => {
 
     await expect(service.stage(project, ['../outside.txt'])).rejects.toThrow('안전하지 않은 저장소 파일 경로')
     await expect(service.stage(project, ['missing.txt'])).rejects.toThrow('현재 변경 목록에 없는 파일')
+  })
+
+  it('fetches origin and reports ahead and behind counts without merging', async () => {
+    const { project, repository } = await createRepository()
+    const remote = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-origin-'))
+    const peer = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-peer-'))
+    temporaryDirectories.push(remote, peer)
+    await git(remote, ['init', '--bare'])
+    await git(repository, ['remote', 'add', 'origin', remote])
+    await git(repository, ['push', '--set-upstream', 'origin', 'main'])
+
+    await execFileAsync('git', ['clone', remote, peer], { encoding: 'utf8' })
+    await git(peer, ['checkout', 'main'])
+    await git(peer, ['config', 'user.name', 'Remote Test'])
+    await git(peer, ['config', 'user.email', 'remote@example.com'])
+    await writeFile(join(peer, 'remote.txt'), 'remote change\n')
+    await git(peer, ['add', 'remote.txt'])
+    await git(peer, ['commit', '-m', 'remote change'])
+    await git(peer, ['push', 'origin', 'main'])
+
+    const service = new SourceControlService(new GitOperationCoordinator())
+    const before = await service.getStatus(project)
+    expect(before.remote).toMatchObject({ name: 'origin', upstream: 'origin/main', behind: 0 })
+    const after = await service.fetch(project)
+    expect(after.remote).toMatchObject({ name: 'origin', upstream: 'origin/main', ahead: 0, behind: 1, diverged: false })
+    expect(await git(repository, ['rev-parse', 'HEAD'])).not.toBe(await git(repository, ['rev-parse', 'origin/main']))
+  })
+
+  it('pushes local commits and fast-forwards remote-only commits', async () => {
+    const { project, repository } = await createRepository()
+    const remote = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-publish-origin-'))
+    const peer = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-publish-peer-'))
+    temporaryDirectories.push(remote, peer)
+    await git(remote, ['init', '--bare'])
+    await git(repository, ['remote', 'add', 'origin', remote])
+    await git(repository, ['push', '--set-upstream', 'origin', 'main'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    await writeFile(join(repository, 'local.txt'), 'local commit\n')
+    await git(repository, ['add', 'local.txt'])
+    await git(repository, ['commit', '-m', 'local commit'])
+    expect((await service.getStatus(project)).remote).toMatchObject({ ahead: 1, behind: 0 })
+    expect((await service.push(project)).remote).toMatchObject({ ahead: 0, behind: 0 })
+
+    await execFileAsync('git', ['clone', remote, peer], { encoding: 'utf8' })
+    await git(peer, ['checkout', 'main'])
+    await git(peer, ['config', 'user.name', 'Remote Test'])
+    await git(peer, ['config', 'user.email', 'remote@example.com'])
+    await writeFile(join(peer, 'remote.txt'), 'remote commit\n')
+    await git(peer, ['add', 'remote.txt'])
+    await git(peer, ['commit', '-m', 'remote commit'])
+    await git(peer, ['push', 'origin', 'main'])
+
+    expect((await service.fetch(project)).remote).toMatchObject({ ahead: 0, behind: 1 })
+    expect((await service.sync(project)).remote).toMatchObject({ ahead: 0, behind: 0 })
+    expect(await readFile(join(repository, 'remote.txt'), 'utf8')).toBe('remote commit\n')
+  })
+
+  it('connects a branch without upstream and refuses to combine diverged histories', async () => {
+    const { project, repository } = await createRepository()
+    const remote = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-diverged-origin-'))
+    const peer = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-diverged-peer-'))
+    temporaryDirectories.push(remote, peer)
+    await git(remote, ['init', '--bare'])
+    await git(repository, ['remote', 'add', 'origin', remote])
+    await git(repository, ['push', '--set-upstream', 'origin', 'main'])
+    await git(repository, ['checkout', '-b', 'feature/source-control'])
+    await writeFile(join(repository, 'feature.txt'), 'feature\n')
+    await git(repository, ['add', 'feature.txt'])
+    await git(repository, ['commit', '-m', 'feature commit'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    expect((await service.getStatus(project)).remote?.upstream).toBeNull()
+    expect((await service.push(project)).remote).toMatchObject({
+      upstream: 'origin/feature/source-control',
+      ahead: 0,
+      behind: 0
+    })
+
+    await git(repository, ['checkout', 'main'])
+    await execFileAsync('git', ['clone', remote, peer], { encoding: 'utf8' })
+    await git(peer, ['checkout', 'main'])
+    await git(peer, ['config', 'user.name', 'Remote Test'])
+    await git(peer, ['config', 'user.email', 'remote@example.com'])
+    await writeFile(join(peer, 'remote-only.txt'), 'remote\n')
+    await git(peer, ['add', 'remote-only.txt'])
+    await git(peer, ['commit', '-m', 'remote only'])
+    await git(peer, ['push', 'origin', 'main'])
+    await writeFile(join(repository, 'local-only.txt'), 'local\n')
+    await git(repository, ['add', 'local-only.txt'])
+    await git(repository, ['commit', '-m', 'local only'])
+
+    expect((await service.fetch(project)).remote).toMatchObject({ ahead: 1, behind: 1, diverged: true })
+    await expect(service.push(project)).rejects.toThrow('먼저 원격 변경을 동기화')
+    await expect(service.sync(project)).rejects.toThrow('서로 다른 커밋')
   })
 })

@@ -78,15 +78,17 @@ AgentRunner는 검증 계획이 `task-scenario`일 때 작업별 스냅샷을 �
 queued → running → testing ─┬→ running
                             ├→ blocked_environment → running
                             ├→ failed
-                            └→ awaiting_approval → completed
-running ──────────────────────→ awaiting_manual_validation → completed
+                            └→ awaiting_approval ───────────────→ completed
+                                               └→ awaiting_merge → completed
+running ──────────────────────→ awaiting_manual_validation ────→ completed
+                                                       └→ awaiting_merge → completed
 
 queued/running/testing → stopped → running
-awaiting_approval/awaiting_manual_validation/blocked_environment/failed/stopped → discarded
+awaiting_approval/awaiting_manual_validation/awaiting_merge/blocked_environment/failed/stopped → discarded
 awaiting_approval/awaiting_manual_validation → running → testing → awaiting_approval/awaiting_manual_validation
 ```
 
-`running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다. 승인 시 원본 브랜치가 앞서 있으면 작업 브랜치를 재배치한 뒤 검증 상태를 `running`으로 되돌리고 선택한 검증과 Reviewer를 다시 실행한다.
+`running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다. PR 방식은 원격 브랜치를 게시한 뒤 `awaiting_merge`에서 멈추고, GitHub 병합과 로컬 fast-forward를 확인한 뒤 `completed`가 된다. 승인 시 원격 기준 브랜치가 앞서 있으면 작업 브랜치를 재배치한 뒤 검증 상태를 `running`으로 되돌리고 선택한 검증과 Reviewer를 다시 실행한다.
 
 ## 역할과 권한
 
@@ -99,7 +101,7 @@ awaiting_approval/awaiting_manual_validation → running → testing → awaitin
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
 | Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad·iPhone Simulator 설치·실행, Debug fixture·identifier UI 조작, 화면·접근성·앱 상태 증거 수집 |
 | Reviewer | read-only | 없음 | diff, runtime 화면·접근성 구조, 회귀, 보안, 테스트 공백 보고 |
-| Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
+| Human | UI 승인 | 원격 게시 승인 | 게시 방식 선택·최종 승인·PR 병합 확인·중단·폐기 |
 
 `maxAttempts`는 최초 구현을 포함한 Implementer 호출 횟수다. 환경 준비 실패는 이 값을 증가시키지 않는다. 프로젝트 테스트 출력이 의존성 해석, 네트워크나 인증 실패로 분류되면 같은 Implementer를 반복 호출하지 않고 `blocked_environment`에서 멈춘다. 사용자가 환경을 고친 뒤 `task:retry-verification`을 요청하면 기존 worktree와 변경을 유지하고 환경 준비, 선택한 검증과 Reviewer만 다시 실행한다.
 
@@ -165,25 +167,41 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 작업을 만들 때 현재 원본 브랜치와 기준 commit을 `tasks.source_branch`, `tasks.base_commit`에 기록한다. 사용자가 작업 도중 원본에서 새 커밋을 만들어도 어느 브랜치에서 시작한 작업인지 확인할 수 있다.
 
-Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 파일 폐기, hunk 단위 stage, amend, push와 충돌 해결은 제공하지 않는다.
+Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
 
 소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
 
-사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗하고 작업 시작 브랜치와 현재 브랜치가 같은지 확인한다. worktree 변경을 작업 브랜치에 커밋한 뒤 다음 순서로 처리한다.
+작업 등록 시 `pull-request` 또는 `direct` 게시 방식을 작업 스냅샷에 저장한다. 사람이 게시를 승인하면 앱은 원본 checkout이 깨끗하고 작업 시작 브랜치와 현재 브랜치가 같은지 확인한다. worktree 변경을 작업 브랜치에 커밋한 뒤 `git fetch origin --prune`으로 원격 기준을 갱신한다. 로컬 기준 브랜치에 원격에 없는 commit이 있으면 다른 변경을 AI 결과에 섞지 않도록 게시를 중단한다.
 
 ```text
-현재 원본 HEAD가 작업 브랜치의 조상임
-  → `git merge --ff-only`로 적용
+원격 기준 브랜치가 작업 브랜치의 조상임
+  → 선택한 게시 방식 실행
 
-현재 원본 HEAD가 작업 브랜치의 조상이 아님
-  → 격리 worktree에서 작업 브랜치를 현재 원본 HEAD 위로 rebase
+원격 기준 브랜치가 작업 브랜치의 조상이 아님
+  → 격리 worktree에서 작업 브랜치를 최신 원격 commit 위로 rebase
   → 충돌 시 `git rebase --abort`, 원본 미변경, 승인 대기 유지
+  → 최신 원격 commit을 작업의 검증 기준 commit으로 저장
+  → 변경 화면과 Reviewer가 `git diff <verification-base> --`로 작업 diff만 확인
   → 성공 시 선택한 프로젝트 테스트·Simulator 검증·Reviewer 재실행
   → 재검증 통과 후 사람의 두 번째 승인 대기
-  → 두 번째 승인에서 `git merge --ff-only`로 적용
+  → 두 번째 승인에서 게시 방식 실행
+
+pull-request
+  → 기존 `agentmonitor/*` 작업 브랜치를 origin에 push
+  → GitHub CLI 인증으로 기준 브랜치 대상 PR 생성
+  → PR base·head branch와 head commit이 승인한 게시 기록과 같은지 확인
+  → `awaiting_merge`에서 사람의 GitHub 병합 대기
+  → GitHub merge commit이 원격 기준 브랜치에 포함됐는지 확인
+  → 병합 확인 뒤 `git fetch`와 `git merge --ff-only origin/<base>`로 로컬 동기화
+
+direct
+  → 작업 브랜치 commit을 `refs/heads/<base>`에 일반 push
+  → 원격이 바뀌거나 브랜치 보호 정책이 거절하면 중단
+  → 승인한 작업 commit이 원격 기준 브랜치에 포함됐는지 확인
+  → 성공 뒤 `git fetch`와 `git merge --ff-only origin/<base>`로 로컬 동기화
 ```
 
-재검증이 실패하면 원본 checkout은 바꾸지 않는다. 작업 상태와 worktree를 유지해 사용자가 실패 단계를 확인하고 다시 검증하거나 폐기할 수 있게 한다. 승인 직전에 원본 HEAD가 다시 바뀌어 fast-forward가 불가능하면 적용을 멈추고 다시 승인을 요청한다. 강제 merge, reset, stash나 사용자 파일 덮어쓰기는 시도하지 않는다.
+재검증이 실패하면 원격과 원본 checkout을 바꾸지 않는다. 작업 상태와 worktree를 유지해 사용자가 실패 단계를 확인하고 다시 검증하거나 폐기할 수 있게 한다. 검증 뒤 원격이 다시 바뀌면 일반 push가 non-fast-forward로 거절되므로 덮어쓰지 않는다. PR head나 원격 기준 브랜치가 승인한 게시 기록과 다르면 완료와 worktree 정리를 중단한다. 원격 `fetch`·`push`와 GitHub CLI는 비대화형 환경과 제한 시간 안에서 실행하며, 오류 출력의 HTTPS 자격 증명과 알려진 토큰 형식을 저장하기 전에 마스킹한다. 강제 push, 강제 merge, reset, stash나 사용자 파일 덮어쓰기는 시도하지 않는다.
 
 성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. `blocked_environment`·`failed`·`stopped` 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
 
@@ -195,8 +213,8 @@ Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porc
 
 | 테이블 | 의미 |
 | --- | --- |
-| `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
-| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·기준 commit, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
+| `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 기본 게시 방식, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
+| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·최초 및 최신 검증 기준 commit, 작업별 게시 방식·원격 브랜치·PR URL·게시 및 merge commit·게시 상태, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
@@ -250,8 +268,8 @@ Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porc
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.
 - 로그인은 app-server의 `account/login/start`로 시작하고 `account/login/completed` 알림으로 완료를 확정한다.
 - 작업용 `codex exec`에도 같은 전용 `CODEX_HOME`과 ChatGPT 전용 인증 정책을 적용한다.
-- 승인 적용은 깨끗한 원본 checkout, 작업 시작 브랜치 일치와 fast-forward 가능 조건을 모두 만족할 때만 원본을 변경한다. 원본이 앞서 있으면 격리 작업 브랜치만 재배치하고 선택한 검증을 다시 통과시킨다.
-- 승인 실패 시 강제 merge, reset, stash 또는 사용자 파일 덮어쓰기를 시도하지 않는다.
+- 원격 게시는 깨끗한 원본 checkout, 작업 시작 브랜치 일치, 로컬 미게시 commit 없음과 fast-forward 가능 조건을 만족할 때만 실행한다. 원격이 앞서 있으면 격리 작업 브랜치만 재배치하고 선택한 검증을 다시 통과시킨다.
+- 게시 실패 시 강제 push·merge, reset, stash 또는 사용자 파일 덮어쓰기를 시도하지 않는다.
 
 ## 의도적으로 남긴 제한
 
@@ -260,6 +278,6 @@ Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porc
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 충돌 해결은 자동화하지 않는다. 충돌이 나면 rebase를 취소하고 충돌 파일을 사용자에게 보여준다.
-- 소스 제어는 hunk 단위 stage, 변경 폐기, amend, 원격 push를 제공하지 않는다.
+- 소스 제어 화면은 현재 checkout 브랜치와 `origin` upstream 사이의 일반 push·fast-forward 동기화만 제공한다. hunk 단위 stage, 변경 폐기, amend, 강제 push, 임의 refspec과 자동 merge·rebase는 제공하지 않는다.
 
 이 제한은 로컬 개인용 MVP에서 허용한다. 팀 사용이나 자동 merge를 추가하기 전에 복구 관리자, approval policy, 테스트 잠금, 서명된 감사 로그를 먼저 설계해야 한다.

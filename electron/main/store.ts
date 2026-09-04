@@ -31,6 +31,7 @@ const projectColumns = `
   setup_command AS setupCommand,
   runtime_adapter_json AS runtimeAdapterJson,
   runtime_config_source AS runtimeConfigSource,
+  publish_strategy AS publishStrategy,
   is_demo AS isDemo,
   created_at AS createdAt
 `
@@ -48,6 +49,9 @@ const taskColumns = `
   worktree_path AS worktreePath,
   source_branch AS sourceBranch,
   base_commit AS baseCommit,
+  verification_base_commit AS verificationBaseCommit,
+  publish_strategy AS publishStrategy,
+  publication_json AS publicationJson,
   runtime_contract_json AS runtimeContractJson,
   runtime_scenario_summary AS runtimeScenarioSummary,
   runtime_scenario_approved_at AS runtimeScenarioApprovedAt,
@@ -129,6 +133,7 @@ function projectFromRow(row: Row): ProjectRecord {
     runtimeConfigSource: row.runtimeConfigSource
       ? String(row.runtimeConfigSource) as ProjectRecord['runtimeConfigSource']
       : null,
+    publishStrategy: row.publishStrategy === 'direct' ? 'direct' : 'pull-request',
     isDemo: Boolean(row.isDemo),
     createdAt: String(row.createdAt)
   }
@@ -154,6 +159,9 @@ function taskFromRow(row: Row): TaskRecord {
         reviewer: persistedVerificationResult.reviewer!
       }
     : null
+  const persistedPublication = row.publicationJson
+    ? JSON.parse(String(row.publicationJson)) as Partial<NonNullable<TaskRecord['publication']>>
+    : null
   return {
     id: String(row.id),
     projectId: String(row.projectId),
@@ -167,6 +175,18 @@ function taskFromRow(row: Row): TaskRecord {
     worktreePath: row.worktreePath ? String(row.worktreePath) : null,
     sourceBranch: row.sourceBranch ? String(row.sourceBranch) : null,
     baseCommit: row.baseCommit ? String(row.baseCommit) : null,
+    verificationBaseCommit: row.verificationBaseCommit
+      ? String(row.verificationBaseCommit)
+      : row.baseCommit
+        ? String(row.baseCommit)
+        : null,
+    publishStrategy: row.publishStrategy === 'direct' ? 'direct' : 'pull-request',
+    publication: persistedPublication
+      ? {
+          ...persistedPublication,
+          mergeCommit: persistedPublication.mergeCommit ?? null
+        } as NonNullable<TaskRecord['publication']>
+      : null,
     runtimeContract: row.runtimeContractJson
       ? JSON.parse(String(row.runtimeContractJson)) as ApprovedRuntimeContract
       : null,
@@ -274,6 +294,7 @@ export class AppStore {
         setup_command TEXT NOT NULL DEFAULT '',
         runtime_adapter_json TEXT,
         runtime_config_source TEXT,
+        publish_strategy TEXT NOT NULL DEFAULT 'pull-request',
         is_demo INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
@@ -291,6 +312,9 @@ export class AppStore {
         worktree_path TEXT,
         source_branch TEXT,
         base_commit TEXT,
+        verification_base_commit TEXT,
+        publish_strategy TEXT NOT NULL DEFAULT 'pull-request',
+        publication_json TEXT,
         runtime_contract_json TEXT,
         runtime_scenario_summary TEXT,
         runtime_scenario_approved_at TEXT,
@@ -388,6 +412,9 @@ export class AppStore {
     if (!projectColumnNames.has('runtime_config_source')) {
       this.database.exec('ALTER TABLE projects ADD COLUMN runtime_config_source TEXT')
     }
+    if (!projectColumnNames.has('publish_strategy')) {
+      this.database.exec("ALTER TABLE projects ADD COLUMN publish_strategy TEXT NOT NULL DEFAULT 'pull-request'")
+    }
 
     const taskColumnNames = new Set(
       (this.database.prepare('PRAGMA table_info(tasks)').all() as Row[]).map((row) => String(row.name))
@@ -412,6 +439,15 @@ export class AppStore {
     }
     if (!taskColumnNames.has('base_commit')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN base_commit TEXT')
+    }
+    if (!taskColumnNames.has('verification_base_commit')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN verification_base_commit TEXT')
+    }
+    if (!taskColumnNames.has('publish_strategy')) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN publish_strategy TEXT NOT NULL DEFAULT 'pull-request'")
+    }
+    if (!taskColumnNames.has('publication_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN publication_json TEXT')
     }
 
     const runtimeEvidenceColumnNames = new Set(
@@ -465,6 +501,7 @@ export class AppStore {
       setupCommand: '',
       runtimeAdapter: null,
       runtimeConfigSource: null,
+      publishStrategy: 'pull-request',
       isDemo: false,
       createdAt: new Date().toISOString()
     }
@@ -472,8 +509,8 @@ export class AppStore {
       .prepare(`
         INSERT INTO projects (
           id, name, path, test_command, setup_command, runtime_adapter_json, runtime_config_source,
-          is_demo, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, ?)
+          publish_strategy, is_demo, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'pull-request', 0, ?)
       `)
       .run(project.id, project.name, project.path, project.testCommand, project.setupCommand, project.createdAt)
     this.addEvent(project.id, null, 'project_created', 'human', `${project.name} 프로젝트 등록`)
@@ -496,7 +533,8 @@ export class AppStore {
     this.database
       .prepare(`
         UPDATE projects
-        SET name = ?, test_command = ?, setup_command = ?, runtime_adapter_json = ?, runtime_config_source = ?
+        SET name = ?, test_command = ?, setup_command = ?, runtime_adapter_json = ?, runtime_config_source = ?,
+            publish_strategy = ?
         WHERE id = ?
       `)
       .run(
@@ -505,6 +543,7 @@ export class AppStore {
         input.setupCommand.trim(),
         runtimeAdapter ? JSON.stringify(runtimeAdapter) : null,
         runtimeConfigSource,
+        input.publishStrategy ?? existing.publishStrategy ?? 'pull-request',
         input.projectId
       )
     return this.getProject(input.projectId)
@@ -549,9 +588,11 @@ export class AppStore {
     maxAttempts: number,
     runtimeContract: ApprovedRuntimeContract | null = null,
     runtimeScenarioSummary: string | null = null,
-    verificationPlan: TaskVerificationPlan | null = null
+    verificationPlan: TaskVerificationPlan | null = null,
+    publishStrategy?: TaskRecord['publishStrategy']
   ): TaskRecord {
-    this.getProject(projectId)
+    const project = this.getProject(projectId)
+    const resolvedPublishStrategy = publishStrategy ?? project.publishStrategy ?? 'pull-request'
     const now = new Date().toISOString()
     const task: TaskRecord = {
       id: randomUUID(),
@@ -566,6 +607,9 @@ export class AppStore {
       worktreePath: null,
       sourceBranch: null,
       baseCommit: null,
+      verificationBaseCommit: null,
+      publishStrategy: resolvedPublishStrategy,
+      publication: null,
       runtimeContract,
       runtimeScenarioSummary: runtimeScenarioSummary?.trim() || null,
       runtimeScenarioApprovedAt: runtimeContract ? now : null,
@@ -578,13 +622,14 @@ export class AppStore {
       .prepare(`
         INSERT INTO tasks (
           id, project_id, title, prompt, status, provider, max_attempts, attempt,
-          branch_name, worktree_path, source_branch, base_commit,
+          branch_name, worktree_path, source_branch, base_commit, verification_base_commit,
+          publish_strategy, publication_json,
           runtime_contract_json, runtime_scenario_summary,
           runtime_scenario_approved_at, verification_plan_json, verification_result_json,
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
-          NULL, NULL, NULL, NULL, $runtimeContract, $runtimeScenarioSummary,
+          NULL, NULL, NULL, NULL, NULL, $publishStrategy, NULL, $runtimeContract, $runtimeScenarioSummary,
           $runtimeScenarioApprovedAt, $verificationPlan, $verificationResult,
           $createdAt, $updatedAt
         )
@@ -596,6 +641,7 @@ export class AppStore {
         prompt: task.prompt,
         status: task.status,
         maxAttempts: task.maxAttempts,
+        publishStrategy: resolvedPublishStrategy,
         runtimeContract: runtimeContract ? JSON.stringify(runtimeContract) : null,
         runtimeScenarioSummary: task.runtimeScenarioSummary ?? null,
         runtimeScenarioApprovedAt: task.runtimeScenarioApprovedAt ?? null,
@@ -649,6 +695,22 @@ export class AppStore {
     return this.getTask(taskId)
   }
 
+  setTaskPublication(taskId: string, publication: NonNullable<TaskRecord['publication']>): TaskRecord {
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET publication_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(publication), now, taskId)
+    return this.getTask(taskId)
+  }
+
+  setTaskPublishStrategy(taskId: string, publishStrategy: NonNullable<TaskRecord['publishStrategy']>): TaskRecord {
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET publish_strategy = ?, publication_json = NULL, updated_at = ? WHERE id = ?')
+      .run(publishStrategy, now, taskId)
+    return this.getTask(taskId)
+  }
+
   setTaskWorkspace(
     taskId: string,
     branchName: string,
@@ -660,10 +722,19 @@ export class AppStore {
     this.database
       .prepare(`
         UPDATE tasks
-        SET branch_name = ?, worktree_path = ?, source_branch = ?, base_commit = ?, updated_at = ?
+        SET branch_name = ?, worktree_path = ?, source_branch = ?, base_commit = ?,
+            verification_base_commit = ?, updated_at = ?
         WHERE id = ?
       `)
-      .run(branchName, worktreePath, sourceBranch, baseCommit, now, taskId)
+      .run(branchName, worktreePath, sourceBranch, baseCommit, baseCommit, now, taskId)
+    return this.getTask(taskId)
+  }
+
+  setTaskVerificationBaseCommit(taskId: string, verificationBaseCommit: string): TaskRecord {
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET verification_base_commit = ?, updated_at = ? WHERE id = ?')
+      .run(verificationBaseCommit, now, taskId)
     return this.getTask(taskId)
   }
 
