@@ -15,6 +15,8 @@ import type {
   Severity,
   TaskRecord,
   TaskStatus,
+  TaskTechSpec,
+  TaskTechSpecDraft,
   TaskVerificationPlan,
   TaskVerificationResult,
   UpdateProjectInput
@@ -55,6 +57,7 @@ const taskColumns = `
   runtime_contract_json AS runtimeContractJson,
   runtime_scenario_summary AS runtimeScenarioSummary,
   runtime_scenario_approved_at AS runtimeScenarioApprovedAt,
+  tech_spec_json AS techSpecJson,
   verification_plan_json AS verificationPlanJson,
   verification_result_json AS verificationResultJson,
   created_at AS createdAt,
@@ -194,6 +197,9 @@ function taskFromRow(row: Row): TaskRecord {
     runtimeScenarioApprovedAt: row.runtimeScenarioApprovedAt
       ? String(row.runtimeScenarioApprovedAt)
       : null,
+    techSpec: row.techSpecJson
+      ? JSON.parse(String(row.techSpecJson)) as TaskTechSpec
+      : null,
     verificationPlan,
     verificationResult,
     createdAt: String(row.createdAt),
@@ -318,6 +324,7 @@ export class AppStore {
         runtime_contract_json TEXT,
         runtime_scenario_summary TEXT,
         runtime_scenario_approved_at TEXT,
+        tech_spec_json TEXT,
         verification_plan_json TEXT,
         verification_result_json TEXT,
         created_at TEXT NOT NULL,
@@ -430,6 +437,9 @@ export class AppStore {
     }
     if (!taskColumnNames.has('verification_plan_json')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN verification_plan_json TEXT')
+    }
+    if (!taskColumnNames.has('tech_spec_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN tech_spec_json TEXT')
     }
     if (!taskColumnNames.has('verification_result_json')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN verification_result_json TEXT')
@@ -589,11 +599,15 @@ export class AppStore {
     runtimeContract: ApprovedRuntimeContract | null = null,
     runtimeScenarioSummary: string | null = null,
     verificationPlan: TaskVerificationPlan | null = null,
-    publishStrategy?: TaskRecord['publishStrategy']
+    publishStrategy?: TaskRecord['publishStrategy'],
+    techSpec: TaskTechSpecDraft | null = null
   ): TaskRecord {
     const project = this.getProject(projectId)
     const resolvedPublishStrategy = publishStrategy ?? project.publishStrategy ?? 'pull-request'
     const now = new Date().toISOString()
+    const approvedTechSpec: TaskTechSpec | null = techSpec
+      ? { ...techSpec, approvedAt: now }
+      : null
     const task: TaskRecord = {
       id: randomUUID(),
       projectId,
@@ -613,6 +627,7 @@ export class AppStore {
       runtimeContract,
       runtimeScenarioSummary: runtimeScenarioSummary?.trim() || null,
       runtimeScenarioApprovedAt: runtimeContract ? now : null,
+      techSpec: approvedTechSpec,
       verificationPlan,
       verificationResult: verificationPlan ? createVerificationResult(verificationPlan, now) : null,
       createdAt: now,
@@ -625,12 +640,12 @@ export class AppStore {
           branch_name, worktree_path, source_branch, base_commit, verification_base_commit,
           publish_strategy, publication_json,
           runtime_contract_json, runtime_scenario_summary,
-          runtime_scenario_approved_at, verification_plan_json, verification_result_json,
+          runtime_scenario_approved_at, tech_spec_json, verification_plan_json, verification_result_json,
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
           NULL, NULL, NULL, NULL, NULL, $publishStrategy, NULL, $runtimeContract, $runtimeScenarioSummary,
-          $runtimeScenarioApprovedAt, $verificationPlan, $verificationResult,
+          $runtimeScenarioApprovedAt, $techSpec, $verificationPlan, $verificationResult,
           $createdAt, $updatedAt
         )
       `)
@@ -645,6 +660,7 @@ export class AppStore {
         runtimeContract: runtimeContract ? JSON.stringify(runtimeContract) : null,
         runtimeScenarioSummary: task.runtimeScenarioSummary ?? null,
         runtimeScenarioApprovedAt: task.runtimeScenarioApprovedAt ?? null,
+        techSpec: approvedTechSpec ? JSON.stringify(approvedTechSpec) : null,
         verificationPlan: verificationPlan ? JSON.stringify(verificationPlan) : null,
         verificationResult: task.verificationResult ? JSON.stringify(task.verificationResult) : null,
         createdAt: now,

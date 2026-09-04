@@ -5,9 +5,11 @@ import type {
   CodexAuthStatus,
   CreateTaskInput,
   EventRecord,
+  GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
   ProjectSimulatorSession,
   RecommendVerificationPlanInput,
+  RefineTechSpecInput,
   SourceControlCommitInput,
   SourceControlDiffInput,
   SourceControlIdentityInput,
@@ -44,6 +46,10 @@ const bridge: AgentMonitoringBridge = {
   stopProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:stop', projectId),
   autoConfigureProjectRuntime: (projectId: string) =>
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
+  generateTechSpec: (input: GenerateTechSpecInput) =>
+    ipcRenderer.invoke('tech-spec:generate', input),
+  refineTechSpec: (input: RefineTechSpecInput) =>
+    ipcRenderer.invoke('tech-spec:refine', input),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
     ipcRenderer.invoke('runtime-scenario:generate', input),
   recommendVerificationPlan: (input: RecommendVerificationPlanInput) =>

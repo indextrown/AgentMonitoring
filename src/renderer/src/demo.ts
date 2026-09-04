@@ -807,6 +807,45 @@ export const demoBridge: AgentMonitoringBridge = {
     message: 'iPhone 16 Pro에서 앱을 종료했습니다.',
     error: null
   }),
+  generateTechSpec: async (input) => ({
+    version: 1,
+    revision: 1,
+    summary: `${input.title} 구현 범위와 검증 기준을 정리했습니다.`,
+    markdown: [
+      '# 목표와 완료 조건',
+      '',
+      input.prompt,
+      '',
+      '## 구현 범위',
+      '',
+      '- 현재 프로젝트 구조를 유지하면서 요구된 기능을 추가합니다.',
+      '- 사용자에게 보이는 결과와 실패 경로를 함께 구현합니다.',
+      '',
+      '## 제안 설계',
+      '',
+      '- 기존 모듈 경계를 확인하고 가장 가까운 기능 영역에 구현합니다.',
+      '- 상태 변화와 오류 처리를 화면과 테스트에서 관찰할 수 있게 합니다.',
+      '',
+      '## 검증 전략',
+      '',
+      '- 프로젝트 테스트로 로직과 회귀를 확인합니다.',
+      '- 화면 동작이 포함되면 Simulator 시나리오로 사용자 결과를 확인합니다.',
+      '',
+      '## 제외 범위',
+      '',
+      '- 요구사항과 직접 관련 없는 구조 변경은 포함하지 않습니다.'
+    ].join('\n'),
+    openQuestions: ['오류 상태에서 사용자에게 보여줄 문구를 기존 디자인과 동일하게 유지할까요?'],
+    changeSummary: '요구사항과 현재 프로젝트를 기준으로 최초 초안을 만들었습니다.'
+  }),
+  refineTechSpec: async (input) => ({
+    version: 1,
+    revision: input.current.revision + 1,
+    summary: input.current.summary,
+    markdown: `${input.current.markdown}\n\n## 사용자 피드백 반영\n\n- ${input.feedback}`,
+    openQuestions: [],
+    changeSummary: `사용자 의견 “${input.feedback}”을 설계와 검증 범위에 반영했습니다.`
+  }),
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
@@ -898,6 +937,7 @@ export const demoBridge: AgentMonitoringBridge = {
       runtimeContract: input.runtimeContract ?? null,
       runtimeScenarioSummary: input.runtimeScenarioSummary ?? null,
       runtimeScenarioApprovedAt: input.runtimeContract ? now : null,
+      techSpec: input.techSpec ? { ...input.techSpec, approvedAt: now } : null,
       verificationPlan: input.verificationPlan,
       verificationResult: createVerificationResult(input.verificationPlan, now),
       createdAt: now,

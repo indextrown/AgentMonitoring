@@ -9,7 +9,8 @@ import type {
   GeneratedRuntimeScenario,
   IosRuntimeAdapterConfig,
   RuntimeAcceptanceAssertion,
-  RuntimeUiAction
+  RuntimeUiAction,
+  TaskTechSpecDraft
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 import { projectCapabilityManifestSchema } from './project-capabilities'
@@ -164,6 +165,7 @@ export class RuntimeScenarioGenerator {
     projectPath: string
     title: string
     prompt: string
+    techSpec?: TaskTechSpecDraft | null
     adapter: IosRuntimeAdapterConfig
   }): Promise<GeneratedRuntimeScenario> {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-'))
@@ -175,6 +177,9 @@ export class RuntimeScenarioGenerator {
         '당신은 iOS 앱의 작업별 인수 검증 시나리오 설계자입니다.',
         `작업 제목: ${input.title}`,
         `작업 목표와 완료 조건:\n${input.prompt}`,
+        input.techSpec
+          ? `사람이 승인한 테크스펙 revision ${input.techSpec.revision}:\n${input.techSpec.markdown}`
+          : '이 작업에는 별도로 승인된 테크스펙이 없습니다.',
         `실행 대상: ${input.adapter.container} / ${input.adapter.scheme} / ${input.adapter.deviceFamily}`,
         '저장소를 읽기 전용으로 확인하고, 이 작업의 사용자 동작과 관찰 가능한 성공 조건만 JSON으로 설계하세요.',
         '기존 화면의 accessibilityIdentifier는 코드에 있는 값을 사용하세요.',

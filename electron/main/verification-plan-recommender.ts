@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   ProjectRuntimeConfigSource,
+  TaskTechSpecDraft,
   VerificationPlanRecommendation
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
@@ -51,6 +52,7 @@ export class VerificationPlanRecommender {
     projectPath: string
     title: string
     prompt: string
+    techSpec?: TaskTechSpecDraft | null
     testCommand: string
     runtimeAvailable: boolean
     runtimeConfigSource: ProjectRuntimeConfigSource | null
@@ -64,6 +66,9 @@ export class VerificationPlanRecommender {
         '당신은 소프트웨어 작업의 검증 계획을 추천하는 읽기 전용 분석가입니다.',
         `작업 제목: ${input.title}`,
         `작업 목표와 완료 조건:\n${input.prompt}`,
+        input.techSpec
+          ? `사람이 승인한 테크스펙 revision ${input.techSpec.revision}:\n${input.techSpec.markdown}`
+          : '이 작업에는 별도로 승인된 테크스펙이 없습니다.',
         `프로젝트 검증 명령: ${input.testCommand.trim() || '미설정'}`,
         `iOS Simulator 연결: ${input.runtimeAvailable ? '사용 가능' : '사용 불가'}`,
         `Simulator 설정 출처: ${input.runtimeConfigSource ?? '없음'}`,
