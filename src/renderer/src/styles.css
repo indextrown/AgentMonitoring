@@ -3342,6 +3342,8 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 15px 20px;
+  border-bottom: 1px solid #252b30;
 }
 
 .verification-report-plan {
@@ -3723,11 +3725,19 @@ kbd {
   flex-direction: column;
   width: min(520px, 48vw);
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
   border-left: 1px solid #2b3137;
   background: #111519;
   box-shadow: -16px 0 54px rgba(0, 0, 0, 0.4);
   animation: slide-in 160ms ease-out;
+}
+
+.task-drawer-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 @keyframes slide-in {
@@ -4168,9 +4178,8 @@ kbd {
 }
 
 .task-changes {
-  max-height: 40vh;
+  flex: 0 0 auto;
   padding: 15px 20px;
-  overflow: auto;
   border-bottom: 1px solid #252b30;
 }
 
@@ -4250,9 +4259,8 @@ kbd {
 }
 
 .drawer-events {
-  flex: 1;
+  flex: 0 0 auto;
   padding: 15px 20px;
-  overflow: auto;
 }
 
 .drawer-section-title {
@@ -4311,11 +4319,13 @@ kbd {
 
 .task-drawer > footer {
   display: flex;
+  flex: 0 0 auto;
   justify-content: flex-end;
   gap: 7px;
   padding: 13px 20px 18px;
   border-top: 1px solid #292f34;
   background: #0e1215;
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.18);
 }
 
 .approval-notice {

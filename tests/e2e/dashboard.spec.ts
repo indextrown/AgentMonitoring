@@ -22,13 +22,88 @@ test('matches the dense monitoring dashboard structure', async ({ page }) => {
 })
 
 test('opens search and task detail interactions', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/?environment=blocked')
   await page.locator('.search-trigger').click()
   await expect(page.getByPlaceholder('작업, 메모, 이벤트 검색')).toBeFocused()
   await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
   await page.locator('.search-results button').first().click()
-  await expect(page.locator('.task-drawer')).toBeVisible()
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer).toBeVisible()
   await expect(page.getByText('작업 계약')).toBeVisible()
+  await drawer.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+
+  const verificationReport = drawer.locator('.verification-report')
+  await expect(verificationReport).toHaveCSS('padding-left', '20px')
+  await expect(verificationReport).toHaveCSS('padding-right', '20px')
+
+  const drawerBox = await drawer.boundingBox()
+  const firstStepBox = await verificationReport.locator('.verification-step').first().boundingBox()
+  expect(drawerBox).not.toBeNull()
+  expect(firstStepBox).not.toBeNull()
+
+  const leftInset = firstStepBox!.x - drawerBox!.x
+  const rightInset = drawerBox!.x + drawerBox!.width - (firstStepBox!.x + firstStepBox!.width)
+  expect(leftInset).toBeGreaterThanOrEqual(20)
+  expect(rightInset).toBeGreaterThanOrEqual(20)
+})
+
+test('keeps verification steps inset in a compact task drawer', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 })
+  await page.goto('/?environment=blocked')
+  await page.locator('.search-trigger').click()
+  await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
+  await page.locator('.search-results button').first().click()
+
+  const drawer = page.locator('.task-drawer')
+  const verificationReport = drawer.locator('.verification-report')
+  const firstStep = verificationReport.locator('.verification-step').first()
+  await expect(firstStep).toBeVisible()
+  await drawer.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+
+  const drawerBox = await drawer.boundingBox()
+  const stepBox = await firstStep.boundingBox()
+  expect(drawerBox).not.toBeNull()
+  expect(stepBox).not.toBeNull()
+  expect(stepBox!.x - drawerBox!.x).toBeGreaterThanOrEqual(20)
+  expect(drawerBox!.x + drawerBox!.width - (stepBox!.x + stepBox!.width)).toBeGreaterThanOrEqual(20)
+
+  const scrollLayout = await drawer.evaluate((element) => {
+    const scrollRegion = element.querySelector<HTMLElement>('.task-drawer-scroll')
+    const changes = element.querySelector<HTMLElement>('.task-changes')
+    const events = element.querySelector<HTMLElement>('.drawer-events')
+    if (!scrollRegion || !changes || !events) throw new Error('작업 상세 섹션을 찾을 수 없습니다.')
+    return {
+      drawerOverflowY: getComputedStyle(element).overflowY,
+      scrollRegionOverflowY: getComputedStyle(scrollRegion).overflowY,
+      scrollRegionScrollable: scrollRegion.scrollHeight > scrollRegion.clientHeight,
+      changesOverflowY: getComputedStyle(changes).overflowY,
+      changesHasNestedScroll: changes.scrollHeight > changes.clientHeight,
+      eventsOverflowY: getComputedStyle(events).overflowY,
+      eventsHasNestedScroll: events.scrollHeight > events.clientHeight
+    }
+  })
+  expect(scrollLayout).toEqual({
+    drawerOverflowY: 'hidden',
+    scrollRegionOverflowY: 'auto',
+    scrollRegionScrollable: true,
+    changesOverflowY: 'visible',
+    changesHasNestedScroll: false,
+    eventsOverflowY: 'visible',
+    eventsHasNestedScroll: false
+  })
+
+  const footer = drawer.locator(':scope > footer')
+  await expect(footer).toBeVisible()
+  await expect(footer.getByRole('button', { name: '환경 준비 후 다시 검증' })).toBeVisible()
+  const footerBeforeScroll = await footer.boundingBox()
+  await drawer.locator('.task-drawer-scroll').evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  const footerAfterScroll = await footer.boundingBox()
+  expect(footerBeforeScroll).not.toBeNull()
+  expect(footerAfterScroll).not.toBeNull()
+  expect(footerAfterScroll!.y).toBeCloseTo(footerBeforeScroll!.y, 0)
+  await expect(drawer.locator('.drawer-events > div:not(.drawer-section-title)').last()).toBeVisible()
 })
 
 test('opens the in-app guide with a real task example and pipeline', async ({ page }) => {
