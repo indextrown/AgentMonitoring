@@ -49,6 +49,7 @@ import {
   summarizeRuntimeAcceptance,
   writeRuntimeAcceptanceEvidence
 } from './runtime-acceptance'
+import { normalizeRuntimeScenarioEnvironment } from '../../src/shared/runtime-scenario-policy'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -267,12 +268,37 @@ function eventMessage(payload: Record<string, unknown>): string | null {
 
 function runtimeContractPrompt(task: TaskRecord): string {
   if (!task.runtimeContract) return '이 작업에는 별도로 승인된 Simulator 검증 시나리오가 없습니다.'
+  const normalizedEnvironment = normalizeRuntimeScenarioEnvironment(task.runtimeContract.runtimeScenario)
+  const runtimeContract = {
+    ...task.runtimeContract,
+    runtimeScenario: {
+      ...task.runtimeContract.runtimeScenario,
+      permissions: normalizedEnvironment.permissions,
+      actions: normalizedEnvironment.actions
+    }
+  }
   return [
     '아래 JSON은 사람이 작업 등록 전에 승인한 고정 Simulator 검증 계약입니다.',
     '계약의 accessibility identifier를 제품 코드에 구현하되, 계약 자체를 수정하거나 검증을 우회하지 마세요.',
+    normalizedEnvironment.migratedSystemActionIdentifiers.length > 0
+      ? `기존 시스템 권한 조작 ${normalizedEnvironment.migratedSystemActionIdentifiers.join(', ')}은 동일한 Simulator 권한 사전 조건으로 변환했습니다.`
+      : '',
     '```json',
-    JSON.stringify(task.runtimeContract, null, 2),
+    JSON.stringify(runtimeContract, null, 2),
     '```'
+  ].filter(Boolean).join('\n')
+}
+
+export function runtimeIdentifierRepairContext(error: unknown): string | null {
+  if (!(error instanceof IosRuntimeStageError) || error.status !== 'acting') return null
+  const match = error.message.match(
+    /UI action\s+(\d+): identifier '([^']+)' (요소를 찾지 못했습니다\.|요소가 \d+개여서 조작을 중단했습니다\.)/
+  )
+  if (!match) return null
+  return [
+    `Simulator UI 조작 ${match[1]}단계에서 앱 identifier '${match[2]}'를 정확히 하나 찾지 못했습니다.`,
+    '승인된 identifier를 해당 앱 요소에 추가하거나 중복 identifier를 제거한 뒤 같은 시나리오로 다시 검증하세요.',
+    `실패 원문: ${match[0]}`
   ].join('\n')
 }
 
@@ -676,7 +702,11 @@ export class AgentRunner {
             }
           } catch (error) {
             this.setVerificationStep(taskId, plan, 'simulator-runtime', 'failed', error instanceof Error ? error.message : String(error))
-            if (!(error instanceof RuntimeAcceptanceStageError) || attempt >= task.maxAttempts) {
+            const identifierRepairContext = runtimeIdentifierRepairContext(error)
+            if (
+              (!(error instanceof RuntimeAcceptanceStageError) && !identifierRepairContext) ||
+              attempt >= task.maxAttempts
+            ) {
               throw error
             }
             const currentTask = this.store.getTask(taskId)
@@ -689,9 +719,11 @@ export class AgentRunner {
               '직전 runtime acceptance 검증이 실패했습니다.',
               '아래 증거에서 기대값과 실제값의 차이를 찾아 제품 코드를 수정하세요.',
               '합격 조건은 작업 등록 때 승인된 스냅샷에서 다시 읽으므로 assertion을 수정하거나 약화하지 마세요.',
-              error.repairContext
+              error instanceof RuntimeAcceptanceStageError
+                ? error.repairContext
+                : identifierRepairContext
             ].join('\n\n')
-            repairImagePaths = error.imagePaths
+            repairImagePaths = error instanceof RuntimeAcceptanceStageError ? error.imagePaths : []
             this.emit(
               currentTask,
               'runtime_repair_started',
@@ -2278,8 +2310,17 @@ export class AgentRunner {
     this.emit(task, 'runtime_started', 'runtime', startMessage)
 
     try {
+      const normalizedEnvironment = normalizeRuntimeScenarioEnvironment(manifest.value.runtimeScenario)
+      if (normalizedEnvironment.migratedSystemActionIdentifiers.length > 0) {
+        this.emit(
+          task,
+          'runtime_started',
+          'runtime',
+          `기존 시스템 권한 조작을 Simulator 사전 조건으로 변환했습니다: ${normalizedEnvironment.migratedSystemActionIdentifiers.join(', ')}`
+        )
+      }
       const uiActions = manifest.value.capabilities.act.includes('ui')
-        ? manifest.value.runtimeScenario?.actions ?? []
+        ? normalizedEnvironment.actions
         : []
       const debugBridge = manifest.value.debugBridge ?? null
       const debugFixture = debugBridge && manifest.value.capabilities.act.includes('fixture')
@@ -2296,6 +2337,7 @@ export class AgentRunner {
         captureScreen: manifest.value.capabilities.observe.includes('screen'),
         captureAccessibility: manifest.value.capabilities.observe.includes('accessibility'),
         captureState,
+        privacyPermissions: normalizedEnvironment.permissions,
         uiActions,
         debugBridge,
         debugFixture,

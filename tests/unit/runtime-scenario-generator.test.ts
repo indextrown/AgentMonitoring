@@ -31,6 +31,7 @@ describe('runtime scenario generation', () => {
     try {
       const payload = {
         summary: '저장 버튼을 누른 뒤 완료 화면을 확인합니다.',
+        permissions: [],
         actions: [{
           kind: 'tap',
           identifier: 'save-profile',
@@ -237,6 +238,7 @@ describe('runtime scenario generation', () => {
   it('builds a frozen contract with UI actions, acceptance checks, and evidence', () => {
     const contract = buildApprovedRuntimeContract(adapter, {
       summary: '항목을 입력하고 추가 결과를 확인합니다.',
+      permissions: [],
       actions: [
         {
           kind: 'type-text',
@@ -277,6 +279,7 @@ describe('runtime scenario generation', () => {
   it('does not request UI action evidence for a display-only scenario', () => {
     const contract = buildApprovedRuntimeContract(adapter, {
       summary: '새 화면이 표시되는지 확인합니다.',
+      permissions: [],
       actions: [],
       assertions: [
         {
@@ -292,5 +295,41 @@ describe('runtime scenario generation', () => {
     expect(contract.runtimeScenario.assertions).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ target: 'ui-actions' })])
     )
+  })
+
+  it('moves a legacy location permission button into a Simulator precondition', () => {
+    const contract = buildApprovedRuntimeContract(adapter, {
+      summary: '위치 권한을 준비하고 현재 위치로 이동합니다.',
+      permissions: [],
+      actions: [
+        {
+          kind: 'tap',
+          identifier: '앱을 사용하는 동안 허용',
+          text: null,
+          timeoutSeconds: 10
+        },
+        {
+          kind: 'tap',
+          identifier: 'map-current-location-button',
+          text: null,
+          timeoutSeconds: 10
+        }
+      ],
+      assertions: [
+        {
+          name: '현재 위치 표시',
+          identifier: 'current-location-marker',
+          property: 'exists',
+          expected: true
+        }
+      ]
+    })
+
+    expect(contract.runtimeScenario.permissions).toEqual([
+      { service: 'location', state: 'granted' }
+    ])
+    expect(contract.runtimeScenario.actions).toEqual([
+      { kind: 'tap', identifier: 'map-current-location-button', timeoutSeconds: 10 }
+    ])
   })
 })

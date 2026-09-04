@@ -849,8 +849,11 @@ export const demoBridge: AgentMonitoringBridge = {
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
+    const needsLocation = `${input.title}\n${input.prompt}`.includes('위치')
     return {
-      summary: '입력한 항목을 추가하고 목록에 표시되는지 확인합니다.',
+      summary: needsLocation
+        ? '위치 권한을 준비한 뒤 현재 위치 버튼의 동작을 확인합니다.'
+        : '입력한 항목을 추가하고 목록에 표시되는지 확인합니다.',
       contract: {
         version: 1,
         adapter: project.runtimeAdapter,
@@ -862,12 +865,17 @@ export const demoBridge: AgentMonitoringBridge = {
           verify: ['test-command', 'runtime-scenario']
         },
         runtimeScenario: {
-          actions: [
-            { kind: 'type-text', identifier: 'item-input', text: '우유', timeoutSeconds: 10 },
-            { kind: 'tap', identifier: 'add-item', timeoutSeconds: 10 }
-          ],
+          permissions: needsLocation ? [{ service: 'location', state: 'granted' }] : [],
+          actions: needsLocation
+            ? [{ kind: 'tap', identifier: 'map-current-location-button', timeoutSeconds: 10 }]
+            : [
+                { kind: 'type-text', identifier: 'item-input', text: '우유', timeoutSeconds: 10 },
+                { kind: 'tap', identifier: 'add-item', timeoutSeconds: 10 }
+              ],
           assertions: [
-            { kind: 'accessibility', name: '추가한 항목 표시', identifier: 'item-row', property: 'exists', expected: true },
+            needsLocation
+              ? { kind: 'accessibility' as const, name: '현재 위치 표시', identifier: 'current-location-marker', property: 'exists' as const, expected: true }
+              : { kind: 'accessibility' as const, name: '추가한 항목 표시', identifier: 'item-row', property: 'exists' as const, expected: true },
             { kind: 'evidence', name: '최종 화면 저장', target: 'screen' },
             { kind: 'evidence', name: '접근성 트리 저장', target: 'accessibility' },
             { kind: 'evidence', name: 'UI 조작 결과 저장', target: 'ui-actions' }

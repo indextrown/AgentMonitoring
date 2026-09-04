@@ -196,6 +196,7 @@ describe('iOS Simulator runtime adapter', () => {
       captureScreen: true,
       captureAccessibility: true,
       captureState: true,
+      privacyPermissions: [{ service: 'location', state: 'granted' }],
       uiActions,
       debugBridge: { protocol: 'file-v1', responseTimeoutSeconds: 10 },
       debugFixture: {
@@ -273,6 +274,7 @@ describe('iOS Simulator runtime adapter', () => {
       'booting',
       'building',
       'installing',
+      'preparing',
       'launching',
       'acting',
       'acting',
@@ -312,6 +314,11 @@ describe('iOS Simulator runtime adapter', () => {
         deviceId: 'IPHONE-UDID',
         deviceName: 'iPhone 16 Pro',
         bundleIdentifier: 'com.example.PopPang'
+      },
+      {
+        deviceId: 'IPHONE-UDID',
+        deviceName: 'iPhone 16 Pro',
+        bundleIdentifier: 'com.example.PopPang'
       }
     ])
     const resolvedWorktree = await realpath(worktree)
@@ -322,6 +329,7 @@ describe('iOS Simulator runtime adapter', () => {
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'xcodebuild', '-workspace', join(resolvedWorktree, 'PopPang.xcworkspace')],
       ['/usr/bin/xcrun', 'simctl', 'install', 'IPHONE-UDID'],
+      ['/usr/bin/xcrun', 'simctl', 'privacy', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'simctl', 'launch', '--terminate-running-process'],
       ['/usr/bin/xcrun', 'simctl', 'get_app_container', 'IPHONE-UDID'],
       ['/usr/bin/xcrun', 'xcodebuild', '-project', expect.stringContaining('AgentMonitoringAccessibility.xcodeproj')],
@@ -332,6 +340,11 @@ describe('iOS Simulator runtime adapter', () => {
     expect(result.uiActionEvidence?.content).toContain('destination-search')
     expect(result.debugStateEvidence?.content).toContain('signed-in-home')
     expect(result.debugStateEvidence?.content).toContain('selectedTab')
+    expect(commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        args: ['simctl', 'privacy', 'IPHONE-UDID', 'grant', 'location', 'com.example.PopPang']
+      })
+    ]))
     const testPlan = JSON.parse(
       await readFile(
         join(
@@ -379,6 +392,7 @@ describe('iOS Simulator runtime adapter', () => {
         captureScreen: false,
         captureAccessibility: false,
         captureState: false,
+        privacyPermissions: [],
         uiActions: [],
         debugBridge: null,
         debugFixture: null,
@@ -422,6 +436,7 @@ describe('iOS Simulator runtime adapter', () => {
         captureScreen: false,
         captureAccessibility: false,
         captureState: false,
+        privacyPermissions: [],
         uiActions: [],
         debugBridge: null,
         debugFixture: null,
@@ -458,6 +473,7 @@ describe('iOS Simulator runtime adapter', () => {
         captureScreen: false,
         captureAccessibility: false,
         captureState: false,
+        privacyPermissions: [],
         uiActions: [],
         debugBridge: null,
         debugFixture: null,
