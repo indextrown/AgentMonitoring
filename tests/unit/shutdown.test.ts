@@ -9,6 +9,7 @@ describe('shutdownResources', () => {
       releaseRunner = resolvePromise
     })
     const shutdown = shutdownResources({
+      projectSimulator: { dispose: async () => { order.push('simulator') } },
       runner: {
         dispose: async () => {
           order.push('runner:start')
@@ -21,10 +22,10 @@ describe('shutdownResources', () => {
     })
 
     await Promise.resolve()
-    expect(order).toEqual(['runner:start'])
+    expect(order).toEqual(['simulator', 'runner:start'])
     releaseRunner()
     await shutdown
-    expect(order).toEqual(['runner:start', 'runner:done', 'auth', 'store'])
+    expect(order).toEqual(['simulator', 'runner:start', 'runner:done', 'auth', 'store'])
   })
 
   it('still closes authentication and storage when runner disposal fails', async () => {

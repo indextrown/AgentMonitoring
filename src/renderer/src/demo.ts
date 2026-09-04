@@ -6,6 +6,7 @@ import {
   type EventKind,
   type EventRecord,
   type ProjectRecord,
+  type ProjectSimulatorSession,
   type SourceControlFile,
   type SourceControlStatus,
   type TaskRecord,
@@ -15,6 +16,37 @@ import { createVerificationResult, updateVerificationStep } from '../../shared/d
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const secondaryProjectId = '22222222-2222-4222-8222-222222222222'
+const simulatorListeners = new Set<(session: ProjectSimulatorSession) => void>()
+const demoSimulatorSessions = new Map<string, ProjectSimulatorSession>()
+
+function demoSimulatorSession(requestedProjectId: string): ProjectSimulatorSession {
+  return demoSimulatorSessions.get(requestedProjectId) ?? {
+    projectId: requestedProjectId,
+    status: 'idle',
+    deviceId: null,
+    deviceName: null,
+    bundleIdentifier: null,
+    processId: null,
+    message: 'Simulator에서 앱을 실행할 준비가 되었습니다.',
+    error: null,
+    updatedAt: new Date().toISOString()
+  }
+}
+
+function updateDemoSimulator(
+  requestedProjectId: string,
+  patch: Partial<ProjectSimulatorSession>
+): ProjectSimulatorSession {
+  const session = {
+    ...demoSimulatorSession(requestedProjectId),
+    ...patch,
+    projectId: requestedProjectId,
+    updatedAt: new Date().toISOString()
+  }
+  demoSimulatorSessions.set(requestedProjectId, session)
+  simulatorListeners.forEach((listener) => listener(session))
+  return session
+}
 
 function atOffset(days: number, hours: number, minutes = 0): string {
   const date = new Date()
@@ -717,6 +749,28 @@ export const demoBridge: AgentMonitoringBridge = {
     demoSourceControlRemote = { ...demoSourceControlRemote, behind: 0, diverged: false }
     return sourceControlStatus(requestedProjectId)
   },
+  getProjectSimulatorStatus: async (requestedProjectId) => demoSimulatorSession(requestedProjectId),
+  launchProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
+    status: 'running',
+    deviceId: 'DEMO-IPHONE-UDID',
+    deviceName: 'iPhone 16 Pro',
+    bundleIdentifier: 'com.example.Demo',
+    processId: 4242,
+    message: 'iPhone 16 Pro에서 앱을 실행하고 있습니다.',
+    error: null
+  }),
+  restartProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
+    status: 'running',
+    processId: 4243,
+    message: 'iPhone 16 Pro에서 앱을 다시 실행했습니다.',
+    error: null
+  }),
+  stopProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
+    status: 'stopped',
+    processId: null,
+    message: 'iPhone 16 Pro에서 앱을 종료했습니다.',
+    error: null
+  }),
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
@@ -1029,5 +1083,9 @@ export const demoBridge: AgentMonitoringBridge = {
   onEvent: (listener) => {
     listeners.add(listener)
     return () => listeners.delete(listener)
+  },
+  onProjectSimulatorChanged: (listener) => {
+    simulatorListeners.add(listener)
+    return () => simulatorListeners.delete(listener)
   }
 }

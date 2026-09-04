@@ -169,6 +169,8 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
 
+`ProjectSimulatorService`는 작업 runtime과 별도로 사람이 현재 원본 앱을 빠르게 확인하는 개발 실행 세션을 관리한다. 프로젝트에 저장된 iOS adapter를 사용해 원본 checkout을 전용 DerivedData에 빌드하고, 설정된 iPhone 또는 iPad Simulator를 부팅해 앱을 설치·실행한다. 재실행은 설치된 bundle identifier에 `simctl launch --terminate-running-process`만 실행하고, 종료는 해당 앱에만 `simctl terminate`를 호출한다. 프로젝트별 명령은 하나씩만 실행하며 container와 앱 산출물이 각각 저장소와 전용 DerivedData 안에 있는지 확인한다. 빌드 산출물은 설치 직후 삭제하고, 앱 종료 시 추적한 앱 프로세스만 정리하며 Simulator 기기는 종료하지 않는다. 상태 변화는 별도 IPC 이벤트로 Renderer에 전달한다.
+
 소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
 
 작업 등록 시 `pull-request` 또는 `direct` 게시 방식을 작업 스냅샷에 저장한다. 사람이 게시를 승인하면 앱은 원본 checkout이 깨끗하고 작업 시작 브랜치와 현재 브랜치가 같은지 확인한다. worktree 변경을 작업 브랜치에 커밋한 뒤 `git fetch origin --prune`으로 원격 기준을 갱신한다. 로컬 기준 브랜치에 원격에 없는 commit이 있으면 다른 변경을 AI 결과에 섞지 않도록 게시를 중단한다.

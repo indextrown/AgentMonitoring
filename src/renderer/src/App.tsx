@@ -31,6 +31,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Search,
   Settings2,
   ShieldCheck,
@@ -68,6 +69,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  ProjectSimulatorSession,
   PublishStrategy,
   ProjectInspection,
   RuntimeEvidenceRecord,
@@ -115,6 +117,11 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'fetchSourceControlRemote',
   'pushSourceControlRemote',
   'syncSourceControlRemote',
+  'getProjectSimulatorStatus',
+  'launchProjectSimulator',
+  'restartProjectSimulator',
+  'stopProjectSimulator',
+  'onProjectSimulatorChanged',
   'refreshTaskPublication',
   'switchTaskPublicationToPullRequest'
 ]
@@ -361,13 +368,16 @@ export function App(): React.JSX.Element {
     setInspection(null)
     try {
       const next = await bridge.inspectProject(projectId)
-      if (requestId === inspectionRequestRef.current) setInspection(next)
+      if (requestId === inspectionRequestRef.current) {
+        setInspection(next)
+        await load(projectId)
+      }
     } catch (inspectionError) {
       if (requestId === inspectionRequestRef.current) setError(String(inspectionError))
     } finally {
       if (requestId === inspectionRequestRef.current) setInspectionLoading(false)
     }
-  }, [])
+  }, [load])
 
   const autoConfigureRuntime = useCallback(async (projectId: string) => {
     setRuntimeConnecting(true)
@@ -1054,6 +1064,10 @@ function ProjectStartPage({
         />
       )}
 
+      {project.runtimeAdapter?.kind === 'ios-simulator' && !project.isDemo && (
+        <ProjectSimulatorPanel project={project} />
+      )}
+
       {inspection && !inspection.clean && (
         <div className="readiness-warning" role="status">
           <AlertTriangle size={15} />
@@ -1268,6 +1282,122 @@ function ProjectCapabilitySummary({
             <small>{PROJECT_CAPABILITY_STATUS_LABELS[capability.status]}</small>
           </div>
         ))}
+      </div>
+    </article>
+  )
+}
+
+const PROJECT_SIMULATOR_STATUS_LABELS: Record<ProjectSimulatorSession['status'], string> = {
+  idle: '실행 준비',
+  preparing: '기기 확인 중',
+  booting: 'Simulator 준비 중',
+  building: '앱 빌드 중',
+  installing: '앱 설치 중',
+  running: '실행 중',
+  restarting: '재실행 중',
+  stopping: '종료 중',
+  stopped: '앱 종료됨',
+  failed: '실행 실패'
+}
+
+const PROJECT_SIMULATOR_BUSY = new Set<ProjectSimulatorSession['status']>([
+  'preparing',
+  'booting',
+  'building',
+  'installing',
+  'restarting',
+  'stopping'
+])
+
+function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.JSX.Element {
+  const [session, setSession] = useState<ProjectSimulatorSession | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setSession(null)
+    setError(null)
+    void bridge.getProjectSimulatorStatus(project.id)
+      .then((next) => {
+        if (active) setSession(next)
+      })
+      .catch((statusError) => {
+        if (active) setError(String(statusError))
+      })
+    const unsubscribe = bridge.onProjectSimulatorChanged((next) => {
+      if (active && next.projectId === project.id) setSession(next)
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [project.id])
+
+  const run = async (
+    operation: (projectId: string) => Promise<ProjectSimulatorSession>
+  ): Promise<void> => {
+    setError(null)
+    try {
+      setSession(await operation(project.id))
+    } catch (operationError) {
+      setError(String(operationError))
+    }
+  }
+
+  const busy = session ? PROJECT_SIMULATOR_BUSY.has(session.status) : true
+  const installed = Boolean(session?.deviceId && session.bundleIdentifier)
+  const adapter = project.runtimeAdapter!
+  const family = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
+
+  return (
+    <article className={`panel project-simulator status-${session?.status ?? 'idle'}`} aria-live="polite">
+      <div className="project-simulator-icon">
+        {busy ? <LoaderCircle className="spin" size={18} /> : <SquareTerminal size={18} />}
+      </div>
+      <div className="project-simulator-copy">
+        <p className="eyebrow">DEVELOPMENT SIMULATOR</p>
+        <div className="project-simulator-title">
+          <h3>{family}에서 앱 바로 실행</h3>
+          <span>{session ? PROJECT_SIMULATOR_STATUS_LABELS[session.status] : '상태 확인 중'}</span>
+        </div>
+        <p>{session?.message ?? `${adapter.scheme} 실행 상태를 확인하고 있습니다.`}</p>
+        <div className="project-simulator-meta">
+          <code>{adapter.scheme} · {adapter.configuration}</code>
+          {session?.deviceName && <code>{session.deviceName}</code>}
+          {session?.bundleIdentifier && <code>{session.bundleIdentifier}</code>}
+        </div>
+        {(error || session?.error) && (
+          <div className="project-simulator-error"><AlertTriangle size={13} />{session?.error ?? error}</div>
+        )}
+      </div>
+      <div className="project-simulator-actions">
+        <button
+          className="primary-button"
+          type="button"
+          disabled={busy}
+          onClick={() => void run(bridge.launchProjectSimulator)}
+        >
+          {busy && ['preparing', 'booting', 'building', 'installing'].includes(session?.status ?? '')
+            ? <LoaderCircle className="spin" size={13} />
+            : <Play size={13} />}
+          {session?.status === 'running' ? '다시 빌드·실행' : '빌드·실행'}
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={busy || !installed}
+          onClick={() => void run(bridge.restartProjectSimulator)}
+        >
+          <RotateCcw size={13} /> 재실행
+        </button>
+        <button
+          className="secondary-button danger"
+          type="button"
+          disabled={busy || !installed || session?.status === 'stopped'}
+          onClick={() => void run(bridge.stopProjectSimulator)}
+        >
+          <Square size={12} /> 종료
+        </button>
       </div>
     </article>
   )
@@ -1560,6 +1690,10 @@ function DashboardPage({
         onAutoConnect={onAutoConnect}
         autoConnecting={autoConnecting}
       />
+
+      {snapshot.selectedProject?.runtimeAdapter?.kind === 'ios-simulator' && !snapshot.selectedProject.isDemo && (
+        <ProjectSimulatorPanel project={snapshot.selectedProject} />
+      )}
 
       <article className="panel timeline-card">
         <div className="timeline-summary">
