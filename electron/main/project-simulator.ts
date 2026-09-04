@@ -125,6 +125,33 @@ export class ProjectSimulatorService {
       const derivedDataPath = await realpath(resolve(projectRuntimeRoot, 'DerivedData'))
       const familyLabel = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
 
+      this.update(project.id, 'preparing', `${adapter.scheme}이 실행 가능한 iOS 앱인지 확인하고 있습니다.`)
+      const schemeSettings = await this.required({
+        command: XCRUN_COMMAND,
+        args: [
+          'xcodebuild',
+          ...xcodeContainerArguments(containerPath),
+          '-scheme',
+          adapter.scheme,
+          '-configuration',
+          adapter.configuration,
+          '-sdk',
+          'iphonesimulator',
+          '-showBuildSettings',
+          '-json'
+        ],
+        cwd: projectRoot,
+        label: 'iOS 앱 Scheme 사전 확인',
+        timeoutMs: TIMEOUTS.inspect
+      })
+      try {
+        parseXcodeAppProduct(schemeSettings.stdout)
+      } catch {
+        throw new Error(
+          `${adapter.scheme} Scheme은 Simulator에 설치할 수 있는 iOS 앱이 아닙니다. 프로젝트 설정에서 실행 설정을 다시 찾고 앱 Scheme을 선택하세요.`
+        )
+      }
+
       this.update(project.id, 'preparing', `${familyLabel} Simulator 기기를 찾고 있습니다.`)
       const deviceList = await this.required({
         command: XCRUN_COMMAND,

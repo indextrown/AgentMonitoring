@@ -66,6 +66,26 @@ export interface IosRuntimeAdapterConfig {
 
 export type ProjectRuntimeConfigSource = 'detected' | 'manifest'
 
+export type ProjectRuntimeDiscoveryState = 'ready' | 'selection-required' | 'unavailable'
+
+export interface IosAppSchemeCandidate {
+  scheme: string
+  targets: string[]
+}
+
+export interface ProjectRuntimeDiscovery {
+  state: ProjectRuntimeDiscoveryState
+  container: string | null
+  appSchemes: IosAppSchemeCandidate[]
+  selectedScheme: string | null
+  message: string
+}
+
+export interface AutoConfigureProjectRuntimeResult {
+  project: ProjectRecord
+  discovery: ProjectRuntimeDiscovery
+}
+
 export type RuntimeUiAction =
   | {
       kind: 'tap'
@@ -565,7 +585,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 8
+export const AGENT_MONITORING_BRIDGE_VERSION = 9
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -592,7 +612,7 @@ export interface AgentMonitoringBridge {
   launchProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
-  autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
+  autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
     input: RecommendVerificationPlanInput

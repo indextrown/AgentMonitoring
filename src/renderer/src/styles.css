@@ -2455,6 +2455,50 @@ kbd {
   font-size: 7px;
 }
 
+.runtime-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.runtime-settings-actions .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 27px;
+  padding: 0 9px;
+  font-size: 8px;
+}
+
+.runtime-discovery-message {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid #294337;
+  border-radius: 5px;
+  color: #78b996;
+  background: #102019;
+  font-size: 8px;
+}
+
+.runtime-discovery-message.state-selection-required {
+  border-color: #59462b;
+  color: #c8a56c;
+  background: #211b12;
+}
+
+.runtime-discovery-message.state-unavailable {
+  border-color: #553135;
+  color: #ce858a;
+  background: #211416;
+}
+
+.runtime-discovery-message svg {
+  flex: none;
+}
+
 .runtime-settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

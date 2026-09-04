@@ -69,6 +69,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  ProjectRuntimeDiscovery,
   ProjectSimulatorSession,
   PublishStrategy,
   ProjectInspection,
@@ -341,6 +342,7 @@ export function App(): React.JSX.Element {
   const [inspection, setInspection] = useState<ProjectInspection | null>(null)
   const [inspectionLoading, setInspectionLoading] = useState(false)
   const [runtimeConnecting, setRuntimeConnecting] = useState(false)
+  const [runtimeDiscovery, setRuntimeDiscovery] = useState<ProjectRuntimeDiscovery | null>(null)
   const [selectingProjectId, setSelectingProjectId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -383,7 +385,15 @@ export function App(): React.JSX.Element {
     setRuntimeConnecting(true)
     setError(null)
     try {
-      await bridge.autoConfigureProjectRuntime(projectId)
+      const result = await bridge.autoConfigureProjectRuntime(projectId)
+      setRuntimeDiscovery(result.discovery)
+      if (result.discovery.state === 'selection-required') {
+        setPage('projects')
+      } else if (result.discovery.state === 'unavailable') {
+        setError(result.discovery.message)
+      } else {
+        setNotice(result.discovery.message)
+      }
       await load(projectId)
       await refreshInspection(projectId)
     } catch (runtimeError) {
@@ -392,6 +402,10 @@ export function App(): React.JSX.Element {
       setRuntimeConnecting(false)
     }
   }, [load, refreshInspection])
+
+  useEffect(() => {
+    setRuntimeDiscovery(null)
+  }, [selectedProjectId])
 
   const loadCodexAuth = useCallback(async () => {
     try {
@@ -794,6 +808,7 @@ export function App(): React.JSX.Element {
         {selectedProject && page === 'projects' && (
           <ProjectsPage
             project={selectedProject}
+            runtimeDiscovery={runtimeDiscovery}
             inspection={inspection}
             inspectionLoading={inspectionLoading}
             onRefreshInspection={() => void refreshInspection(selectedProject.id)}
@@ -2219,6 +2234,7 @@ function SourceControlGroup({
 
 function ProjectsPage({
   project,
+  runtimeDiscovery,
   inspection,
   inspectionLoading,
   onRefreshInspection,
@@ -2229,6 +2245,7 @@ function ProjectsPage({
   onRemove
 }: {
   project: ProjectRecord
+  runtimeDiscovery: ProjectRuntimeDiscovery | null
   inspection: ProjectInspection | null
   inspectionLoading: boolean
   onRefreshInspection: () => void
@@ -2250,6 +2267,27 @@ function ProjectsPage({
     setRuntimeAdapter(project.runtimeAdapter)
     setPublishStrategy(project.publishStrategy ?? 'pull-request')
   }, [project])
+  useEffect(() => {
+    if (
+      runtimeDiscovery?.state !== 'selection-required' ||
+      !runtimeDiscovery.container ||
+      runtimeDiscovery.appSchemes.length === 0
+    ) return
+    setRuntimeAdapter((current) => {
+      const currentScheme = current && runtimeDiscovery.appSchemes.some(
+        (candidate) => candidate.scheme === current.scheme
+      )
+        ? current.scheme
+        : runtimeDiscovery.appSchemes[0].scheme
+      return {
+        kind: 'ios-simulator',
+        container: runtimeDiscovery.container!,
+        scheme: currentScheme,
+        configuration: 'Debug',
+        deviceFamily: current?.deviceFamily ?? 'iphone'
+      }
+    })
+  }, [runtimeDiscovery])
   return (
     <section className="workspace-page">
       <PageHeading title="프로젝트 설정" description="에이전트가 접근할 저장소와 검증 명령을 명시한다." />
@@ -2292,18 +2330,30 @@ function ProjectsPage({
                   : 'Xcode 구성을 자동으로 찾지 못했습니다.'}
               </small>
             </div>
-            {runtimeAdapter ? (
-              <button type="button" className="text-button" onClick={() => setRuntimeAdapter(null)}>사용 안 함</button>
-            ) : (
-              <button type="button" className="secondary-button" onClick={() => setRuntimeAdapter({
-                kind: 'ios-simulator',
-                container: '',
-                scheme: '',
-                configuration: 'Debug',
-                deviceFamily: 'iphone'
-              })}>직접 설정</button>
-            )}
+            <div className="runtime-settings-actions">
+              <button type="button" className="secondary-button" disabled={autoConnecting} onClick={onAutoConnect}>
+                {autoConnecting ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}
+                {autoConnecting ? '찾는 중' : '실행 설정 다시 찾기'}
+              </button>
+              {runtimeAdapter ? (
+                <button type="button" className="text-button" onClick={() => setRuntimeAdapter(null)}>사용 안 함</button>
+              ) : (
+                <button type="button" className="text-button" onClick={() => setRuntimeAdapter({
+                  kind: 'ios-simulator',
+                  container: '',
+                  scheme: '',
+                  configuration: 'Debug',
+                  deviceFamily: 'iphone'
+                })}>직접 설정</button>
+              )}
+            </div>
           </div>
+          {runtimeDiscovery && (
+            <div className={`runtime-discovery-message state-${runtimeDiscovery.state}`} role="status">
+              {runtimeDiscovery.state === 'ready' ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+              <span>{runtimeDiscovery.message}</span>
+            </div>
+          )}
           {runtimeAdapter && (
             <div className="runtime-settings-grid">
               <label>
@@ -2312,7 +2362,17 @@ function ProjectsPage({
               </label>
               <label>
                 <span>Scheme</span>
-                <input required value={runtimeAdapter.scheme} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, scheme: event.target.value })} placeholder="예: MyApp" />
+                {runtimeDiscovery?.container === runtimeAdapter.container && runtimeDiscovery.appSchemes.length > 0 ? (
+                  <select required value={runtimeAdapter.scheme} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, scheme: event.target.value })}>
+                    {runtimeDiscovery.appSchemes.map((candidate) => (
+                      <option value={candidate.scheme} key={candidate.scheme}>
+                        {candidate.scheme} · iOS 앱
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input required value={runtimeAdapter.scheme} onChange={(event) => setRuntimeAdapter({ ...runtimeAdapter, scheme: event.target.value })} placeholder="예: MyApp" />
+                )}
               </label>
               <label>
                 <span>실행 기기</span>

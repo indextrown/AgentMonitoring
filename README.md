@@ -270,13 +270,15 @@ iOS 실행 영역이 연결된 실제 프로젝트에는 대시보드에 **iPhon
 
 패널에는 준비, 부팅, 빌드, 설치와 실행 상태가 실시간으로 표시돼요. 선택된 기기, Scheme과 bundle identifier도 함께 확인할 수 있어요. 개발 실행에 사용한 전용 DerivedData는 앱 설치가 끝나면 바로 삭제하며, 설치된 앱 정보만 재실행과 종료를 위해 현재 AgentMonitoring 실행 중에 보관해요. AgentMonitoring을 종료하면 추적 중인 앱 프로세스를 정리하지만 Simulator 자체는 종료하지 않아요.
 
+AgentMonitoring은 긴 빌드를 시작하기 전에 선택한 Scheme이 Simulator에 설치할 수 있는 iOS 앱인지 확인해요. Framework나 테스트 Scheme을 선택했다면 바로 중단하고 프로젝트 설정에서 실행 설정을 다시 찾도록 안내해요.
+
 이 기능은 사람이 현재 앱을 빠르게 확인하는 개발 도구예요. AI 작업의 Simulator 검증은 별도 worktree에서 실행되고 화면·접근성·조작 증거까지 수집하므로 서로 대체하지 않아요.
 
 ## Swift 앱은 어떻게 검증하나요?
 
-Swift 저장소를 연결하면 AgentMonitoring이 `.xcworkspace`와 `.xcodeproj`를 찾아요. Git 추적 파일을 먼저 확인하고, Tuist처럼 생성 결과를 Git에 올리지 않는 프로젝트는 저장소 안의 실제 파일도 제한된 범위에서 찾아요. 이어서 `xcodebuild -list -json`으로 Scheme을 확인하고 iPhone을 기본 실행 기기로 설정해요.
+Swift 저장소를 연결하면 AgentMonitoring이 `.xcworkspace`와 `.xcodeproj`를 찾아요. Git 추적 파일을 먼저 확인하고, Tuist처럼 생성 결과를 Git에 올리지 않는 프로젝트는 저장소 안의 실제 파일도 제한된 범위에서 찾아요. 이어서 각 Scheme의 제품 유형을 확인하고 Simulator에 설치할 수 있는 iOS 앱만 실행 후보로 남겨요. 실행 가능한 앱이 하나면 자동으로 연결하고, 여러 개면 프로젝트 설정에서 사용할 앱을 선택해요. 기본 실행 기기는 iPhone이에요.
 
-Build, Run, Observe, Act가 회색이면 **iOS 자동 연결**을 누르세요. Xcode 프로젝트와 Scheme을 다시 찾아 네 영역을 한 번에 연결해요. 찾지 못하면 프로젝트 설정에서 container와 Scheme을 직접 입력할 수 있어요. 실행 기기는 iPhone과 iPad 중에서 선택할 수 있어요.
+Build, Run, Observe, Act가 회색이면 **iOS 자동 연결**을 누르세요. 이미 잘못된 Scheme이 연결됐다면 프로젝트 설정에서 **실행 설정 다시 찾기**를 누르세요. AgentMonitoring이 앱 Scheme을 다시 확인하고 네 영역을 연결해요. 앱 Scheme이 여러 개면 목록에서 하나를 고른 뒤 설정을 저장하세요. 찾지 못하면 container와 Scheme을 직접 입력할 수 있어요. 실행 기기는 iPhone과 iPad 중에서 선택할 수 있어요.
 
 새 작업에서는 Codex가 자연어 목표를 다음 두 종류의 조건으로 바꿔요.
 

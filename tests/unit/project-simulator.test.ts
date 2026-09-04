@@ -8,6 +8,22 @@ import type { RuntimeCommandRequest } from '../../electron/main/ios-simulator-ru
 
 const temporaryDirectories: string[] = []
 
+function appBuildSettings(targetBuildDirectory = '/tmp/DerivedData/Build/Products/Debug-iphonesimulator'): string {
+  return JSON.stringify([
+    {
+      target: 'Demo',
+      buildSettings: {
+        TARGET_BUILD_DIR: targetBuildDirectory,
+        WRAPPER_NAME: 'Demo.app',
+        WRAPPER_EXTENSION: 'app',
+        PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Demo',
+        PRODUCT_TYPE: 'com.apple.product-type.application',
+        SKIP_INSTALL: 'NO'
+      }
+    }
+  ])
+}
+
 function projectRecord(path: string, container = 'Demo.xcodeproj'): ProjectRecord {
   return {
     id: '11111111-1111-4111-8111-111111111111',
@@ -73,23 +89,14 @@ describe('ProjectSimulatorService', () => {
         return { code: 0, output: 'BUILD SUCCEEDED', stdout: 'BUILD SUCCEEDED' }
       }
       if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
-        const derivedDataPath = request.args[request.args.indexOf('-derivedDataPath') + 1]
+        const derivedDataIndex = request.args.indexOf('-derivedDataPath')
+        const targetBuildDirectory = derivedDataIndex >= 0
+          ? join(request.args[derivedDataIndex + 1], 'Build', 'Products', 'Debug-iphonesimulator')
+          : '/tmp/DerivedData/Build/Products/Debug-iphonesimulator'
         return {
           code: 0,
           output: '',
-          stdout: JSON.stringify([
-            {
-              target: 'Demo',
-              buildSettings: {
-                TARGET_BUILD_DIR: join(derivedDataPath, 'Build', 'Products', 'Debug-iphonesimulator'),
-                WRAPPER_NAME: 'Demo.app',
-                WRAPPER_EXTENSION: 'app',
-                PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Demo',
-                PRODUCT_TYPE: 'com.apple.product-type.application',
-                SKIP_INSTALL: 'NO'
-              }
-            }
-          ])
+          stdout: appBuildSettings(targetBuildDirectory)
         }
       }
       if (request.args.includes('launch')) {
@@ -114,6 +121,7 @@ describe('ProjectSimulatorService', () => {
       processId: 4242
     })
     expect(statuses).toEqual([
+      'preparing',
       'preparing',
       'booting',
       'building',
@@ -162,6 +170,9 @@ describe('ProjectSimulatorService', () => {
       releaseList = resolvePromise
     })
     const execute = async (request: RuntimeCommandRequest) => {
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return { code: 0, output: '', stdout: appBuildSettings() }
+      }
       if (request.args.join(' ') === 'simctl list devices available --json') {
         await listReleased
         return { code: 0, output: '', stdout: JSON.stringify({ devices: {} }) }
@@ -176,5 +187,44 @@ describe('ProjectSimulatorService', () => {
     await expect(service.launch(project)).rejects.toThrow('이미 실행 중')
     releaseList()
     await expect(first).rejects.toThrow('사용 가능한 iPhone Simulator가 없습니다')
+  })
+
+  it('rejects a framework scheme before booting a Simulator or starting a build', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-simulator-scheme-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    const commands: RuntimeCommandRequest[] = []
+    const execute = async (request: RuntimeCommandRequest) => {
+      commands.push(request)
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return {
+          code: 0,
+          output: '',
+          stdout: JSON.stringify([
+            {
+              target: 'Core',
+              buildSettings: {
+                WRAPPER_EXTENSION: 'framework',
+                PRODUCT_BUNDLE_IDENTIFIER: 'com.example.Core',
+                PRODUCT_TYPE: 'com.apple.product-type.framework'
+              }
+            }
+          ])
+        }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const service = new ProjectSimulatorService(join(directory, 'runtime'), () => undefined, execute)
+    const project = projectRecord(projectPath)
+    project.runtimeAdapter!.scheme = 'Core'
+
+    await expect(service.launch(project)).rejects.toThrow(
+      'Core Scheme은 Simulator에 설치할 수 있는 iOS 앱이 아닙니다'
+    )
+    expect(commands).toHaveLength(1)
+    expect(commands[0].args).toContain('-showBuildSettings')
+    expect(commands.some((request) => request.args.includes('build'))).toBe(false)
+    expect(commands.some((request) => request.args.includes('simctl'))).toBe(false)
   })
 })
