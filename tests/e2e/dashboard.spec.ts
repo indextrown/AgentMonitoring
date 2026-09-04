@@ -412,7 +412,7 @@ test('generates, reviews, and freezes a task-scoped Simulator scenario', async (
   await expect(drawer.getByText(/조건 고정/)).toBeVisible()
 })
 
-test('explains and confirms applying an approved task to the original checkout', async ({ page }) => {
+test('explains and confirms publishing an approved task through a PR', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   page.once('dialog', (dialog) => dialog.accept())
@@ -426,16 +426,40 @@ test('explains and confirms applying an approved task to the original checkout',
 
   const drawer = page.locator('.task-drawer')
   await drawer.getByRole('button', { name: '실행' }).click()
-  await expect(drawer.getByText('안전한 로컬 적용')).toBeVisible()
+  await expect(drawer.getByText('안전한 원격 게시')).toBeVisible()
   await expect(drawer.getByText('변경 내역')).toBeVisible()
   await expect(drawer.getByText('src/navigation/RouteMonitor.ts', { exact: true })).toBeVisible()
-  await expect(drawer.getByRole('button', { name: '원본에 적용' })).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '브랜치 올리고 PR 만들기' })).toBeVisible()
 
   page.once('dialog', async (dialog) => {
-    expect(dialog.message()).toContain('최신 변경을 반영하고 검증한 뒤 다시 승인을 요청합니다')
+    expect(dialog.message()).toContain('작업 브랜치를 올리고 PR을 만듭니다')
     await dialog.accept()
   })
-  await drawer.getByRole('button', { name: '원본에 적용' }).click()
+  await drawer.getByRole('button', { name: '브랜치 올리고 PR 만들기' }).click()
+  await expect(drawer.getByText('PR 병합 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByRole('button', { name: 'GitHub PR 열기' })).toBeVisible()
+  await page.getByRole('button', { name: '알림 닫기' }).click()
+  await drawer.getByRole('button', { name: 'PR 상태 확인' }).click()
+  await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
+})
+
+test('lets each task publish directly to the remote base branch', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('직접 게시 확인')
+  await dialog.getByLabel('목표와 완료 조건').fill('검증된 변경을 원격 main에 직접 게시하고 로컬을 동기화한다.')
+  await dialog.getByText('기본 브랜치에 직접 올리기', { exact: true }).click()
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await drawer.getByRole('button', { name: '실행' }).click()
+  await expect(drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' })).toBeVisible()
+  page.once('dialog', (confirmDialog) => confirmDialog.accept())
+  await drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' }).click()
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })
 

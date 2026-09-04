@@ -66,6 +66,14 @@ describe('parseSourceControlStatus', () => {
 })
 
 describe('SourceControlService', () => {
+  it('does not expose credentials embedded in an HTTPS remote URL', async () => {
+    const { project, repository } = await createRepository()
+    await git(repository, ['remote', 'add', 'origin', 'https://secret-token@github.com/example/private.git'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    expect((await service.getStatus(project)).remote?.url).toBe('https://[REDACTED]@github.com/example/private.git')
+  })
+
   it('serializes mutating Git operations for the same project', async () => {
     const coordinator = new GitOperationCoordinator()
     let releaseFirst = (): void => undefined
@@ -168,5 +176,31 @@ describe('SourceControlService', () => {
 
     await expect(service.stage(project, ['../outside.txt'])).rejects.toThrow('안전하지 않은 저장소 파일 경로')
     await expect(service.stage(project, ['missing.txt'])).rejects.toThrow('현재 변경 목록에 없는 파일')
+  })
+
+  it('fetches origin and reports ahead and behind counts without merging', async () => {
+    const { project, repository } = await createRepository()
+    const remote = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-origin-'))
+    const peer = await mkdtemp(join(tmpdir(), 'agent-monitoring-source-control-peer-'))
+    temporaryDirectories.push(remote, peer)
+    await git(remote, ['init', '--bare'])
+    await git(repository, ['remote', 'add', 'origin', remote])
+    await git(repository, ['push', '--set-upstream', 'origin', 'main'])
+
+    await execFileAsync('git', ['clone', remote, peer], { encoding: 'utf8' })
+    await git(peer, ['checkout', 'main'])
+    await git(peer, ['config', 'user.name', 'Remote Test'])
+    await git(peer, ['config', 'user.email', 'remote@example.com'])
+    await writeFile(join(peer, 'remote.txt'), 'remote change\n')
+    await git(peer, ['add', 'remote.txt'])
+    await git(peer, ['commit', '-m', 'remote change'])
+    await git(peer, ['push', 'origin', 'main'])
+
+    const service = new SourceControlService(new GitOperationCoordinator())
+    const before = await service.getStatus(project)
+    expect(before.remote).toMatchObject({ name: 'origin', upstream: 'origin/main', behind: 0 })
+    const after = await service.fetch(project)
+    expect(after.remote).toMatchObject({ name: 'origin', upstream: 'origin/main', ahead: 0, behind: 1, diverged: false })
+    expect(await git(repository, ['rev-parse', 'HEAD'])).not.toBe(await git(repository, ['rev-parse', 'origin/main']))
   })
 })

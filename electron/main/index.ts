@@ -26,6 +26,7 @@ import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './proj
 import { resolveProjectRuntimeConfig } from './project-runtime-config'
 import { AgentRunner } from './runner'
 import { GitOperationCoordinator } from './git-operation-coordinator'
+import { resolveGithubCommand } from './github-cli'
 import { SourceControlService } from './source-control'
 import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
 import { VerificationPlanRecommender } from './verification-plan-recommender'
@@ -49,7 +50,8 @@ const createTaskSchema = z.object({
   maxAttempts: z.number().int().min(1).max(5),
   runtimeContract: projectCapabilityManifestSchema.nullable().optional(),
   runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
-  verificationPlan: verificationPlanSchema
+  verificationPlan: verificationPlanSchema,
+  publishStrategy: z.enum(['pull-request', 'direct'])
 }).superRefine((input, context) => {
   const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
   const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
@@ -72,7 +74,8 @@ const updateProjectSchema = z.object({
   name: z.string().trim().min(1).max(80),
   testCommand: z.string().trim().max(500),
   setupCommand: z.string().trim().max(500),
-  runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional()
+  runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional(),
+  publishStrategy: z.enum(['pull-request', 'direct']).optional()
 })
 
 const generateRuntimeScenarioSchema = z.object({
@@ -130,6 +133,10 @@ const sourceControlIdentitySchema = z.object({
   name: z.string().trim().min(1).max(200),
   email: z.string().trim().email().max(320)
 }).strict()
+
+const externalUrlSchema = z.string().url().refine((url) => url.startsWith('https://github.com/'), {
+  message: 'GitHub HTTPS 주소만 열 수 있습니다.'
+})
 
 let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
@@ -370,6 +377,11 @@ function registerIpc(): void {
     )
   })
 
+  ipcMain.handle('source-control:fetch', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().fetch(requireStore().getProject(validProjectId))
+  })
+
   ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     const project = requireStore().getProject(validProjectId)
@@ -444,7 +456,8 @@ function registerIpc(): void {
       input.maxAttempts,
       (input.runtimeContract as ApprovedRuntimeContract | null | undefined) ?? null,
       input.runtimeScenarioSummary ?? null,
-      input.verificationPlan
+      input.verificationPlan,
+      input.publishStrategy
     )
   })
 
@@ -475,6 +488,21 @@ function registerIpc(): void {
   ipcMain.handle('task:approve', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     return requireRunner().approve(taskId)
+  })
+
+  ipcMain.handle('task:refresh-publication', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    return requireRunner().refreshPublication(taskId)
+  })
+
+  ipcMain.handle('task:switch-publication-to-pr', async (_event, taskId: string) => {
+    const validTaskId = z.string().uuid().parse(taskId)
+    const task = requireStore().getTask(validTaskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('승인을 기다리는 작업만 PR 방식으로 전환할 수 있습니다.')
+    }
+    if ((task.publishStrategy ?? 'pull-request') !== 'direct') return task
+    return requireStore().setTaskPublishStrategy(validTaskId, 'pull-request')
   })
 
   ipcMain.handle('task:discard', async (_event, taskId: string) => {
@@ -520,6 +548,10 @@ function registerIpc(): void {
     if (error) throw new Error(error)
   })
 
+  ipcMain.handle('shell:open-external-url', async (_event, rawUrl: string) => {
+    await shell.openExternal(externalUrlSchema.parse(rawUrl))
+  })
+
   ipcMain.handle('shell:open-feedback', () =>
     shell.openExternal('https://github.com/indextrown/AgentMonitoring/issues/new')
   )
@@ -530,6 +562,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const databasePath = join(userDataPath, 'agent-monitoring.sqlite')
   const codexHome = join(userDataPath, 'codex')
   const codexCommand = await resolveCodexCommand()
+  const githubCommand = await resolveGithubCommand()
   store = new AppStore(databasePath)
   for (const project of store.listProjects()) {
     if (project.setupCommand) continue
@@ -551,7 +584,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     codexHome,
     {},
     undefined,
-    gitCoordinator
+    gitCoordinator,
+    githubCommand
   )
   registerIpc()
   await createWindow()

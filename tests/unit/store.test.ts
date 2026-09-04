@@ -30,7 +30,8 @@ describe('AppStore', () => {
       projectId: project.id,
       name: project.name,
       setupCommand: 'tuist install',
-      testCommand: 'tuist test'
+      testCommand: 'tuist test',
+      publishStrategy: 'direct'
     })
     const task = store.createTask(
       project.id,
@@ -46,6 +47,17 @@ describe('AppStore', () => {
     store.transitionTask(task.id, 'running', 1)
     store.transitionTask(task.id, 'awaiting_approval')
     store.transitionTask(task.id, 'completed')
+    store.setTaskPublication(task.id, {
+      strategy: 'direct',
+      status: 'published',
+      remoteName: 'origin',
+      baseBranch: 'main',
+      remoteBranch: 'main',
+      pullRequestUrl: null,
+      publishedCommit: 'abcdef123456',
+      message: '원격 게시 완료',
+      updatedAt: new Date().toISOString()
+    })
     store.addNote(project.id, '결정', '승인 경계를 유지한다.')
     store.close()
 
@@ -54,9 +66,14 @@ describe('AppStore', () => {
     expect(snapshot.selectedProject?.id).toBe(project.id)
     expect(snapshot.selectedProject).toMatchObject({
       setupCommand: 'tuist install',
-      testCommand: 'tuist test'
+      testCommand: 'tuist test',
+      publishStrategy: 'direct'
     })
     expect(snapshot.tasks[0].status).toBe('completed')
+    expect(snapshot.tasks[0]).toMatchObject({
+      publishStrategy: 'direct',
+      publication: { status: 'published', remoteName: 'origin', baseBranch: 'main' }
+    })
     expect(snapshot.tasks[0].verificationPlan).toEqual({
       version: 1,
       mode: 'project-tests',

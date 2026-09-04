@@ -4,6 +4,7 @@ export type TaskStatus =
   | 'testing'
   | 'awaiting_approval'
   | 'awaiting_manual_validation'
+  | 'awaiting_merge'
   | 'blocked_environment'
   | 'completed'
   | 'failed'
@@ -187,6 +188,7 @@ export interface ProjectRecord {
   setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   runtimeConfigSource?: ProjectRuntimeConfigSource | null
+  publishStrategy?: PublishStrategy
   isDemo: boolean
   createdAt: string
 }
@@ -273,7 +275,19 @@ export interface SourceControlStatus {
   stagedCount: number
   workingCount: number
   conflictedCount: number
+  remote: SourceControlRemoteStatus | null
   inspectedAt: string
+}
+
+export type PublishStrategy = 'pull-request' | 'direct'
+
+export interface SourceControlRemoteStatus {
+  name: string
+  url: string
+  upstream: string | null
+  ahead: number
+  behind: number
+  diverged: boolean
 }
 
 export interface SourceControlDiff {
@@ -316,8 +330,27 @@ export interface SourceControlCommitResult {
 }
 
 export interface TaskApprovalResult {
-  outcome: 'applied' | 'reverified'
+  outcome: 'published' | 'pr_opened' | 'reverified' | 'awaiting_merge'
   message: string
+}
+
+export type TaskPublicationStatus =
+  | 'not_started'
+  | 'awaiting_merge'
+  | 'awaiting_local_sync'
+  | 'published'
+  | 'failed'
+
+export interface TaskPublication {
+  strategy: PublishStrategy
+  status: TaskPublicationStatus
+  remoteName: string | null
+  baseBranch: string | null
+  remoteBranch: string | null
+  pullRequestUrl: string | null
+  publishedCommit: string | null
+  message: string | null
+  updatedAt: string | null
 }
 
 export interface TaskRecord {
@@ -333,6 +366,8 @@ export interface TaskRecord {
   worktreePath: string | null
   sourceBranch: string | null
   baseCommit: string | null
+  publishStrategy?: PublishStrategy
+  publication?: TaskPublication | null
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
   runtimeScenarioApprovedAt?: string | null
@@ -480,6 +515,7 @@ export interface CreateTaskInput {
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
   verificationPlan: TaskVerificationPlan
+  publishStrategy: PublishStrategy
 }
 
 export interface UpdateProjectInput {
@@ -488,6 +524,7 @@ export interface UpdateProjectInput {
   testCommand: string
   setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
+  publishStrategy?: PublishStrategy
 }
 
 export interface GenerateRuntimeScenarioInput {
@@ -502,7 +539,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 5
+export const AGENT_MONITORING_BRIDGE_VERSION = 6
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -522,6 +559,7 @@ export interface AgentMonitoringBridge {
   unstageAllSourceControlChanges: (projectId: string) => Promise<SourceControlStatus>
   setSourceControlIdentity: (input: SourceControlIdentityInput) => Promise<SourceControlStatus>
   commitSourceControlChanges: (input: SourceControlCommitInput) => Promise<SourceControlCommitResult>
+  fetchSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
@@ -534,6 +572,8 @@ export interface AgentMonitoringBridge {
   retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<TaskApprovalResult>
+  refreshTaskPublication: (taskId: string) => Promise<TaskApprovalResult>
+  switchTaskPublicationToPullRequest: (taskId: string) => Promise<TaskRecord>
   discardTask: (taskId: string) => Promise<void>
   getStorageOverview: () => Promise<StorageOverview>
   setStoragePolicy: (policy: StoragePolicy) => Promise<StorageOverview>
@@ -543,6 +583,7 @@ export interface AgentMonitoringBridge {
   updateNote: (noteId: string, title: string, body: string) => Promise<NoteRecord>
   deleteNote: (noteId: string) => Promise<void>
   openPath: (path: string) => Promise<void>
+  openExternalUrl: (url: string) => Promise<void>
   openFeedback: () => Promise<void>
   onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => () => void
   onEvent: (listener: (event: EventRecord) => void) => () => void

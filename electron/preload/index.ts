@@ -34,6 +34,7 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('source-control:set-identity', input),
   commitSourceControlChanges: (input: SourceControlCommitInput) =>
     ipcRenderer.invoke('source-control:commit', input),
+  fetchSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:fetch', projectId),
   autoConfigureProjectRuntime: (projectId: string) =>
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
@@ -47,6 +48,8 @@ const bridge: AgentMonitoringBridge = {
   retryTaskVerification: (taskId: string) => ipcRenderer.invoke('task:retry-verification', taskId),
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),
+  refreshTaskPublication: (taskId: string) => ipcRenderer.invoke('task:refresh-publication', taskId),
+  switchTaskPublicationToPullRequest: (taskId: string) => ipcRenderer.invoke('task:switch-publication-to-pr', taskId),
   discardTask: (taskId: string) => ipcRenderer.invoke('task:discard', taskId),
   getStorageOverview: () => ipcRenderer.invoke('storage:overview'),
   setStoragePolicy: (policy) => ipcRenderer.invoke('storage:set-policy', policy),
@@ -59,6 +62,7 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('note:update', { noteId, title, body }),
   deleteNote: (noteId: string) => ipcRenderer.invoke('note:delete', noteId),
   openPath: (path: string) => ipcRenderer.invoke('shell:open-path', path),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('shell:open-external-url', url),
   openFeedback: () => ipcRenderer.invoke('shell:open-feedback'),
   onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: CodexAuthStatus): void => listener(payload)

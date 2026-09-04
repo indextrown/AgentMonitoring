@@ -37,6 +37,15 @@ async function waitForFile(path: string, timeoutMs = 3_000): Promise<string> {
   throw new Error(`fixture 파일 생성 시간을 초과했습니다: ${path}`)
 }
 
+async function configureOrigin(directory: string, repository: string): Promise<string> {
+  const remote = join(directory, 'github.com', 'example', 'fixture.git')
+  await mkdir(dirname(remote), { recursive: true })
+  await execFileAsync('git', ['init', '--bare', remote])
+  await execFileAsync('git', ['remote', 'add', 'origin', remote], { cwd: repository })
+  await execFileAsync('git', ['push', '--set-upstream', 'origin', 'main'], { cwd: repository })
+  return remote
+}
+
 async function createExecutionFixture(options: {
   codexSource: (directory: string) => string
   makefile?: string
@@ -136,6 +145,7 @@ async function createExecutionFixture(options: {
     ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'],
     { cwd: repository }
   )
+  await configureOrigin(directory, repository)
 
   const fakeCodex = join(directory, 'fake-codex.mjs')
   await writeFile(fakeCodex, options.codexSource(directory))
@@ -143,14 +153,13 @@ async function createExecutionFixture(options: {
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Runtime fixture', repository)
-  if (options.testCommand !== null || options.setupCommand) {
-    store.updateProject({
-      projectId: project.id,
-      name: project.name,
-      setupCommand: options.setupCommand ?? '',
-      testCommand: options.testCommand ?? 'make test'
-    })
-  }
+  store.updateProject({
+    projectId: project.id,
+    name: project.name,
+    setupCommand: options.setupCommand ?? '',
+    testCommand: options.testCommand === null ? '' : options.testCommand ?? 'make test',
+    publishStrategy: 'direct'
+  })
   const task = store.createTask(
     project.id,
     '실행 수명주기',
@@ -173,8 +182,12 @@ async function createExecutionFixture(options: {
   return { directory, repository, store, runner, taskId: task.id }
 }
 
-async function createApprovalFixture(): Promise<{
+async function createApprovalFixture(options: {
+  publishStrategy?: 'pull-request' | 'direct'
+  githubSource?: string
+} = {}): Promise<{
   repository: string
+  remote: string
   worktreePath: string
   store: AppStore
   runner: AgentRunner
@@ -193,9 +206,17 @@ async function createApprovalFixture(): Promise<{
   await execFileAsync('git', ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'], {
     cwd: repository
   })
+  const remote = await configureOrigin(directory, repository)
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Fixture', repository)
+  store.updateProject({
+    projectId: project.id,
+    name: project.name,
+    setupCommand: '',
+    testCommand: '',
+    publishStrategy: options.publishStrategy ?? 'direct'
+  })
   const task = store.createTask(project.id, '승인 기능', '작업 변경을 원본 저장소에 안전하게 적용한다.', 2)
   const branchName = 'agentmonitor/approval-fixture'
   await execFileAsync('git', ['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'], { cwd: repository })
@@ -204,11 +225,19 @@ async function createApprovalFixture(): Promise<{
   store.transitionTask(task.id, 'running', 1)
   store.transitionTask(task.id, 'awaiting_approval')
 
+  let githubCommand = 'gh'
+  if (options.githubSource) {
+    githubCommand = join(directory, 'fake-gh.mjs')
+    await writeFile(githubCommand, options.githubSource)
+    await chmod(githubCommand, 0o755)
+  }
+
   return {
     repository,
+    remote,
     worktreePath,
     store,
-    runner: new AgentRunner(store, worktrees, () => undefined),
+    runner: new AgentRunner(store, worktrees, () => undefined, 'codex', undefined, {}, undefined, undefined, githubCommand),
     taskId: task.id
   }
 }
@@ -713,6 +742,7 @@ setInterval(() => undefined, 1_000)
     await execFileAsync('git', ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'init'], {
       cwd: repository
     })
+    await configureOrigin(directory, repository)
 
     const fakeCodex = join(directory, 'fake-codex.mjs')
     await writeFile(
@@ -737,7 +767,13 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     const store = new AppStore(join(directory, 'store.sqlite'))
     const project = store.addProject('Fixture', repository)
-    store.updateProject({ projectId: project.id, name: project.name, setupCommand: '', testCommand: 'make test' })
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: '',
+      testCommand: 'make test',
+      publishStrategy: 'direct'
+    })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
     const published: Array<{ actor: string; message: string }> = []
     const codexHome = join(directory, 'codex-home')
@@ -1246,6 +1282,62 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('publishes the existing task branch, opens a PR, and completes after the remote merge', async () => {
+    const fixture = await createApprovalFixture({
+      publishStrategy: 'pull-request',
+      githubSource: `#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args[0] === 'auth' && args[1] === 'status') console.log('github.com authenticated')
+else if (args[0] === 'pr' && args[1] === 'list') console.log('[]')
+else if (args[0] === 'pr' && args[1] === 'create') console.log('https://github.com/example/fixture/pull/42')
+else if (args[0] === 'pr' && args[1] === 'view') console.log(JSON.stringify({ state: 'MERGED', mergedAt: '2026-09-04T00:00:00Z', url: args[2] }))
+else process.exit(1)
+`
+    })
+
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'pr_opened' })
+    const awaitingMerge = fixture.store.getTask(fixture.taskId)
+    expect(awaitingMerge).toMatchObject({
+      status: 'awaiting_merge',
+      publication: {
+        strategy: 'pull-request',
+        status: 'awaiting_merge',
+        pullRequestUrl: 'https://github.com/example/fixture/pull/42'
+      }
+    })
+    const remoteTaskHead = await execFileAsync(
+      'git',
+      ['--git-dir', fixture.remote, 'rev-parse', `refs/heads/${awaitingMerge.branchName}`]
+    )
+    await execFileAsync(
+      'git',
+      ['--git-dir', fixture.remote, 'update-ref', 'refs/heads/main', remoteTaskHead.stdout.trim()]
+    )
+
+    await expect(fixture.runner.refreshPublication(fixture.taskId)).resolves.toMatchObject({ outcome: 'published' })
+    const completed = fixture.store.getTask(fixture.taskId)
+    expect(completed).toMatchObject({ status: 'completed', worktreePath: null, publication: { status: 'published' } })
+    expect(await readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
+    fixture.store.close()
+  })
+
+  it('blocks publishing when local main contains commits that are not on the remote', async () => {
+    const fixture = await createApprovalFixture()
+    await writeFile(join(fixture.repository, 'local-only.txt'), 'not published\n')
+    await execFileAsync('git', ['add', 'local-only.txt'], { cwd: fixture.repository })
+    await execFileAsync(
+      'git',
+      ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'local only'],
+      { cwd: fixture.repository }
+    )
+
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('원격에 없는 커밋이 1개 있습니다')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')
+    const remoteFiles = await execFileAsync('git', ['--git-dir', fixture.remote, 'ls-tree', '--name-only', 'main'])
+    expect(remoteFiles.stdout).not.toContain('local-only.txt')
+    fixture.store.close()
+  })
+
   it('removes DerivedData immediately after approval and keeps runtime evidence', async () => {
     const fixture = await createApprovalFixture()
     const runtimeSessionPath = join(fixture.repository, '..', 'runtime-sessions', fixture.taskId)
@@ -1298,6 +1390,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     )
     await execFileAsync('git', ['config', '--local', 'user.name', ''], { cwd: fixture.repository })
     await execFileAsync('git', ['config', '--local', 'user.email', ''], { cwd: fixture.repository })
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: fixture.repository })
 
     await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'reverified' })
     const reverified = fixture.store.getTask(fixture.taskId)
@@ -1311,7 +1404,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     ]))
     expect(committedChanges.patch).toContain('agent-output.txt')
 
-    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'applied' })
+    await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'published' })
     expect(fixture.store.getTask(fixture.taskId).status).toBe('completed')
     expect(await readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     fixture.store.close()
@@ -1343,6 +1436,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'edit source'],
       { cwd: fixture.repository }
     )
+    await execFileAsync('git', ['push', 'origin', 'main'], { cwd: fixture.repository })
 
     await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow('충돌 파일: README.md')
     expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')

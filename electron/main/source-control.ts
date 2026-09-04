@@ -118,19 +118,38 @@ function identityFromValues(name: string, email: string): SourceControlIdentity 
   }
 }
 
+function redactRemoteUrl(remoteUrl: string): string {
+  return remoteUrl.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[REDACTED]@')
+}
+
 export class SourceControlService {
   constructor(private readonly coordinator: GitOperationCoordinator) {}
 
   async getStatus(project: ProjectRecord): Promise<SourceControlStatus> {
     this.assertRealProject(project)
-    const [status, branch, head, name, email] = await Promise.all([
+    const [status, branch, head, name, email, remoteUrl, upstream] = await Promise.all([
       runGit(project.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
       runGit(project.path, ['branch', '--show-current']),
       runGit(project.path, ['rev-parse', '--short', 'HEAD'], [0, 128]),
       runGit(project.path, ['config', '--get', 'user.name'], [0, 1]),
-      runGit(project.path, ['config', '--get', 'user.email'], [0, 1])
+      runGit(project.path, ['config', '--get', 'user.email'], [0, 1]),
+      runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2]),
+      runGit(project.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], [0, 128])
     ])
     const files = parseSourceControlStatus(status.stdout)
+    const upstreamName = upstream.stdout.trim()
+    let ahead = 0
+    let behind = 0
+    if (upstreamName) {
+      const relation = await runGit(
+        project.path,
+        ['rev-list', '--left-right', '--count', `${upstreamName}...HEAD`],
+        [0, 128]
+      )
+      const [remoteOnly, localOnly] = relation.stdout.trim().split(/\s+/).map(Number)
+      behind = Number.isFinite(remoteOnly) ? remoteOnly : 0
+      ahead = Number.isFinite(localOnly) ? localOnly : 0
+    }
     return {
       projectId: project.id,
       branch: branch.stdout.trim() || null,
@@ -140,8 +159,28 @@ export class SourceControlService {
       stagedCount: files.filter((file) => file.staged !== null).length,
       workingCount: files.filter((file) => file.working !== null).length,
       conflictedCount: files.filter((file) => file.conflicted).length,
+      remote: remoteUrl.stdout.trim()
+        ? {
+            name: 'origin',
+            url: redactRemoteUrl(remoteUrl.stdout.trim()),
+            upstream: upstreamName || null,
+            ahead,
+            behind,
+            diverged: ahead > 0 && behind > 0
+          }
+        : null,
       inspectedAt: new Date().toISOString()
     }
+  }
+
+  fetch(project: ProjectRecord): Promise<SourceControlStatus> {
+    return this.coordinator.runExclusive(project.id, async () => {
+      this.assertRealProject(project)
+      const remote = await runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2])
+      if (!remote.stdout.trim()) throw new Error('origin 원격 저장소가 설정되지 않았습니다.')
+      await runGit(project.path, ['fetch', 'origin', '--prune'])
+      return this.getStatus(project)
+    })
   }
 
   async getDiff(
