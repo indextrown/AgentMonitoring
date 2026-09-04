@@ -10,6 +10,7 @@ import type {
   CreateTaskInput,
   EventRecord,
   GenerateRuntimeScenarioInput,
+  ProjectSimulatorSession,
   RecommendVerificationPlanInput,
   SourceControlCommitInput,
   SourceControlDiffInput,
@@ -24,6 +25,7 @@ import { inspectProject } from './project-inspector'
 import { detectProjectSetupCommand } from './project-environment'
 import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
 import { resolveProjectRuntimeConfig } from './project-runtime-config'
+import { ProjectSimulatorService } from './project-simulator'
 import { AgentRunner } from './runner'
 import { GitOperationCoordinator } from './git-operation-coordinator'
 import { resolveGithubCommand } from './github-cli'
@@ -142,6 +144,7 @@ let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
 let sourceControl: SourceControlService | null = null
+let projectSimulator: ProjectSimulatorService | null = null
 let codexAuth: CodexAuthManager | null = null
 let scenarioGenerator: RuntimeScenarioGenerator | null = null
 let verificationPlanRecommender: VerificationPlanRecommender | null = null
@@ -172,6 +175,12 @@ function publishAuth(status: CodexAuthStatus): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('codex-auth:changed', status)
 }
 
+function publishProjectSimulator(session: ProjectSimulatorSession): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('project-simulator:changed', session)
+  }
+}
+
 function requireStore(): AppStore {
   if (!store) throw new Error('데이터베이스가 준비되지 않았습니다.')
   return store
@@ -185,6 +194,11 @@ function requireRunner(): AgentRunner {
 function requireSourceControl(): SourceControlService {
   if (!sourceControl) throw new Error('Source Control이 준비되지 않았습니다.')
   return sourceControl
+}
+
+function requireProjectSimulator(): ProjectSimulatorService {
+  if (!projectSimulator) throw new Error('프로젝트 Simulator가 준비되지 않았습니다.')
+  return projectSimulator
 }
 
 function requireCodexAuth(): CodexAuthManager {
@@ -204,16 +218,23 @@ function requireVerificationPlanRecommender(): VerificationPlanRecommender {
 
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
+  const activeProjectSimulator = projectSimulator
   const activeCodexAuth = codexAuth
   const activeStore = store
   runner = null
+  projectSimulator = null
   sourceControl = null
   codexAuth = null
   scenarioGenerator = null
   verificationPlanRecommender = null
 
   try {
-    await shutdownResources({ runner: activeRunner, codexAuth: activeCodexAuth, store: activeStore })
+    await shutdownResources({
+      projectSimulator: activeProjectSimulator,
+      runner: activeRunner,
+      codexAuth: activeCodexAuth,
+      store: activeStore
+    })
   } finally {
     if (store === activeStore) store = null
   }
@@ -390,6 +411,26 @@ function registerIpc(): void {
   ipcMain.handle('source-control:sync', (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     return requireSourceControl().sync(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('project-simulator:status', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireProjectSimulator().getStatus(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('project-simulator:launch', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireProjectSimulator().launch(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('project-simulator:restart', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireProjectSimulator().restart(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('project-simulator:stop', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireProjectSimulator().stop(requireStore().getProject(validProjectId))
   })
 
   ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
@@ -586,6 +627,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   verificationPlanRecommender = new VerificationPlanRecommender(codexCommand, codexHome)
   const gitCoordinator = new GitOperationCoordinator()
   sourceControl = new SourceControlService(gitCoordinator)
+  projectSimulator = new ProjectSimulatorService(
+    join(userDataPath, 'project-simulator'),
+    publishProjectSimulator
+  )
   runner = new AgentRunner(
     store,
     join(userDataPath, 'worktrees'),

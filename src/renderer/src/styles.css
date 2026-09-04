@@ -1162,6 +1162,124 @@ kbd {
   color: #80a6ca;
 }
 
+.project-simulator {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 16px;
+  border-color: #30483b;
+  background: linear-gradient(120deg, #111a16, #12171b 55%);
+}
+
+.project-simulator.status-failed {
+  border-color: #5a373b;
+  background: linear-gradient(120deg, #211517, #12171b 55%);
+}
+
+.project-simulator-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid #315a46;
+  border-radius: 8px;
+  color: #70c196;
+  background: #13241b;
+}
+
+.status-failed .project-simulator-icon {
+  border-color: #6a3c41;
+  color: #d98287;
+  background: #2a171a;
+}
+
+.project-simulator-copy {
+  min-width: 0;
+}
+
+.project-simulator-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.project-simulator-title h3 {
+  margin: 0;
+  color: #d3d9de;
+  font-size: 11px;
+}
+
+.project-simulator-title span {
+  padding: 3px 6px;
+  border: 1px solid #315a46;
+  border-radius: 999px;
+  color: #72c297;
+  background: #122219;
+  font-size: 6px;
+  font-weight: 700;
+}
+
+.status-failed .project-simulator-title span {
+  border-color: #623b3d;
+  color: #d98287;
+  background: #291719;
+}
+
+.project-simulator-copy > p:not(.eyebrow) {
+  margin: 5px 0 0;
+  color: #69747e;
+  font-size: 8px;
+}
+
+.project-simulator-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.project-simulator-meta code {
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #87939e;
+  background: #0c1114;
+  font-size: 7px;
+}
+
+.project-simulator-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 8px;
+  color: #d48a8e;
+  font-size: 7px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.project-simulator-error svg {
+  flex: none;
+}
+
+.project-simulator-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-simulator-actions button {
+  min-height: 29px;
+  padding: 0 10px;
+  font-size: 8px;
+}
+
+.project-simulator-actions .secondary-button.danger {
+  border-color: #503437;
+  color: #b9777b;
+}
+
 .capability-empty {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
@@ -4518,6 +4636,15 @@ kbd {
   .capability-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .project-simulator {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .project-simulator-actions {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 
   .capability-connect {

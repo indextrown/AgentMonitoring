@@ -138,6 +138,27 @@ test('automatically connects missing iOS access areas without changing repositor
   await expect(capabilities.getByText('저장소 파일은 바꾸지 않습니다.', { exact: false })).not.toBeVisible()
 })
 
+test('launches, restarts, and stops a connected iOS app from the dashboard', async ({ page }) => {
+  await page.goto('/?workspace=empty&contract=ios')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  const simulator = page.locator('.project-simulator')
+  await expect(simulator.getByRole('heading', { name: 'iPhone에서 앱 바로 실행' })).toBeVisible()
+  await expect(simulator.getByText('실행 준비', { exact: true })).toBeVisible()
+
+  await simulator.getByRole('button', { name: '빌드·실행' }).click()
+  await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()
+  await expect(simulator.getByText('iPhone 16 Pro', { exact: true })).toBeVisible()
+  await expect(simulator.getByText('com.example.Demo', { exact: true })).toBeVisible()
+
+  await simulator.getByRole('button', { name: '재실행' }).click()
+  await expect(simulator.getByText('앱을 다시 실행했습니다.', { exact: false })).toBeVisible()
+
+  await simulator.getByRole('button', { name: '종료' }).click()
+  await expect(simulator.getByText('앱 종료됨', { exact: true })).toBeVisible()
+  await expect(simulator.getByRole('button', { name: '종료' })).toBeDisabled()
+})
+
 test('explains the manual fallback when iOS automatic connection cannot find Xcode', async ({ page }) => {
   await page.goto('/?workspace=empty&runtime-discovery=missing')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

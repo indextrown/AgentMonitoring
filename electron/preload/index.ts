@@ -6,6 +6,7 @@ import type {
   CreateTaskInput,
   EventRecord,
   GenerateRuntimeScenarioInput,
+  ProjectSimulatorSession,
   RecommendVerificationPlanInput,
   SourceControlCommitInput,
   SourceControlDiffInput,
@@ -37,6 +38,10 @@ const bridge: AgentMonitoringBridge = {
   fetchSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:fetch', projectId),
   pushSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:push', projectId),
   syncSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:sync', projectId),
+  getProjectSimulatorStatus: (projectId: string) => ipcRenderer.invoke('project-simulator:status', projectId),
+  launchProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:launch', projectId),
+  restartProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:restart', projectId),
+  stopProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:stop', projectId),
   autoConfigureProjectRuntime: (projectId: string) =>
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
@@ -75,6 +80,11 @@ const bridge: AgentMonitoringBridge = {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: EventRecord): void => listener(payload)
     ipcRenderer.on('runner:event', wrapped)
     return () => ipcRenderer.removeListener('runner:event', wrapped)
+  },
+  onProjectSimulatorChanged: (listener: (session: ProjectSimulatorSession) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: ProjectSimulatorSession): void => listener(payload)
+    ipcRenderer.on('project-simulator:changed', wrapped)
+    return () => ipcRenderer.removeListener('project-simulator:changed', wrapped)
   }
 }
 

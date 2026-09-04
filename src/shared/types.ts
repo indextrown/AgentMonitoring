@@ -250,6 +250,30 @@ export interface ProjectInspection {
   inspectedAt: string
 }
 
+export type ProjectSimulatorStatus =
+  | 'idle'
+  | 'preparing'
+  | 'booting'
+  | 'building'
+  | 'installing'
+  | 'running'
+  | 'restarting'
+  | 'stopping'
+  | 'stopped'
+  | 'failed'
+
+export interface ProjectSimulatorSession {
+  projectId: string
+  status: ProjectSimulatorStatus
+  deviceId: string | null
+  deviceName: string | null
+  bundleIdentifier: string | null
+  processId: number | null
+  message: string
+  error: string | null
+  updatedAt: string
+}
+
 export type SourceControlArea = 'staged' | 'working'
 
 export interface SourceControlFile {
@@ -541,7 +565,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 7
+export const AGENT_MONITORING_BRIDGE_VERSION = 8
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -564,6 +588,10 @@ export interface AgentMonitoringBridge {
   fetchSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   pushSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   syncSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
+  getProjectSimulatorStatus: (projectId: string) => Promise<ProjectSimulatorSession>
+  launchProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
+  restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
+  stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
@@ -591,4 +619,5 @@ export interface AgentMonitoringBridge {
   openFeedback: () => Promise<void>
   onCodexAuthChanged: (listener: (status: CodexAuthStatus) => void) => () => void
   onEvent: (listener: (event: EventRecord) => void) => () => void
+  onProjectSimulatorChanged: (listener: (session: ProjectSimulatorSession) => void) => () => void
 }
