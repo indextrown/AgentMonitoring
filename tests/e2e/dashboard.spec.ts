@@ -66,6 +66,28 @@ test('keeps verification steps inset in a compact task drawer', async ({ page })
   expect(stepBox).not.toBeNull()
   expect(stepBox!.x - drawerBox!.x).toBeGreaterThanOrEqual(20)
   expect(drawerBox!.x + drawerBox!.width - (stepBox!.x + stepBox!.width)).toBeGreaterThanOrEqual(20)
+
+  const scrollLayout = await drawer.evaluate((element) => {
+    const changes = element.querySelector<HTMLElement>('.task-changes')
+    const events = element.querySelector<HTMLElement>('.drawer-events')
+    if (!changes || !events) throw new Error('작업 상세 섹션을 찾을 수 없습니다.')
+    return {
+      drawerOverflowY: getComputedStyle(element).overflowY,
+      drawerScrollable: element.scrollHeight > element.clientHeight,
+      changesOverflowY: getComputedStyle(changes).overflowY,
+      changesHasNestedScroll: changes.scrollHeight > changes.clientHeight,
+      eventsOverflowY: getComputedStyle(events).overflowY,
+      eventsHasNestedScroll: events.scrollHeight > events.clientHeight
+    }
+  })
+  expect(scrollLayout).toEqual({
+    drawerOverflowY: 'auto',
+    drawerScrollable: true,
+    changesOverflowY: 'visible',
+    changesHasNestedScroll: false,
+    eventsOverflowY: 'visible',
+    eventsHasNestedScroll: false
+  })
 })
 
 test('opens the in-app guide with a real task example and pipeline', async ({ page }) => {

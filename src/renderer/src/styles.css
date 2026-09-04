@@ -4170,9 +4170,8 @@ kbd {
 }
 
 .task-changes {
-  max-height: 40vh;
+  flex: 0 0 auto;
   padding: 15px 20px;
-  overflow: auto;
   border-bottom: 1px solid #252b30;
 }
 
@@ -4252,9 +4251,8 @@ kbd {
 }
 
 .drawer-events {
-  flex: 1;
+  flex: 0 0 auto;
   padding: 15px 20px;
-  overflow: auto;
 }
 
 .drawer-section-title {
