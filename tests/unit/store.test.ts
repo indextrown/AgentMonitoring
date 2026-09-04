@@ -26,6 +26,12 @@ describe('AppStore', () => {
     expect(initial.runtimeEvidence).toEqual([])
 
     const project = store.addProject('Fixture', join(directory, 'fixture'))
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: 'tuist install',
+      testCommand: 'tuist test'
+    })
     const task = store.createTask(
       project.id,
       '테스트 작업',
@@ -46,6 +52,10 @@ describe('AppStore', () => {
     const reopened = new AppStore(databasePath)
     const snapshot = reopened.getSnapshot(project.id)
     expect(snapshot.selectedProject?.id).toBe(project.id)
+    expect(snapshot.selectedProject).toMatchObject({
+      setupCommand: 'tuist install',
+      testCommand: 'tuist test'
+    })
     expect(snapshot.tasks[0].status).toBe('completed')
     expect(snapshot.tasks[0].verificationPlan).toEqual({
       version: 1,
@@ -54,6 +64,7 @@ describe('AppStore', () => {
       runtimeSource: 'off'
     })
     expect(snapshot.tasks[0].verificationResult).toMatchObject({
+      environmentSetup: { status: 'pending' },
       testDesign: { status: 'pending' },
       projectTests: { status: 'pending' },
       simulatorRuntime: { status: 'skipped' },
@@ -82,6 +93,41 @@ describe('AppStore', () => {
     expect(snapshot.selectedProject?.id).toBe(realProject.id)
     expect(snapshot.tasks).toEqual([])
     expect(() => reopened.getProject(demoProjectId)).toThrow('프로젝트를 찾을 수 없습니다.')
+    reopened.close()
+  })
+
+  it('adds a readable environment step to verification results created by an older version', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Legacy project', join(directory, 'legacy-project'))
+    const task = store.createTask(
+      project.id,
+      '기존 작업',
+      '환경 준비 단계가 추가되기 전에 만든 작업이다.',
+      1,
+      null,
+      null,
+      { version: 1, mode: 'project-tests', testDesign: 'existing-tests', runtimeSource: 'off' }
+    )
+    const timestamp = new Date().toISOString()
+    const legacyResult = {
+      testDesign: { status: 'skipped', message: '기존 테스트 사용', updatedAt: timestamp },
+      projectTests: { status: 'passed', message: '통과', updatedAt: timestamp },
+      simulatorRuntime: { status: 'skipped', message: '사용 안 함', updatedAt: timestamp },
+      reviewer: { status: 'passed', message: '통과', updatedAt: timestamp }
+    }
+    store.database
+      .prepare('UPDATE tasks SET verification_result_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacyResult), task.id)
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getTask(task.id).verificationResult?.environmentSetup).toMatchObject({
+      status: 'skipped',
+      message: '환경 준비 단계가 추가되기 전에 생성된 작업입니다.'
+    })
     reopened.close()
   })
 

@@ -44,6 +44,7 @@ test('opens the in-app guide with a real task example and pipeline', async ({ pa
   await expect(guide.getByText('장보기 목록 화면 구현', { exact: true })).toBeVisible()
   await expect(guide.getByText('작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.')).toBeVisible()
   await expect(guide.getByText('최대 구현 3회', { exact: true })).toBeVisible()
+  await expect(guide.getByText('새 격리 작업공간에 필요한 의존성을 테스트 전에 준비합니다.')).toBeVisible()
   await expect(guide.getByText('실행할 단계와 합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.')).toBeVisible()
   await expect(guide).toHaveScreenshot('usage-help.png', { animations: 'disabled' })
 
@@ -157,8 +158,28 @@ test('keeps AI access visible after a project has tasks', async ({ page }) => {
 
   await summary.getByRole('button', { name: '전체 보기' }).click()
   await expect(page.getByRole('heading', { name: '프로젝트 설정' })).toBeVisible()
+  await expect(page.getByLabel('환경 준비 명령')).toBeVisible()
+  await expect(page.getByText('새 격리 작업공간을 만든 직후와 의존성 설정이 바뀐 뒤, 테스트보다 먼저 실행한다.')).toBeVisible()
   await expect(page.locator('.capability-panel').getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
   await expect(page.locator('.capability-panel').getByRole('button', { name: '다시 검사' })).toBeVisible()
+})
+
+test('retries an environment-blocked task without another implementation run', async ({ page }) => {
+  await page.goto('/?environment=blocked')
+  await page.locator('.search-trigger').click()
+  await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
+  await page.locator('.search-results button').first().click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('환경 확인 필요', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('Tuist 외부 의존성이 준비되지 않았습니다.')).toBeVisible()
+  await expect(drawer.getByText('코드 문제가 아니라 검증 환경을 먼저 준비해야 합니다')).toBeVisible()
+
+  await drawer.getByRole('button', { name: '환경 준비 후 다시 검증' }).click()
+
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('환경 준비를 완료했습니다.')).toBeVisible()
+  await expect(drawer.getByText('프로젝트 테스트가 다시 통과했습니다.')).toBeVisible()
 })
 
 test('uses dashboard chart links and expands the complete activity history', async ({ page }) => {

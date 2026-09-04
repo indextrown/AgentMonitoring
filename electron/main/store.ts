@@ -28,6 +28,7 @@ const projectColumns = `
   name,
   path,
   test_command AS testCommand,
+  setup_command AS setupCommand,
   runtime_adapter_json AS runtimeAdapterJson,
   runtime_config_source AS runtimeConfigSource,
   is_demo AS isDemo,
@@ -119,6 +120,7 @@ function projectFromRow(row: Row): ProjectRecord {
     name: String(row.name),
     path: String(row.path),
     testCommand: String(row.testCommand),
+    setupCommand: String(row.setupCommand ?? ''),
     runtimeAdapter: row.runtimeAdapterJson
       ? JSON.parse(String(row.runtimeAdapterJson)) as ProjectRecord['runtimeAdapter']
       : null,
@@ -131,6 +133,25 @@ function projectFromRow(row: Row): ProjectRecord {
 }
 
 function taskFromRow(row: Row): TaskRecord {
+  const verificationPlan = row.verificationPlanJson
+    ? JSON.parse(String(row.verificationPlanJson)) as TaskVerificationPlan
+    : null
+  const persistedVerificationResult = row.verificationResultJson
+    ? JSON.parse(String(row.verificationResultJson)) as Partial<TaskVerificationResult>
+    : null
+  const verificationResult = persistedVerificationResult
+    ? {
+        environmentSetup: persistedVerificationResult.environmentSetup ?? {
+          status: 'skipped' as const,
+          message: '환경 준비 단계가 추가되기 전에 생성된 작업입니다.',
+          updatedAt: String(row.updatedAt)
+        },
+        testDesign: persistedVerificationResult.testDesign!,
+        projectTests: persistedVerificationResult.projectTests!,
+        simulatorRuntime: persistedVerificationResult.simulatorRuntime!,
+        reviewer: persistedVerificationResult.reviewer!
+      }
+    : null
   return {
     id: String(row.id),
     projectId: String(row.projectId),
@@ -149,12 +170,8 @@ function taskFromRow(row: Row): TaskRecord {
     runtimeScenarioApprovedAt: row.runtimeScenarioApprovedAt
       ? String(row.runtimeScenarioApprovedAt)
       : null,
-    verificationPlan: row.verificationPlanJson
-      ? JSON.parse(String(row.verificationPlanJson)) as TaskVerificationPlan
-      : null,
-    verificationResult: row.verificationResultJson
-      ? JSON.parse(String(row.verificationResultJson)) as TaskVerificationResult
-      : null,
+    verificationPlan,
+    verificationResult,
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt)
   }
@@ -250,6 +267,7 @@ export class AppStore {
         name TEXT NOT NULL,
         path TEXT NOT NULL UNIQUE,
         test_command TEXT NOT NULL DEFAULT '',
+        setup_command TEXT NOT NULL DEFAULT '',
         runtime_adapter_json TEXT,
         runtime_config_source TEXT,
         is_demo INTEGER NOT NULL DEFAULT 0,
@@ -358,6 +376,9 @@ export class AppStore {
     if (!projectColumnNames.has('runtime_adapter_json')) {
       this.database.exec('ALTER TABLE projects ADD COLUMN runtime_adapter_json TEXT')
     }
+    if (!projectColumnNames.has('setup_command')) {
+      this.database.exec("ALTER TABLE projects ADD COLUMN setup_command TEXT NOT NULL DEFAULT ''")
+    }
     if (!projectColumnNames.has('runtime_config_source')) {
       this.database.exec('ALTER TABLE projects ADD COLUMN runtime_config_source TEXT')
     }
@@ -429,6 +450,7 @@ export class AppStore {
       name,
       path,
       testCommand: '',
+      setupCommand: '',
       runtimeAdapter: null,
       runtimeConfigSource: null,
       isDemo: false,
@@ -437,11 +459,11 @@ export class AppStore {
     this.database
       .prepare(`
         INSERT INTO projects (
-          id, name, path, test_command, runtime_adapter_json, runtime_config_source,
+          id, name, path, test_command, setup_command, runtime_adapter_json, runtime_config_source,
           is_demo, created_at
-        ) VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, ?)
       `)
-      .run(project.id, project.name, project.path, project.testCommand, project.createdAt)
+      .run(project.id, project.name, project.path, project.testCommand, project.setupCommand, project.createdAt)
     this.addEvent(project.id, null, 'project_created', 'human', `${project.name} 프로젝트 등록`)
     return project
   }
@@ -462,17 +484,25 @@ export class AppStore {
     this.database
       .prepare(`
         UPDATE projects
-        SET name = ?, test_command = ?, runtime_adapter_json = ?, runtime_config_source = ?
+        SET name = ?, test_command = ?, setup_command = ?, runtime_adapter_json = ?, runtime_config_source = ?
         WHERE id = ?
       `)
       .run(
         input.name.trim(),
         input.testCommand.trim(),
+        input.setupCommand.trim(),
         runtimeAdapter ? JSON.stringify(runtimeAdapter) : null,
         runtimeConfigSource,
         input.projectId
       )
     return this.getProject(input.projectId)
+  }
+
+  setProjectSetupCommand(projectId: string, setupCommand: string): ProjectRecord {
+    this.database
+      .prepare('UPDATE projects SET setup_command = ? WHERE id = ?')
+      .run(setupCommand.trim(), projectId)
+    return this.getProject(projectId)
   }
 
   setProjectRuntimeAdapter(

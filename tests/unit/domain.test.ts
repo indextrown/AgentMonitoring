@@ -11,6 +11,9 @@ describe('task state machine', () => {
   it('allows the guarded implementation and approval flow', () => {
     expect(canTransition('queued', 'running')).toBe(true)
     expect(canTransition('running', 'testing')).toBe(true)
+    expect(canTransition('running', 'blocked_environment')).toBe(true)
+    expect(canTransition('testing', 'blocked_environment')).toBe(true)
+    expect(canTransition('blocked_environment', 'running')).toBe(true)
     expect(canTransition('testing', 'running')).toBe(true)
     expect(canTransition('testing', 'awaiting_approval')).toBe(true)
     expect(canTransition('awaiting_approval', 'completed')).toBe(true)
@@ -22,6 +25,7 @@ describe('task state machine', () => {
     expect(canTransition('completed', 'running')).toBe(false)
     expect(canTransition('running', 'completed')).toBe(false)
     expect(canTransition('discarded', 'running')).toBe(false)
+    expect(canTransition('blocked_environment', 'completed')).toBe(false)
   })
 })
 

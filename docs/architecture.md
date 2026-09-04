@@ -16,6 +16,7 @@ Electron main
    ├── 작업 상태 머신
    └── AgentRunner
           ├── Git worktree
+          ├── dependency environment runner
           ├── Codex app-server auth adapter
           ├── Codex CLI execution adapter
           ├── 허용 목록 기반 test runner
@@ -47,6 +48,8 @@ Renderer는 다음 상태를 구분한다.
 
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 프로젝트 테스트를 선택한 작업에서 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다. Simulator 전용·수동 검토 작업은 검증 명령 없이 실행할 수 있다.
 
+환경 준비 명령은 검증 명령과 별도로 `projects.setup_command`에 저장한다. `Tuist/Package.swift`가 있는 프로젝트는 연결·검사·앱 시작 시 `tuist install`을 자동 감지해 저장한다. 사용자는 프로젝트 설정에서 준비 명령을 수정하거나 비울 수 있다. Runner는 새 worktree를 만든 직후 준비 명령을 실행하며, Implementer가 `Tuist/Package.swift`, `Package.swift`, lockfile 같은 의존성 매니페스트를 바꾸면 테스트 전에 한 번 더 실행한다.
+
 ## 작업별 검증 계획과 시나리오
 
 Renderer는 먼저 `verification-plan:recommend` IPC를 호출할 수 있다. Main process는 Codex를 read-only sandbox에서 실행하고 저장소의 테스트 구조, 프로젝트 검증 명령과 iOS 실행 연결을 근거로 검증 조합을 추천한다. 추천 결과는 실행 지시가 아니라 UI 초안이다. 사용자가 조합과 테스트 설계 방식을 확인한 뒤 작업을 등록해야 한다.
@@ -57,7 +60,7 @@ Renderer는 먼저 `verification-plan:recommend` IPC를 호출할 수 있다. Ma
 - 테스트 설계: `automatic`, `swift-testing`, `xctest`, `existing-tests`, `skip`
 - Simulator 출처: `task-scenario`, `project-default`, `off`
 
-AgentRunner는 이 계획을 실행 중에 다시 추론하지 않는다. 프로젝트 테스트를 선택했을 때만 Test Designer·Critic과 검증 명령을 실행한다. Simulator 검증을 선택했을 때만 runtime session을 실행한다. `manual-review`는 Implementer와 Reviewer만 실행하고 `awaiting_manual_validation`에서 멈춘다. `verification_result_json`에는 테스트 설계, 프로젝트 테스트, Simulator와 Reviewer의 `pending`, `running`, `passed`, `failed`, `skipped` 상태를 각각 저장한다.
+AgentRunner는 이 계획을 실행 중에 다시 추론하지 않는다. 자동 검증을 선택한 작업은 환경 준비를 먼저 실행한다. 프로젝트 테스트를 선택했을 때만 Test Designer·Critic과 검증 명령을 실행하고, Simulator 검증을 선택했을 때만 runtime session을 실행한다. `manual-review`는 Implementer와 Reviewer만 실행하고 `awaiting_manual_validation`에서 멈춘다. `verification_result_json`에는 환경 준비, 테스트 설계, 프로젝트 테스트, Simulator와 Reviewer의 `pending`, `running`, `passed`, `failed`, `skipped` 상태를 각각 저장한다.
 
 Renderer는 작업 제목과 목표를 `runtime-scenario:generate` IPC로 보낸다. Main process는 앱 전용 `CODEX_HOME`으로 `codex exec`를 read-only sandbox에서 실행한다. JSON Schema가 최종 응답을 UI action과 accessibility assertion으로 제한한다. 생성기는 저장소를 읽을 수 있지만 코드를 수정할 수 없다.
 
@@ -73,12 +76,13 @@ AgentRunner는 검증 계획이 `task-scenario`일 때 작업별 스냅샷을 �
 
 ```text
 queued → running → testing ─┬→ running
+                            ├→ blocked_environment → running
                             ├→ failed
                             └→ awaiting_approval → completed
 running ──────────────────────→ awaiting_manual_validation → completed
 
 queued/running/testing → stopped → running
-awaiting_approval/awaiting_manual_validation/failed/stopped → discarded
+awaiting_approval/awaiting_manual_validation/blocked_environment/failed/stopped → discarded
 ```
 
 `running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다.
@@ -90,12 +94,15 @@ awaiting_approval/awaiting_manual_validation/failed/stopped → discarded
 | Test Designer | workspace-write | 테스트 | 선택한 작업의 성공·실패·경계 조건 테스트 작성 |
 | Critic | read-only | 없음 | 새 테스트 설계를 선택한 작업의 테스트 공백과 약화 가능성 검토 |
 | Implementer | workspace-write | 제품 코드 | 목표 구현과 테스트 실패 수정 |
+| Environment Runner | 직접 실행 | 의존성 캐시·생성 상태 | 등록한 환경 준비 명령 실행과 환경 실패 분류 |
 | Test Runner | 직접 실행 | 없음 | 등록된 단일 검증 명령 실행 |
 | Swift Runtime | 직접 실행 | 없음 | worktree 앱 빌드, iPad·iPhone Simulator 설치·실행, Debug fixture·identifier UI 조작, 화면·접근성·앱 상태 증거 수집 |
 | Reviewer | read-only | 없음 | diff, runtime 화면·접근성 구조, 회귀, 보안, 테스트 공백 보고 |
 | Human | UI 승인 | 로컬 Git 적용 | 최종 승인·중단·폐기 |
 
-`maxAttempts`는 최초 구현을 포함한 Implementer 호출 횟수다. 프로젝트 테스트나 runtime assertion이 실패하면 제한된 실패 증거를 다음 Implementer에 전달한다. 자동 검증이 통과해도 Reviewer가 명시적인 finding을 보고하면 같은 시도 한도 안에서 Reviewer 보고와 화면 증거를 다음 Implementer에 전달하고 테스트·runtime·Reviewer를 다시 실행한다. 마지막 시도에도 finding이 남으면 자동으로 승인하거나 실패 처리하지 않고, finding을 유지한 채 사람의 최종 판단을 기다린다.
+`maxAttempts`는 최초 구현을 포함한 Implementer 호출 횟수다. 환경 준비 실패는 이 값을 증가시키지 않는다. 프로젝트 테스트 출력이 의존성 해석, 네트워크나 인증 실패로 분류되면 같은 Implementer를 반복 호출하지 않고 `blocked_environment`에서 멈춘다. 사용자가 환경을 고친 뒤 `task:retry-verification`을 요청하면 기존 worktree와 변경을 유지하고 환경 준비, 선택한 검증과 Reviewer만 다시 실행한다.
+
+프로젝트 테스트나 runtime assertion이 코드 실패로 판정되면 제한된 실패 증거를 다음 Implementer에 전달한다. 자동 검증이 통과해도 Reviewer가 명시적인 finding을 보고하면 같은 시도 한도 안에서 Reviewer 보고와 화면 증거를 다음 Implementer에 전달하고 테스트·runtime·Reviewer를 다시 실행한다. 마지막 시도에도 finding이 남으면 자동으로 승인하거나 실패 처리하지 않고, finding을 유지한 채 사람의 최종 판단을 기다린다.
 
 ## Swift runtime session
 
@@ -153,9 +160,11 @@ branch: agentmonitor/<task-slug>-<task-id-prefix>
 path:   <Electron userData>/worktrees/<project-id>/<task-id>
 ```
 
-Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗한지 확인하고, worktree 변경을 작업 브랜치에 커밋한 뒤 현재 로컬 브랜치에 `git merge --ff-only`로 반영한다. 원본이 dirty하거나 브랜치가 분기되었으면 상태를 `awaiting_approval`로 유지하고 적용을 중단한다.
+환경 준비 명령, Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 원본 checkout의 `.build`나 다른 무시 파일을 worktree에 복사하거나 심볼릭 링크하지 않는다. 각 작업공간에서 선언된 준비 명령으로 필요한 외부 의존성을 복원한다.
 
-성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. 실패·중단 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
+사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗한지 확인하고, worktree 변경을 작업 브랜치에 커밋한 뒤 현재 로컬 브랜치에 `git merge --ff-only`로 반영한다. 원본이 dirty하거나 브랜치가 분기되었으면 상태를 `awaiting_approval`로 유지하고 적용을 중단한다.
+
+성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. `blocked_environment`·`failed`·`stopped` 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
 
 앱 시작 시 DB가 가리키는 worktree가 실제로 존재하는지 확인하고, 끊어진 포인터와 앱 관리 경로 안의 고아 디렉터리를 정리한다. 작업 브랜치는 기본적으로 로컬 감사·복구 기록으로 남긴다. 사용자가 저장 공간 화면에서 명시적으로 선택한 경우에만 완료 작업은 `git branch -d`, 폐기 작업은 `git branch -D`로 삭제하며 원격 브랜치는 건드리지 않는다.
 
@@ -165,7 +174,7 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 
 | 테이블 | 의미 |
 | --- | --- |
-| `projects` | 로컬 저장소 경로, 검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
+| `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
 | `tasks` | 목표, 상태, 재시도, 브랜치와 worktree, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
@@ -181,6 +190,8 @@ Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 chec
 - Codex 프로세스 비정상 종료: 작업을 `failed`로 전환하고 high finding을 등록한다.
 - Codex 단계 제한 시간 초과: 역할별 30분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
 - 검증 명령 제한 시간 초과: 45분 후 프로세스 그룹을 종료하고 작업을 `failed`, 이벤트를 `task_timed_out`으로 기록한다.
+- 환경 준비 실패: 준비 단계를 `failed`, 작업을 `blocked_environment`, 이벤트를 `environment_failed`로 기록한다. worktree와 현재 변경은 유지하고 Implementer 시도 횟수는 증가시키지 않는다.
+- 프로젝트 테스트의 환경 실패: Tuist 외부 의존성 누락, 의존성 다운로드·해석, 네트워크, 인증과 캐시 권한 오류를 코드 실패와 분리한다. 같은 Implementer를 재호출하지 않고 환경 재검증을 안내한다.
 - Swift runtime 실패: 실패 단계를 session과 `runtime_failed` 이벤트에 기록하고 작업을 `failed`로 전환한다.
 - 화면 캡처 실패: `observing` 단계 실패로 기록하고 실행 중인 관리 대상 앱을 정리한다.
 - 접근성 트리 수집 실패: marker, base64, JSON schema, bundle identifier, 크기 검증 실패를 `observing` 단계에 기록하고 앱을 정리한다.

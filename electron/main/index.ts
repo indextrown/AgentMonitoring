@@ -17,6 +17,7 @@ import type {
 } from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
+import { detectProjectSetupCommand } from './project-environment'
 import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
 import { resolveProjectRuntimeConfig } from './project-runtime-config'
 import { AgentRunner } from './runner'
@@ -64,6 +65,7 @@ const updateProjectSchema = z.object({
   projectId: z.string().uuid(),
   name: z.string().trim().min(1).max(80),
   testCommand: z.string().trim().max(500),
+  setupCommand: z.string().trim().max(500),
   runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional()
 })
 
@@ -240,6 +242,10 @@ function registerIpc(): void {
       throw new Error('선택한 폴더는 Git 저장소가 아닙니다.')
     }
     let project = requireStore().addProject(basename(projectPath), projectPath)
+    if (!project.setupCommand) {
+      const setupCommand = await detectProjectSetupCommand(projectPath)
+      if (setupCommand) project = requireStore().setProjectSetupCommand(project.id, setupCommand)
+    }
     const resolvedRuntime = await resolveProjectRuntimeConfig(projectPath)
     if (resolvedRuntime) {
       project = requireStore().setProjectRuntimeAdapter(
@@ -259,6 +265,10 @@ function registerIpc(): void {
   ipcMain.handle('project:inspect', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     let project = requireStore().getProject(validProjectId)
+    if (!project.setupCommand) {
+      const setupCommand = await detectProjectSetupCommand(project.path)
+      if (setupCommand) project = requireStore().setProjectSetupCommand(project.id, setupCommand)
+    }
     if (!project.runtimeAdapter) {
       const resolvedRuntime = await resolveProjectRuntimeConfig(project.path)
       if (resolvedRuntime) {
@@ -362,6 +372,13 @@ function registerIpc(): void {
     await requireRunner().run(taskId)
   })
 
+  ipcMain.handle('task:retry-verification', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
+    await requireRunner().retryVerification(taskId)
+  })
+
   ipcMain.handle('task:stop', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     await requireRunner().stop(taskId)
@@ -426,6 +443,11 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const codexHome = join(userDataPath, 'codex')
   const codexCommand = await resolveCodexCommand()
   store = new AppStore(databasePath)
+  for (const project of store.listProjects()) {
+    if (project.setupCommand) continue
+    const setupCommand = await detectProjectSetupCommand(project.path)
+    if (setupCommand) store.setProjectSetupCommand(project.id, setupCommand)
+  }
   store.recoverInterruptedTasks()
   store.recoverInterruptedRuntimeSessions()
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
