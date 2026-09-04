@@ -12,6 +12,7 @@ Electron main
    ├── SQLite event store
    ├── read-only ProjectInspector
    ├── Xcode runtime config detector
+   ├── Codex tech spec generator
    ├── Codex runtime scenario generator
    ├── 작업 상태 머신
    └── AgentRunner
@@ -51,6 +52,16 @@ Renderer는 다음 상태를 구분한다.
 검증 명령 후보는 자동 저장하지 않는다. 사용자가 UI에서 후보를 확인하거나 직접 입력해야 `projects.test_command`에 저장된다. 프로젝트 테스트를 선택한 작업에서 검증 명령이 비어 있으면 Runner는 worktree 생성과 Codex 실행 전에 요청을 거절한다. Simulator 전용·수동 검토 작업은 검증 명령 없이 실행할 수 있다.
 
 환경 준비 명령은 검증 명령과 별도로 `projects.setup_command`에 저장한다. `Tuist/Package.swift`가 있는 프로젝트는 연결·검사·앱 시작 시 `tuist install`을 자동 감지해 저장한다. 사용자는 프로젝트 설정에서 준비 명령을 수정하거나 비울 수 있다. Runner는 새 worktree를 만든 직후 준비 명령을 실행하며, Implementer가 `Tuist/Package.swift`, `Package.swift`, lockfile 같은 의존성 매니페스트를 바꾸면 테스트 전에 한 번 더 실행한다.
+
+## 선택형 테크스펙
+
+Renderer의 작업 등록 화면은 테크스펙을 기본적으로 사용하지 않는다. 사용자가 **구현 전 테크스펙 만들기**를 선택하면 `tech-spec:generate` IPC가 작업 제목과 요구사항을 Main process로 보낸다. `TechSpecGenerator`는 앱 전용 `CODEX_HOME`으로 `codex exec`를 read-only sandbox에서 실행하고 저장소를 조사한다. JSON Schema는 응답을 요약, Markdown 본문, 확인할 질문과 변경 요약으로 제한한다. 저장소 안의 문장과 주석은 분석 데이터로만 취급하며 코드를 수정하지 않는다.
+
+사용자는 Markdown 초안을 직접 수정하거나 개선 의견을 `tech-spec:refine` IPC로 보낼 수 있다. 개선 요청에는 원본 요구사항, 현재 본문과 사용자 피드백을 함께 전달하며 Main process가 revision을 하나 증가시킨다. 작업 제목이나 요구사항이 바뀌면 Renderer는 승인을 해제하고 기존 검증 계획과 작업별 Simulator 시나리오를 버린다. 변경된 요구사항을 다시 생성하거나 개선 요청에 반영하기 전에는 작업을 등록할 수 없다.
+
+Renderer는 승인한 최종 revision만 `task:create`에 포함한다. Main process가 strict Zod schema로 크기와 필드를 다시 검증하고 승인 시각을 추가해 `tasks.tech_spec_json`에 저장한다. 생성 중간 초안과 피드백 이력은 저장하지 않는다. 테크스펙을 선택하지 않은 기존 작업과 새 작업은 `null`을 사용하며 종전 흐름을 유지한다.
+
+승인된 테크스펙은 검증 계획 추천과 작업별 Simulator 시나리오 생성의 추가 입력이다. AgentRunner는 원본 요구사항을 최우선 계약으로 유지하면서 같은 테크스펙을 Test Designer, Critic, Implementer와 Reviewer 프롬프트에 전달한다. worktree 밖 SQLite에 저장된 스냅샷이므로 구현 에이전트가 수정할 수 없다.
 
 ## 작업별 검증 계획과 시나리오
 
@@ -218,7 +229,7 @@ direct
 | 테이블 | 의미 |
 | --- | --- |
 | `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 기본 게시 방식, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
-| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·최초 및 최신 검증 기준 commit, 작업별 게시 방식·원격 브랜치·PR URL·게시 및 merge commit·게시 상태, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
+| `tasks` | 목표, 선택적으로 승인한 테크스펙 revision, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·최초 및 최신 검증 기준 commit, 작업별 게시 방식·원격 브랜치·PR URL·게시 및 merge commit·게시 상태, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |

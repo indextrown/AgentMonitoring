@@ -362,6 +362,47 @@ test('creates a manual-review task without a project test command', async ({ pag
   await expect(drawer.getByText('자동 통과로 판정하지 않았습니다.', { exact: false })).toBeVisible()
 })
 
+test('generates, refines, approves, and freezes an optional tech spec', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('오프라인 재시도 구현')
+  const requirements = dialog.getByLabel('목표와 완료 조건')
+  await requirements.fill('네트워크가 끊겨도 요청을 보존하고 연결 복구 후 자동으로 다시 전송해 주세요.')
+  await dialog.getByLabel('구현 전 테크스펙 만들기').check()
+  await dialog.getByRole('button', { name: '테크스펙 만들기', exact: true }).click()
+
+  await expect(dialog.getByText('테크스펙 revision 1')).toBeVisible()
+  await expect(dialog.getByLabel('테크스펙 본문')).toHaveValue(/검증 전략/)
+  await dialog.getByLabel('테크스펙 본문').fill(
+    `${await dialog.getByLabel('테크스펙 본문').inputValue()}\n\n## 재시도 제한\n\n- 최대 세 번까지만 재시도합니다.`
+  )
+  await dialog.getByLabel('테크스펙 개선 의견').fill('백오프 정책과 사용자 오류 안내를 구체적으로 추가해줘.')
+  await dialog.getByRole('button', { name: '피드백 반영', exact: true }).click()
+  await expect(dialog.getByText('테크스펙 revision 2')).toBeVisible()
+  await expect(dialog.locator('.tech-spec-review > header strong')).toContainText('백오프 정책과 사용자 오류 안내')
+
+  await dialog.getByRole('button', { name: '이 테크스펙으로 진행' }).click()
+  await expect(dialog.getByText('이 테크스펙을 사용합니다')).toBeVisible()
+  await requirements.fill('네트워크가 끊겨도 요청을 보존하고 연결 복구 후 최대 세 번 다시 전송해 주세요.')
+  await expect(dialog.getByText('제목이나 요구사항이 바뀌었습니다.')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' })).toBeDisabled()
+
+  await dialog.getByLabel('테크스펙 개선 의견').fill('변경된 최대 세 번 재시도 조건을 전체 문서에 반영해줘.')
+  await dialog.getByRole('button', { name: '피드백 반영', exact: true }).click()
+  await expect(dialog.getByText('테크스펙 revision 3')).toBeVisible()
+  await dialog.getByRole('button', { name: '이 테크스펙으로 진행' }).click()
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('승인된 테크스펙')).toBeVisible()
+  await expect(drawer.getByText('revision 3')).toBeVisible()
+  await drawer.getByText('전체 테크스펙 보기').click()
+  await expect(drawer.getByText(/변경된 최대 세 번 재시도 조건/)).toBeVisible()
+})
+
 test('explains dirty repositories with exact file categories and paths', async ({ page }) => {
   await page.goto('/?workspace=empty&inspection=dirty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

@@ -200,6 +200,22 @@ export interface VerificationPlanRecommendation {
   plan: TaskVerificationPlan
 }
 
+export interface TaskTechSpecDraft {
+  version: 1
+  revision: number
+  summary: string
+  markdown: string
+  openQuestions: string[]
+}
+
+export interface GeneratedTechSpec extends TaskTechSpecDraft {
+  changeSummary: string
+}
+
+export interface TaskTechSpec extends TaskTechSpecDraft {
+  approvedAt: string
+}
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -417,6 +433,7 @@ export interface TaskRecord {
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
   runtimeScenarioApprovedAt?: string | null
+  techSpec?: TaskTechSpec | null
   verificationPlan?: TaskVerificationPlan | null
   verificationResult?: TaskVerificationResult | null
   createdAt: string
@@ -560,6 +577,7 @@ export interface CreateTaskInput {
   maxAttempts: number
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
+  techSpec?: TaskTechSpecDraft | null
   verificationPlan: TaskVerificationPlan
   publishStrategy: PublishStrategy
 }
@@ -577,15 +595,28 @@ export interface GenerateRuntimeScenarioInput {
   projectId: string
   title: string
   prompt: string
+  techSpec?: TaskTechSpecDraft | null
 }
 
 export interface RecommendVerificationPlanInput {
   projectId: string
   title: string
   prompt: string
+  techSpec?: TaskTechSpecDraft | null
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 9
+export interface GenerateTechSpecInput {
+  projectId: string
+  title: string
+  prompt: string
+}
+
+export interface RefineTechSpecInput extends GenerateTechSpecInput {
+  current: TaskTechSpecDraft
+  feedback: string
+}
+
+export const AGENT_MONITORING_BRIDGE_VERSION = 10
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -613,6 +644,8 @@ export interface AgentMonitoringBridge {
   restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>
+  generateTechSpec: (input: GenerateTechSpecInput) => Promise<GeneratedTechSpec>
+  refineTechSpec: (input: RefineTechSpecInput) => Promise<GeneratedTechSpec>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
     input: RecommendVerificationPlanInput

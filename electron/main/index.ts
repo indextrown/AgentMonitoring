@@ -9,9 +9,11 @@ import type {
   CodexAuthStatus,
   CreateTaskInput,
   EventRecord,
+  GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
   ProjectSimulatorSession,
   RecommendVerificationPlanInput,
+  RefineTechSpecInput,
   SourceControlCommitInput,
   SourceControlDiffInput,
   SourceControlIdentityInput,
@@ -33,6 +35,7 @@ import { AgentRunner } from './runner'
 import { GitOperationCoordinator } from './git-operation-coordinator'
 import { resolveGithubCommand } from './github-cli'
 import { SourceControlService } from './source-control'
+import { TechSpecGenerator } from './tech-spec-generator'
 import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
 import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
@@ -48,6 +51,14 @@ const verificationPlanSchema = z.object({
   runtimeSource: z.enum(['task-scenario', 'project-default', 'off'])
 }).strict()
 
+const techSpecDraftSchema = z.object({
+  version: z.literal(1),
+  revision: z.number().int().min(1).max(1_000),
+  summary: z.string().trim().min(1).max(500),
+  markdown: z.string().trim().min(100).max(30_000),
+  openQuestions: z.array(z.string().trim().min(1).max(500)).max(12)
+}).strict()
+
 const createTaskSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(2).max(120),
@@ -55,6 +66,7 @@ const createTaskSchema = z.object({
   maxAttempts: z.number().int().min(1).max(5),
   runtimeContract: projectCapabilityManifestSchema.nullable().optional(),
   runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
+  techSpec: techSpecDraftSchema.nullable().optional(),
   verificationPlan: verificationPlanSchema,
   publishStrategy: z.enum(['pull-request', 'direct'])
 }).superRefine((input, context) => {
@@ -86,10 +98,18 @@ const updateProjectSchema = z.object({
 const generateRuntimeScenarioSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(2).max(120),
-  prompt: z.string().trim().min(10).max(20_000)
-})
+  prompt: z.string().trim().min(10).max(20_000),
+  techSpec: techSpecDraftSchema.nullable().optional()
+}).strict()
 
 const recommendVerificationPlanSchema = generateRuntimeScenarioSchema
+
+const generateTechSpecSchema = generateRuntimeScenarioSchema.omit({ techSpec: true })
+
+const refineTechSpecSchema = generateTechSpecSchema.extend({
+  current: techSpecDraftSchema,
+  feedback: z.string().trim().min(3).max(5_000)
+}).strict()
 
 const addNoteSchema = z.object({
   projectId: z.string().uuid(),
@@ -151,6 +171,7 @@ let projectSimulator: ProjectSimulatorService | null = null
 let codexAuth: CodexAuthManager | null = null
 let scenarioGenerator: RuntimeScenarioGenerator | null = null
 let verificationPlanRecommender: VerificationPlanRecommender | null = null
+let techSpecGenerator: TechSpecGenerator | null = null
 let shutdownStarted = false
 const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
 
@@ -219,6 +240,11 @@ function requireVerificationPlanRecommender(): VerificationPlanRecommender {
   return verificationPlanRecommender
 }
 
+function requireTechSpecGenerator(): TechSpecGenerator {
+  if (!techSpecGenerator) throw new Error('테크스펙 생성기가 준비되지 않았습니다.')
+  return techSpecGenerator
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeProjectSimulator = projectSimulator
@@ -230,6 +256,7 @@ async function shutdownApplication(): Promise<void> {
   codexAuth = null
   scenarioGenerator = null
   verificationPlanRecommender = null
+  techSpecGenerator = null
 
   try {
     await shutdownResources({
@@ -474,6 +501,32 @@ function registerIpc(): void {
     return { project, discovery }
   })
 
+  ipcMain.handle('tech-spec:generate', async (_event, rawInput: GenerateTechSpecInput) => {
+    const input = generateTechSpecSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('테크스펙을 만들려면 먼저 Codex에 로그인하세요.')
+    const project = requireStore().getProject(input.projectId)
+    return requireTechSpecGenerator().generate({
+      projectPath: project.path,
+      title: input.title,
+      prompt: input.prompt
+    })
+  })
+
+  ipcMain.handle('tech-spec:refine', async (_event, rawInput: RefineTechSpecInput) => {
+    const input = refineTechSpecSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('테크스펙을 개선하려면 먼저 Codex에 로그인하세요.')
+    const project = requireStore().getProject(input.projectId)
+    return requireTechSpecGenerator().refine({
+      projectPath: project.path,
+      title: input.title,
+      prompt: input.prompt,
+      current: input.current,
+      feedback: input.feedback
+    })
+  })
+
   ipcMain.handle('runtime-scenario:generate', async (_event, rawInput: GenerateRuntimeScenarioInput) => {
     const input = generateRuntimeScenarioSchema.parse(rawInput)
     const auth = await requireCodexAuth().status()
@@ -486,6 +539,7 @@ function registerIpc(): void {
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
+      techSpec: input.techSpec ?? null,
       adapter: project.runtimeAdapter
     })
   })
@@ -499,6 +553,7 @@ function registerIpc(): void {
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
+      techSpec: input.techSpec ?? null,
       testCommand: project.testCommand,
       runtimeAvailable: Boolean(project.runtimeAdapter),
       runtimeConfigSource: project.runtimeConfigSource ?? null
@@ -532,7 +587,8 @@ function registerIpc(): void {
       (input.runtimeContract as ApprovedRuntimeContract | null | undefined) ?? null,
       input.runtimeScenarioSummary ?? null,
       input.verificationPlan,
-      input.publishStrategy
+      input.publishStrategy,
+      input.techSpec ?? null
     )
   })
 
@@ -649,6 +705,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
   scenarioGenerator = new RuntimeScenarioGenerator(codexCommand, codexHome)
   verificationPlanRecommender = new VerificationPlanRecommender(codexCommand, codexHome)
+  techSpecGenerator = new TechSpecGenerator(codexCommand, codexHome)
   const gitCoordinator = new GitOperationCoordinator()
   sourceControl = new SourceControlService(gitCoordinator)
   projectSimulator = new ProjectSimulatorService(

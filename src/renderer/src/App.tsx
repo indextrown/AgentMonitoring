@@ -63,6 +63,7 @@ import type {
   DashboardSnapshot,
   EventKind,
   EventRecord,
+  GeneratedTechSpec,
   GeneratedRuntimeScenario,
   NoteRecord,
   ProjectCapabilityKey,
@@ -106,6 +107,8 @@ const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'autoConfigureProjectRuntime',
+  'generateTechSpec',
+  'refineTechSpec',
   'recommendVerificationPlan',
   'retryTaskVerification',
   'getStorageOverview',
@@ -828,6 +831,8 @@ export function App(): React.JSX.Element {
       {selectedProject && taskModal && (
         <TaskModal
           project={selectedProject}
+          onGenerateTechSpec={(input) => bridge.generateTechSpec(input)}
+          onRefineTechSpec={(input) => bridge.refineTechSpec(input)}
           onGenerate={(input) => bridge.generateRuntimeScenario(input)}
           onRecommend={(input) => bridge.recommendVerificationPlan(input)}
           onClose={() => setTaskModal(false)}
@@ -2676,17 +2681,28 @@ function TaskModal({
   project,
   onClose,
   onCreate,
+  onGenerateTechSpec,
+  onRefineTechSpec,
   onGenerate,
   onRecommend
 }: {
   project: ProjectRecord
   onClose: () => void
   onCreate: (input: Parameters<AgentMonitoringBridge['createTask']>[0]) => Promise<void>
+  onGenerateTechSpec: (input: Parameters<AgentMonitoringBridge['generateTechSpec']>[0]) => Promise<GeneratedTechSpec>
+  onRefineTechSpec: (input: Parameters<AgentMonitoringBridge['refineTechSpec']>[0]) => Promise<GeneratedTechSpec>
   onGenerate: (input: Parameters<AgentMonitoringBridge['generateRuntimeScenario']>[0]) => Promise<GeneratedRuntimeScenario>
   onRecommend: (input: Parameters<AgentMonitoringBridge['recommendVerificationPlan']>[0]) => Promise<VerificationPlanRecommendation>
 }): React.JSX.Element {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [useTechSpec, setUseTechSpec] = useState(false)
+  const [techSpec, setTechSpec] = useState<GeneratedTechSpec | null>(null)
+  const [techSpecApproved, setTechSpecApproved] = useState(false)
+  const [techSpecSource, setTechSpecSource] = useState<string | null>(null)
+  const [techSpecFeedback, setTechSpecFeedback] = useState('')
+  const [techSpecLoading, setTechSpecLoading] = useState(false)
+  const [techSpecError, setTechSpecError] = useState<string | null>(null)
   const [maxAttempts, setMaxAttempts] = useState(3)
   const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
   const initialMode: VerificationMode = project.testCommand.trim()
@@ -2707,6 +2723,71 @@ function TaskModal({
   const [submitting, setSubmitting] = useState(false)
   const usesTests = mode === 'project-tests' || mode === 'both'
   const usesRuntime = mode === 'simulator-runtime' || mode === 'both'
+  const requirementsKey = `${title}\u0000${prompt}`
+  const techSpecStale = Boolean(techSpec && techSpecSource !== requirementsKey)
+  const techSpecReady = Boolean(useTechSpec && techSpec && techSpecApproved && !techSpecStale)
+  const approvedTechSpec = techSpecReady && techSpec
+    ? {
+        version: 1 as const,
+        revision: techSpec.revision,
+        summary: techSpec.summary,
+        markdown: techSpec.markdown,
+        openQuestions: techSpec.openQuestions
+      }
+    : null
+
+  const invalidateDownstreamPlanning = (): void => {
+    setGenerated(null)
+    setRecommendation(null)
+    setGenerationError(null)
+  }
+
+  const generateTechSpec = async (): Promise<void> => {
+    setTechSpecLoading(true)
+    setTechSpecError(null)
+    try {
+      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt })
+      setTechSpec(result)
+      setTechSpecSource(requirementsKey)
+      setTechSpecApproved(false)
+      setTechSpecFeedback('')
+      invalidateDownstreamPlanning()
+    } catch (error) {
+      setTechSpecError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setTechSpecLoading(false)
+    }
+  }
+
+  const refineTechSpec = async (): Promise<void> => {
+    if (!techSpec || techSpecFeedback.trim().length < 3) return
+    setTechSpecLoading(true)
+    setTechSpecError(null)
+    try {
+      const result = await onRefineTechSpec({
+        projectId: project.id,
+        title,
+        prompt,
+        current: {
+          version: 1,
+          revision: techSpec.revision,
+          summary: techSpec.summary,
+          markdown: techSpec.markdown,
+          openQuestions: techSpec.openQuestions
+        },
+        feedback: techSpecFeedback
+      })
+      setTechSpec(result)
+      setTechSpecSource(requirementsKey)
+      setTechSpecApproved(false)
+      setTechSpecFeedback('')
+      invalidateDownstreamPlanning()
+    } catch (error) {
+      setTechSpecError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setTechSpecLoading(false)
+    }
+  }
 
   const changeMode = (nextMode: VerificationMode): void => {
     const nextUsesTests = nextMode === 'project-tests' || nextMode === 'both'
@@ -2725,7 +2806,12 @@ function TaskModal({
     setRecommending(true)
     setGenerationError(null)
     try {
-      const result = await onRecommend({ projectId: project.id, title, prompt })
+      const result = await onRecommend({
+        projectId: project.id,
+        title,
+        prompt,
+        techSpec: approvedTechSpec
+      })
       setMode(result.plan.mode)
       setTestDesign(result.plan.testDesign)
       setRuntimeSource(result.plan.runtimeSource)
@@ -2742,7 +2828,12 @@ function TaskModal({
     setGenerating(true)
     setGenerationError(null)
     try {
-      setGenerated(await onGenerate({ projectId: project.id, title, prompt }))
+      setGenerated(await onGenerate({
+        projectId: project.id,
+        title,
+        prompt,
+        techSpec: approvedTechSpec
+      }))
     } catch (error) {
       setGenerationError(String(error).replace(/^Error:\s*/, ''))
     } finally {
@@ -2771,6 +2862,10 @@ function TaskModal({
       setGenerationError('프로젝트 테스트를 사용하려면 프로젝트 설정에서 검증 명령을 먼저 등록하세요.')
       return
     }
+    if (useTechSpec && !techSpecReady) {
+      setTechSpecError('테크스펙을 만들고 최종 내용을 승인한 뒤 작업을 등록하세요.')
+      return
+    }
     if (usesRuntime && runtimeSource === 'task-scenario' && !generated) {
       setGenerationError('작업을 등록하기 전에 검증 시나리오를 만들고 확인하세요.')
       return
@@ -2784,6 +2879,7 @@ function TaskModal({
         maxAttempts,
         runtimeContract: usesRuntime && runtimeSource === 'task-scenario' ? generated?.contract ?? null : null,
         runtimeScenarioSummary: usesRuntime && runtimeSource === 'task-scenario' ? generated?.summary ?? null : null,
+        techSpec: approvedTechSpec,
         verificationPlan: { version: 1, mode, testDesign, runtimeSource },
         publishStrategy
       })
@@ -2794,17 +2890,140 @@ function TaskModal({
   return (
     <Modal wide title="새 에이전트 작업" description={`${project.name}의 격리된 worktree에서 실행된다.`} onClose={onClose}>
       <form className="modal-form" onSubmit={(event) => void submit(event)}>
-        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setGenerated(null); setRecommendation(null) }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
-        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setGenerated(null); setRecommendation(null) }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
+        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <section className={`tech-spec-builder${useTechSpec ? ' enabled' : ''}`}>
+          <label className="tech-spec-toggle">
+            <input
+              type="checkbox"
+              checked={useTechSpec}
+              onChange={(event) => {
+                setUseTechSpec(event.target.checked)
+                setTechSpecApproved(false)
+                setTechSpecError(null)
+                invalidateDownstreamPlanning()
+              }}
+            />
+            <FileText size={15} />
+            <span>
+              <strong>구현 전 테크스펙 만들기</strong>
+              <small>선택사항 · AI가 요구사항과 현재 코드를 읽고 구현 계획 초안을 만듭니다.</small>
+            </span>
+          </label>
+          {useTechSpec && !techSpec && (
+            <div className="tech-spec-empty">
+              <div>
+                <strong>요구사항을 구현 가능한 설계로 구체화합니다</strong>
+                <p>생성된 문서를 직접 수정하거나 개선 의견을 보낸 뒤 최종본을 승인할 수 있습니다.</p>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={techSpecLoading || title.trim().length < 2 || prompt.trim().length < 10}
+                onClick={() => void generateTechSpec()}
+              >
+                {techSpecLoading ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
+                {techSpecLoading ? '저장소 분석 중' : '테크스펙 만들기'}
+              </button>
+            </div>
+          )}
+          {useTechSpec && techSpec && (
+            <div className="tech-spec-review">
+              <header>
+                <div>
+                  <span>테크스펙 revision {techSpec.revision}</span>
+                  <strong>{techSpec.changeSummary}</strong>
+                </div>
+                <button className="text-button" type="button" disabled={techSpecLoading} onClick={() => void generateTechSpec()}>
+                  요구사항에서 다시 생성
+                </button>
+              </header>
+              {techSpecStale && (
+                <p className="tech-spec-stale"><AlertTriangle size={13} />제목이나 요구사항이 바뀌었습니다. 다시 생성하거나 아래 피드백으로 변경사항을 반영하세요.</p>
+              )}
+              <label>
+                <span>테크스펙 요약</span>
+                <input
+                  aria-label="테크스펙 요약"
+                  maxLength={500}
+                  value={techSpec.summary}
+                  onChange={(event) => {
+                    setTechSpec({ ...techSpec, summary: event.target.value })
+                    setTechSpecApproved(false)
+                    invalidateDownstreamPlanning()
+                  }}
+                />
+              </label>
+              <label>
+                <span>테크스펙 본문</span>
+                <textarea
+                  aria-label="테크스펙 본문"
+                  minLength={100}
+                  maxLength={30000}
+                  rows={15}
+                  value={techSpec.markdown}
+                  onChange={(event) => {
+                    setTechSpec({ ...techSpec, markdown: event.target.value })
+                    setTechSpecApproved(false)
+                    invalidateDownstreamPlanning()
+                  }}
+                />
+              </label>
+              {techSpec.openQuestions.length > 0 && (
+                <div className="tech-spec-questions">
+                  <strong>확인하면 좋은 항목</strong>
+                  {techSpec.openQuestions.map((question) => <p key={question}>{question}</p>)}
+                </div>
+              )}
+              <div className="tech-spec-refine">
+                <label>
+                  <span>AI에게 개선 요청</span>
+                  <textarea
+                    aria-label="테크스펙 개선 의견"
+                    rows={3}
+                    maxLength={5000}
+                    value={techSpecFeedback}
+                    onChange={(event) => setTechSpecFeedback(event.target.value)}
+                    placeholder="예: 네트워크 실패 처리와 롤백 조건을 더 구체적으로 적어줘."
+                  />
+                </label>
+                <button className="secondary-button" type="button" disabled={techSpecLoading || techSpecFeedback.trim().length < 3} onClick={() => void refineTechSpec()}>
+                  {techSpecLoading ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
+                  {techSpecLoading ? '피드백 반영 중' : '피드백 반영'}
+                </button>
+              </div>
+              <div className={`tech-spec-approval${techSpecApproved && !techSpecStale ? ' approved' : ''}`}>
+                <div>
+                  <ShieldCheck size={15} />
+                  <span><strong>{techSpecApproved && !techSpecStale ? '이 테크스펙을 사용합니다' : '최종 내용을 확인하세요'}</strong><small>승인된 내용은 테스트 설계·구현·Reviewer에 함께 전달됩니다.</small></span>
+                </div>
+                <button
+                  className={techSpecApproved && !techSpecStale ? 'secondary-button' : 'primary-button'}
+                  type="button"
+                  disabled={techSpecLoading || techSpecStale || techSpec.summary.trim().length < 1 || techSpec.markdown.trim().length < 100}
+                  onClick={() => {
+                    if (techSpecApproved) invalidateDownstreamPlanning()
+                    setTechSpecApproved((current) => !current)
+                  }}
+                >
+                  <ShieldCheck size={13} />
+                  {techSpecApproved && !techSpecStale ? '승인 취소' : '이 테크스펙으로 진행'}
+                </button>
+              </div>
+            </div>
+          )}
+          {useTechSpec && techSpecError && <p className="tech-spec-error">{techSpecError}</p>}
+        </section>
         <section className="verification-planner">
           <header>
             <div><strong>이 작업의 검증 방식</strong><p>AI 추천을 받은 뒤 실제로 필요한 단계만 선택하세요. 등록하면 이 계획이 작업에 고정됩니다.</p></div>
-            <button className="secondary-button" type="button" disabled={recommending || title.trim().length < 2 || prompt.trim().length < 10} onClick={() => void recommend()}>
+            <button className="secondary-button" type="button" disabled={recommending || title.trim().length < 2 || prompt.trim().length < 10 || (useTechSpec && !techSpecReady)} onClick={() => void recommend()}>
               {recommending ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
               {recommending ? '프로젝트 분석 중' : 'AI에게 추천받기'}
             </button>
           </header>
           {recommendation && <p className="verification-recommendation"><ShieldCheck size={13} /><span><strong>AI 추천</strong>{recommendation}</span></p>}
+          {useTechSpec && !techSpecReady && <p className="verification-plan-summary"><FileText size={13} />테크스펙을 승인하면 그 내용을 포함해 검증 계획을 추천합니다.</p>}
           <div className="verification-options">
             <label>
               <span>검증 조합</span>
@@ -2857,7 +3076,7 @@ function TaskModal({
               <div className="scenario-empty">
                 <ShieldCheck size={18} />
                 <div><strong>자연어 목표를 검증 단계로 바꿉니다</strong><p>Codex가 저장소를 읽고 누를 요소와 확인할 결과를 제안합니다. 확인한 뒤에만 작업에 고정됩니다.</p></div>
-                <button className="secondary-button" type="button" disabled={generating || title.trim().length < 2 || prompt.trim().length < 10} onClick={() => void generate()}>
+                <button className="secondary-button" type="button" disabled={generating || title.trim().length < 2 || prompt.trim().length < 10 || (useTechSpec && !techSpecReady)} onClick={() => void generate()}>
                   {generating ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
                   {generating ? '시나리오 생성 중' : '검증 시나리오 만들기'}
                 </button>
@@ -2911,13 +3130,14 @@ function TaskModal({
           <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'direct'} onChange={() => setPublishStrategy('direct')} /><span><b>작업 시작 브랜치에 직접 올리기</b><small>작업을 시작한 브랜치에 검증된 commit을 fast-forward push합니다. 강제 push는 하지 않습니다.</small></span></label>
         </section>
         <div className="workflow-preview">
+          {useTechSpec && <><span><FileText size={13} />테크스펙 승인</span><i /></>}
           {usesTests && !['existing-tests', 'skip'].includes(testDesign) && <><span><FileText size={13} />테스트 설계</span><i /></>}
           <span><Bot size={13} />구현</span><i />
           {usesTests && <><span><CheckCircle2 size={13} />프로젝트 테스트</span><i /></>}
           {usesRuntime && <><span><SquareTerminal size={13} />Simulator</span><i /></>}
           <span><Search size={13} />Reviewer</span><i /><span><ShieldCheck size={13} />사람 확인</span><i /><span><GitBranch size={13} />{publishStrategy === 'pull-request' ? 'PR' : '원격 게시'}</span>
         </div>
-        <button className="primary-button" disabled={submitting || generating || recommending || project.isDemo || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
+        <button className="primary-button" disabled={submitting || generating || recommending || techSpecLoading || project.isDemo || (useTechSpec && !techSpecReady) || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
       </form>
     </Modal>
   )
@@ -2976,7 +3196,7 @@ function SearchModal({
     const normalized = query.trim().toLowerCase()
     const matches = (value: string): boolean => !normalized || value.toLowerCase().includes(normalized)
     return {
-      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.status}`)).slice(0, 6),
+      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.techSpec?.markdown ?? ''} ${task.status}`)).slice(0, 6),
       notes: snapshot.notes.filter((note) => matches(`${note.title} ${note.body}`)).slice(0, 5),
       events: snapshot.events.filter((event) => matches(`${event.actor} ${event.message} ${event.kind}`)).slice(0, 5)
     }
@@ -3038,6 +3258,17 @@ function TaskDrawer({
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {task.techSpec && (
+          <section className="approved-tech-spec">
+            <div className="drawer-section-title"><strong>승인된 테크스펙</strong><span>revision {task.techSpec.revision}</span></div>
+            <p>{task.techSpec.summary}</p>
+            <details>
+              <summary>전체 테크스펙 보기</summary>
+              <pre>{task.techSpec.markdown}</pre>
+            </details>
+            <small><ShieldCheck size={11} />{timeAgo(task.techSpec.approvedAt)} 승인 · 구현과 검토의 추가 계약</small>
+          </section>
+        )}
         {task.verificationPlan && (
           <section className="verification-report">
             <div className="drawer-section-title"><strong>작업별 검증 계획</strong><span>등록 시 고정됨</span></div>

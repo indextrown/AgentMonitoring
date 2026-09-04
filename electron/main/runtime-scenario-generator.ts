@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -9,9 +9,11 @@ import type {
   GeneratedRuntimeScenario,
   IosRuntimeAdapterConfig,
   RuntimeAcceptanceAssertion,
-  RuntimeUiAction
+  RuntimeUiAction,
+  TaskTechSpecDraft
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { readCodexStructuredOutput } from './codex-structured-output'
 import { projectCapabilityManifestSchema } from './project-capabilities'
 
 const execFileAsync = promisify(execFile)
@@ -164,6 +166,7 @@ export class RuntimeScenarioGenerator {
     projectPath: string
     title: string
     prompt: string
+    techSpec?: TaskTechSpecDraft | null
     adapter: IosRuntimeAdapterConfig
   }): Promise<GeneratedRuntimeScenario> {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-'))
@@ -175,6 +178,9 @@ export class RuntimeScenarioGenerator {
         '당신은 iOS 앱의 작업별 인수 검증 시나리오 설계자입니다.',
         `작업 제목: ${input.title}`,
         `작업 목표와 완료 조건:\n${input.prompt}`,
+        input.techSpec
+          ? `사람이 승인한 테크스펙 revision ${input.techSpec.revision}:\n${input.techSpec.markdown}`
+          : '이 작업에는 별도로 승인된 테크스펙이 없습니다.',
         `실행 대상: ${input.adapter.container} / ${input.adapter.scheme} / ${input.adapter.deviceFamily}`,
         '저장소를 읽기 전용으로 확인하고, 이 작업의 사용자 동작과 관찰 가능한 성공 조건만 JSON으로 설계하세요.',
         '기존 화면의 accessibilityIdentifier는 코드에 있는 값을 사용하세요.',
@@ -185,7 +191,7 @@ export class RuntimeScenarioGenerator {
         'tap action의 text는 null, type-text action의 text는 실제 입력 예시여야 합니다.',
         '코드를 수정하지 마세요. 저장소를 이해하기 위한 읽기 전용 명령만 사용할 수 있습니다.'
       ].join('\n\n')
-      await execFileAsync(
+      const { stdout } = await execFileAsync(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
@@ -193,6 +199,7 @@ export class RuntimeScenarioGenerator {
           '--ephemeral',
           '--sandbox',
           'read-only',
+          '--json',
           '--cd',
           input.projectPath,
           '--output-schema',
@@ -205,11 +212,13 @@ export class RuntimeScenarioGenerator {
           cwd: input.projectPath,
           env: this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env,
           encoding: 'utf8',
-          maxBuffer: 4_000_000,
+          maxBuffer: 16_000_000,
           timeout: GENERATION_TIMEOUT_MS
         }
       )
-      const generated = generatedScenarioSchema.parse(JSON.parse(await readFile(outputPath, 'utf8')))
+      const generated = generatedScenarioSchema.parse(
+        await readCodexStructuredOutput(outputPath, stdout, '검증 시나리오')
+      )
       return {
         summary: generated.summary,
         contract: buildApprovedRuntimeContract(input.adapter, generated)

@@ -276,6 +276,18 @@ function runtimeContractPrompt(task: TaskRecord): string {
   ].join('\n')
 }
 
+export function buildTaskTechSpecContext(task: TaskRecord): string {
+  if (!task.techSpec) return ''
+  return [
+    `아래 내용은 사람이 구현 전에 승인한 테크스펙 revision ${task.techSpec.revision}입니다.`,
+    '원본 작업 목표가 최우선이며, 테크스펙을 구현 방향과 범위의 추가 계약으로 사용하세요.',
+    '테크스펙을 임의로 약화하거나 요구사항을 삭제하지 마세요.',
+    '<approved-tech-spec>',
+    task.techSpec.markdown,
+    '</approved-tech-spec>'
+  ].join('\n')
+}
+
 export function resolveTaskVerificationPlan(task: TaskRecord): {
   plan: TaskVerificationPlan
   legacy: boolean
@@ -517,6 +529,7 @@ export class AgentRunner {
             'workspace-write',
             [
               `작업 목표: ${task.prompt}`,
+              buildTaskTechSpecContext(task),
               '당신은 테스트 설계자입니다. 프로덕션 구현은 수정하지 마세요.',
               '기존 테스트 구조를 확인하고 이 목표의 성공·실패·경계 조건을 검증하는 테스트만 추가하거나 보완하세요.',
               testDesignInstruction(plan),
@@ -533,6 +546,7 @@ export class AgentRunner {
             'read-only',
             [
               `작업 목표: ${task.prompt}`,
+              buildTaskTechSpecContext(task),
               '당신은 읽기 전용 테스트 비평가입니다.',
               '현재 추가된 테스트가 구현 세부사항이 아니라 사용자 요구와 실패 경로를 검증하는지 평가하세요.',
               '누락된 경계 조건과 테스트를 약화해 통과할 수 있는 지점을 짧게 정리하세요.',
@@ -570,6 +584,7 @@ export class AgentRunner {
           'workspace-write',
           [
             `작업 목표: ${task.prompt}`,
+            buildTaskTechSpecContext(task),
             '당신은 구현 담당자입니다. 현재 테스트와 프로젝트 규칙을 지키며 목표를 완성하세요.',
             '테스트를 삭제하거나 약화하지 마세요. 관련 없는 파일은 수정하지 마세요.',
             approvedRuntimeContract,
@@ -1954,6 +1969,7 @@ export class AgentRunner {
       'read-only',
       [
         `작업 목표: ${task.prompt}`,
+        buildTaskTechSpecContext(task),
         '당신은 최종 읽기 전용 Reviewer입니다.',
         diffInstruction,
         '기존 테스트와 실행 결과를 함께 검토하세요.',

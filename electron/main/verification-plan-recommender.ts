@@ -1,14 +1,16 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   ProjectRuntimeConfigSource,
+  TaskTechSpecDraft,
   VerificationPlanRecommendation
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { readCodexStructuredOutput } from './codex-structured-output'
 
 const execFileAsync = promisify(execFile)
 const RECOMMENDATION_TIMEOUT_MS = 3 * 60_000
@@ -51,6 +53,7 @@ export class VerificationPlanRecommender {
     projectPath: string
     title: string
     prompt: string
+    techSpec?: TaskTechSpecDraft | null
     testCommand: string
     runtimeAvailable: boolean
     runtimeConfigSource: ProjectRuntimeConfigSource | null
@@ -64,6 +67,9 @@ export class VerificationPlanRecommender {
         '당신은 소프트웨어 작업의 검증 계획을 추천하는 읽기 전용 분석가입니다.',
         `작업 제목: ${input.title}`,
         `작업 목표와 완료 조건:\n${input.prompt}`,
+        input.techSpec
+          ? `사람이 승인한 테크스펙 revision ${input.techSpec.revision}:\n${input.techSpec.markdown}`
+          : '이 작업에는 별도로 승인된 테크스펙이 없습니다.',
         `프로젝트 검증 명령: ${input.testCommand.trim() || '미설정'}`,
         `iOS Simulator 연결: ${input.runtimeAvailable ? '사용 가능' : '사용 불가'}`,
         `Simulator 설정 출처: ${input.runtimeConfigSource ?? '없음'}`,
@@ -77,7 +83,7 @@ export class VerificationPlanRecommender {
         'summary에는 왜 이 검증 조합이 적합한지 사용자가 이해하기 쉬운 한국어 한두 문장으로 적으세요.',
         '코드를 수정하지 마세요.'
       ].join('\n\n')
-      await execFileAsync(
+      const { stdout } = await execFileAsync(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
@@ -85,6 +91,7 @@ export class VerificationPlanRecommender {
           '--ephemeral',
           '--sandbox',
           'read-only',
+          '--json',
           '--cd',
           input.projectPath,
           '--output-schema',
@@ -97,11 +104,13 @@ export class VerificationPlanRecommender {
           cwd: input.projectPath,
           env: this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env,
           encoding: 'utf8',
-          maxBuffer: 4_000_000,
+          maxBuffer: 16_000_000,
           timeout: RECOMMENDATION_TIMEOUT_MS
         }
       )
-      const recommendation = recommendationSchema.parse(JSON.parse(await readFile(outputPath, 'utf8')))
+      const recommendation = recommendationSchema.parse(
+        await readCodexStructuredOutput(outputPath, stdout, '검증 계획')
+      )
       const testsAvailable = Boolean(input.testCommand.trim())
       let mode = recommendation.mode
       if (mode === 'both' && !testsAvailable) mode = input.runtimeAvailable ? 'simulator-runtime' : 'manual-review'
