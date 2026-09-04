@@ -31,6 +31,7 @@ function buildSnapshot(): DashboardSnapshot {
       id: projectId,
       name: 'ElmwoodOnline',
       path: `demo://${projectId}`,
+      setupCommand: '',
       testCommand: '',
       runtimeAdapter: searchParams.get('contract') === 'ios'
         ? {
@@ -49,6 +50,7 @@ function buildSnapshot(): DashboardSnapshot {
       id: secondaryProjectId,
       name: 'AgentMonitoring',
       path: `demo://${secondaryProjectId}`,
+      setupCommand: '',
       testCommand: '',
       runtimeAdapter: null,
       runtimeConfigSource: null,
@@ -82,6 +84,28 @@ function buildSnapshot(): DashboardSnapshot {
       updatedAt: new Date(new Date(createdAt).getTime() + 62 * 60 * 1000).toISOString()
     }
   }).reverse()
+  if (searchParams.get('environment') === 'blocked') {
+    const plan = {
+      version: 1 as const,
+      mode: 'project-tests' as const,
+      testDesign: 'existing-tests' as const,
+      runtimeSource: 'off' as const
+    }
+    tasks[0] = {
+      ...tasks[0],
+      status: 'blocked_environment',
+      attempt: 0,
+      branchName: `agentmonitor/demo-${tasks[0].id.slice(0, 6)}`,
+      worktreePath: `demo://worktrees/${tasks[0].id}`,
+      verificationPlan: plan,
+      verificationResult: updateVerificationStep(
+        createVerificationResult(plan),
+        'environment-setup',
+        'failed',
+        'Tuist 외부 의존성이 준비되지 않았습니다.'
+      )
+    }
+  }
   const findings = Array.from({ length: 6 }, (_, index) => ({
     id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     projectId,
@@ -397,6 +421,7 @@ export const demoBridge: AgentMonitoringBridge = {
       id: crypto.randomUUID(),
       name: 'ConnectedRepository',
       path: 'demo://connected-repository',
+      setupCommand: '',
       testCommand: '',
       runtimeAdapter: hasIosRuntime
         ? {
@@ -424,6 +449,7 @@ export const demoBridge: AgentMonitoringBridge = {
         updated = {
           ...project,
           name: input.name,
+          setupCommand: input.setupCommand,
           testCommand: input.testCommand,
           runtimeAdapter: input.runtimeAdapter,
           runtimeConfigSource: input.runtimeAdapter
@@ -663,6 +689,13 @@ export const demoBridge: AgentMonitoringBridge = {
     })
     emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
     const plan = task.verificationPlan
+    if (plan && plan.mode !== 'manual-review') {
+      updateTaskVerification(taskId, 'environment-setup', 'running', '격리 작업공간의 의존성을 준비하고 있습니다.')
+      emit(task, 'environment_started', 'environment', '격리 작업공간 환경 준비 시작')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+      updateTaskVerification(taskId, 'environment-setup', 'passed', '환경 준비를 완료했습니다.')
+      emit(task, 'environment_passed', 'environment', '격리 작업공간 환경 준비 완료')
+    }
     if (plan && ['project-tests', 'both'].includes(plan.mode) && !['existing-tests', 'skip'].includes(plan.testDesign)) {
       updateTaskVerification(taskId, 'test-design', 'running', '테스트 설계 중')
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
@@ -680,6 +713,18 @@ export const demoBridge: AgentMonitoringBridge = {
     updateTaskVerification(taskId, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
     updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
     emit(task, 'agent', 'reviewer', '최종 검토가 끝났습니다. 승인을 기다립니다.')
+  },
+  retryTaskVerification: async (taskId) => {
+    const task = updateTask(taskId, 'running')
+    updateTaskVerification(taskId, 'test-design', 'skipped', '기존 구현과 테스트를 유지하고 검증만 다시 실행합니다.')
+    updateTaskVerification(taskId, 'environment-setup', 'running', '격리 작업공간의 의존성을 다시 준비하고 있습니다.')
+    emit(task, 'environment_started', 'environment', '구현 없이 환경 준비와 검증 재실행')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    updateTaskVerification(taskId, 'environment-setup', 'passed', '환경 준비를 완료했습니다.')
+    updateTaskVerification(taskId, 'project-tests', 'passed', '프로젝트 테스트가 다시 통과했습니다.')
+    updateTaskVerification(taskId, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
+    updateTask(taskId, task.verificationPlan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
+    emit(task, 'environment_passed', 'environment', '기존 구현을 수정하지 않고 검증을 완료했습니다.')
   },
   stopTask: async (taskId) => {
     const task = updateTask(taskId, 'stopped')

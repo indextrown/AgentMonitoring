@@ -20,10 +20,11 @@ export function isActiveTask(task: TaskRecord): boolean {
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   const transitions: Record<TaskStatus, TaskStatus[]> = {
     queued: ['running', 'stopped', 'discarded'],
-    running: ['testing', 'awaiting_approval', 'awaiting_manual_validation', 'failed', 'stopped'],
-    testing: ['running', 'awaiting_approval', 'awaiting_manual_validation', 'failed', 'stopped'],
+    running: ['testing', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'failed', 'stopped'],
+    testing: ['running', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'failed', 'stopped'],
     awaiting_approval: ['completed', 'discarded', 'running'],
     awaiting_manual_validation: ['completed', 'discarded', 'running'],
+    blocked_environment: ['running', 'discarded'],
     completed: [],
     failed: ['running', 'discarded'],
     stopped: ['running', 'discarded'],
@@ -53,6 +54,9 @@ export function createVerificationResult(
   const designsTests = verificationUsesProjectTests(plan) &&
     !['existing-tests', 'skip'].includes(plan.testDesign)
   return {
+    environmentSetup: verificationUsesProjectTests(plan) || verificationUsesRuntime(plan)
+      ? step('pending', '격리 작업공간의 검증 환경 확인을 기다리고 있습니다.')
+      : step('skipped', '선택한 검증 방식에서 사용하지 않습니다.'),
     testDesign: designsTests
       ? step('pending', '테스트 설계를 기다리고 있습니다.')
       : step('skipped', verificationUsesProjectTests(plan) ? '기존 테스트를 그대로 사용합니다.' : '선택한 검증 방식에서 사용하지 않습니다.'),
@@ -74,6 +78,7 @@ export function updateVerificationStep(
   timestamp = new Date().toISOString()
 ): TaskVerificationResult {
   const next = { status, message, updatedAt: timestamp }
+  if (key === 'environment-setup') return { ...result, environmentSetup: next }
   if (key === 'test-design') return { ...result, testDesign: next }
   if (key === 'project-tests') return { ...result, projectTests: next }
   if (key === 'simulator-runtime') return { ...result, simulatorRuntime: next }

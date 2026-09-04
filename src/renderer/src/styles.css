@@ -3036,6 +3036,20 @@ kbd {
   background: #1c1712;
 }
 
+.approval-notice.environment-blocked {
+  border-color: #654925;
+  color: #d8a052;
+  background: #211912;
+}
+
+.approval-notice.environment-blocked p {
+  color: #9d8468;
+}
+
+.approval-notice.environment-blocked strong {
+  color: #e0b16c;
+}
+
 @media (max-width: 1280px) {
   .verification-options {
     grid-template-columns: 1fr;

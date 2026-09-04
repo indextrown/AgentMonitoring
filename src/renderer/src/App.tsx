@@ -98,6 +98,7 @@ const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> |
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'autoConfigureProjectRuntime',
   'recommendVerificationPlan',
+  'retryTaskVerification',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage'
@@ -119,6 +120,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   queued: '대기',
   running: '구현 중',
   testing: '테스트 중',
+  blocked_environment: '환경 확인 필요',
   awaiting_approval: '승인 대기',
   awaiting_manual_validation: '수동 검증 필요',
   completed: '완료',
@@ -266,6 +268,7 @@ function eventIcon(kind: EventKind): typeof Activity {
   if (kind.includes('finding')) return Bug
   if (kind.includes('note')) return NotebookPen
   if (kind.includes('test')) return kind === 'test_failed' ? AlertTriangle : CheckCircle2
+  if (kind.includes('environment')) return kind === 'environment_failed' ? AlertTriangle : Gauge
   if (kind === 'task_timed_out') return AlertTriangle
   if (kind.includes('completed')) return CheckCircle2
   if (kind.includes('started')) return Play
@@ -277,6 +280,7 @@ function statusTone(status: TaskStatus): string {
   if (status === 'failed') return 'red'
   if (status === 'awaiting_approval') return 'violet'
   if (status === 'awaiting_manual_validation') return 'amber'
+  if (status === 'blocked_environment') return 'amber'
   if (status === 'running' || status === 'testing') return 'blue'
   if (status === 'stopped' || status === 'discarded') return 'muted'
   return 'amber'
@@ -472,6 +476,14 @@ export function App(): React.JSX.Element {
     void load(task.projectId)
   }
 
+  const retryTaskVerification = (task: TaskRecord): void => {
+    setSelectedTask(task)
+    void bridge.retryTaskVerification(task.id)
+      .then(() => load(task.projectId))
+      .catch((retryError) => setError(String(retryError)))
+    void load(task.projectId)
+  }
+
   const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard'): Promise<void> => {
     try {
       if (action === 'discard' && !window.confirm('격리 작업공간과 변경을 폐기할까요?')) return
@@ -561,6 +573,7 @@ export function App(): React.JSX.Element {
       await bridge.updateProject({
         projectId: project.id,
         name: project.name,
+        setupCommand: project.setupCommand,
         testCommand: command,
         runtimeAdapter: project.runtimeAdapter
       })
@@ -785,6 +798,7 @@ export function App(): React.JSX.Element {
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
+          onRetryVerification={retryTaskVerification}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
           onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
@@ -863,7 +877,7 @@ function EmptyWorkspace({
             <span>02</span>
             <SquareTerminal size={17} />
             <strong>검증 영역 연결</strong>
-            <p>필요하면 테스트 명령과 Simulator를 연결합니다.</p>
+            <p>필요하면 환경 준비·테스트 명령과 Simulator를 연결합니다.</p>
           </div>
           <div>
             <span>03</span>
@@ -913,7 +927,7 @@ function ProjectStartPage({
           <p className="eyebrow">PROJECT READINESS</p>
           <h2>{loading ? '저장소 상태를 확인하고 있습니다' : ready ? '첫 작업을 시작할 준비가 되었습니다' : '작업 전에 준비할 항목이 있습니다'}</h2>
           <p>
-            AgentMonitoring은 원본 checkout을 직접 수정하지 않고 격리된 worktree에서 Codex와 검증 명령을 실행합니다.
+            AgentMonitoring은 원본 checkout을 직접 수정하지 않고 격리된 worktree에서 환경 준비, Codex와 검증 명령을 실행합니다.
           </p>
         </div>
         <div className="project-start-actions">
@@ -944,9 +958,12 @@ function ProjectStartPage({
           </article>
           <article className={`panel readiness-card ${hasTestCommand ? 'ready' : 'attention'}`}>
             <ShieldCheck size={16} />
-            <span>검증 명령</span>
+            <span>준비·검증 명령</span>
             <strong>{hasTestCommand ? '설정 완료' : '선택 사항'}</strong>
-            <small>{project.testCommand || '프로젝트 테스트를 선택할 작업에서만 필요합니다.'}</small>
+            <small>{[
+              project.setupCommand ? `준비 ${project.setupCommand}` : '',
+              project.testCommand ? `검증 ${project.testCommand}` : '프로젝트 테스트를 선택할 작업에서만 검증 명령이 필요합니다.'
+            ].filter(Boolean).join(' · ')}</small>
           </article>
         </div>
       ) : (
@@ -1674,10 +1691,12 @@ function ProjectsPage({
   onRemove: () => void
 }): React.JSX.Element {
   const [name, setName] = useState(project.name)
+  const [setupCommand, setSetupCommand] = useState(project.setupCommand)
   const [testCommand, setTestCommand] = useState(project.testCommand)
   const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
   useEffect(() => {
     setName(project.name)
+    setSetupCommand(project.setupCommand)
     setTestCommand(project.testCommand)
     setRuntimeAdapter(project.runtimeAdapter)
   }, [project])
@@ -1697,13 +1716,14 @@ function ProjectsPage({
       )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
-        void onSave({ projectId: project.id, name, testCommand, runtimeAdapter })
+        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter })
       }}>
         <div className="setting-icon"><Settings2 size={18} /></div>
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label><span>저장소 경로</span><div className="path-field"><code>{project.path}</code><button type="button" disabled={project.isDemo} onClick={onOpen}><FolderOpen size={14} /> 열기</button></div></label>
+        <label><span>환경 준비 명령</span><input value={setupCommand} placeholder="예: tuist install" onChange={(event) => setSetupCommand(event.target.value)} /><small>새 격리 작업공간을 만든 직후와 의존성 설정이 바뀐 뒤, 테스트보다 먼저 실행한다.</small></label>
         <label><span>검증 명령</span><input value={testCommand} placeholder="예: pnpm check 또는 xcodebuild test ..." onChange={(event) => setTestCommand(event.target.value)} /><small>shell 연산자 없이 허용된 실행 파일과 인자만 입력한다.</small></label>
-        <div className="allowed-tools"><strong>허용된 테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
+        <div className="allowed-tools"><strong>허용된 준비·테스트 실행 파일</strong><span>pnpm · npm · npx · yarn · bun · tuist · xcodebuild · swift · cargo · go · python · pytest · make · cmake · gradle</span></div>
         <section className="runtime-settings" id="ios-runtime-settings">
           <div className="runtime-settings-heading">
             <div>
@@ -1786,16 +1806,17 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
   const startSteps = [
     ['1', '프로젝트 연결', '실제 Git 프로젝트 추가를 누르고 저장소 루트를 선택하세요.'],
     ['2', '실행 영역 연결', 'Swift 앱에서 Build·Run·Observe·Act가 회색이면 iOS 자동 연결을 누르세요.'],
-    ['3', '검증 명령 저장', '프로젝트 테스트를 쓸 때만 실제로 통과하는 테스트 명령을 등록하세요.'],
+    ['3', '준비·검증 명령 확인', '필요한 의존성 준비 명령과 실제로 통과하는 테스트 명령을 프로젝트 설정에서 확인하세요.'],
     ['4', '작업 만들기', '새 작업에서 목표와 확인 가능한 완료 조건을 작성하세요.'],
     ['5', '검증 계획 확인', 'AI 추천을 보고 테스트, Simulator 또는 수동 검토 중 필요한 조합을 고르세요.'],
     ['6', '실행 시작', '작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.']
   ]
   const pipeline = [
     ['검증 계획 적용', '작업을 만들 때 사람이 확인한 검증 단계만 실행합니다.'],
+    ['환경 준비', '새 격리 작업공간에 필요한 의존성을 테스트 전에 준비합니다.'],
     ['선택한 테스트 설계', '필요한 작업에서만 Test Designer와 Critic이 테스트를 만들고 검토합니다.'],
     ['기능 구현', 'Implementer가 격리된 Git worktree에서 코드를 수정합니다.'],
-    ['선택한 자동 검증', '프로젝트 테스트, Simulator 또는 두 검증을 선택한 조합대로 실행합니다.'],
+    ['선택한 자동 검증', '의존성 설정이 바뀌면 환경을 다시 준비한 뒤 프로젝트 테스트, Simulator 또는 두 검증을 실행합니다.'],
     ['자가 수정', '실패하면 로그와 화면 증거를 전달해 남은 횟수만큼 다시 구현합니다.'],
     ['최종 검토', 'Reviewer가 diff, 테스트와 실행 증거를 읽고 문제를 보고합니다.'],
     ['사람 승인', '결과를 확인한 뒤 원본에 적용하거나 격리 변경을 폐기합니다.']
@@ -1865,7 +1886,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
               </li>
             ))}
           </ol>
-          <p className="usage-retry-note"><strong>최대 구현 3회</strong>는 AI 전체 호출 횟수가 아니라 Implementer가 코드를 고칠 수 있는 기회를 뜻해요.</p>
+          <p className="usage-retry-note"><strong>최대 구현 3회</strong>는 AI 전체 호출 횟수가 아니라 Implementer가 코드를 고칠 수 있는 기회를 뜻해요. 의존성·네트워크 같은 환경 오류는 이 횟수를 소모하지 않고 멈추며, 환경을 고친 뒤 기존 코드를 유지한 채 검증만 다시 실행할 수 있어요.</p>
         </section>
 
         <section className="usage-boundaries" aria-label="승인 단계 구분">
@@ -2361,6 +2382,7 @@ function TaskDrawer({
   evidence,
   onClose,
   onRun,
+  onRetryVerification,
   onAction,
   onOpenPath,
   onOpenEvidence
@@ -2372,6 +2394,7 @@ function TaskDrawer({
   evidence: RuntimeEvidenceRecord[]
   onClose: () => void
   onRun: (task: TaskRecord) => void
+  onRetryVerification: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard') => void
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
@@ -2402,6 +2425,7 @@ function TaskDrawer({
             {task.verificationResult && (
               <div className="verification-steps">
                 {([
+                  ['환경 준비', task.verificationResult.environmentSetup],
                   ['테스트 설계', task.verificationResult.testDesign],
                   ['프로젝트 테스트', task.verificationResult.projectTests],
                   ['Simulator', task.verificationResult.simulatorRuntime],
@@ -2533,10 +2557,17 @@ function TaskDrawer({
             <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 로컬 적용'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 적용하거나 폐기하세요.' : '원본 checkout이 깨끗하고 fast-forward 가능한 경우에만 변경을 적용합니다.'}</p>
           </div>
         )}
+        {task.status === 'blocked_environment' && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>코드 문제가 아니라 검증 환경을 먼저 준비해야 합니다</strong>현재 변경과 작업공간은 그대로 보관했습니다. 프로젝트 설정의 환경 준비 명령을 확인한 뒤 구현을 다시 시키지 않고 검증만 재실행할 수 있습니다.</p>
+          </div>
+        )}
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
-          {['failed', 'stopped'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
+          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
+          {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{task.status === 'awaiting_manual_validation' ? '직접 확인 후 원본에 적용' : '원본에 적용'}</button></>}
         </footer>

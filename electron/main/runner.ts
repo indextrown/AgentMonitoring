@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstat, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
 import type {
@@ -34,6 +34,12 @@ import {
   type RuntimeCommandRequest
 } from './ios-simulator-runtime'
 import { projectCapabilityManifestSchema, readProjectCapabilityManifest } from './project-capabilities'
+import {
+  detectProjectSetupCommand,
+  environmentFailureMessage,
+  isDependencyManifestPath,
+  isEnvironmentFailureOutput
+} from './project-environment'
 import {
   evaluateRuntimeAcceptance,
   summarizeRuntimeAcceptance,
@@ -160,6 +166,16 @@ class ProcessTimeoutError extends Error {
     const seconds = Math.max(1, Math.ceil(timeoutMs / 1_000))
     const duration = seconds >= 60 ? `${Math.ceil(seconds / 60)}분` : `${seconds}초`
     super(`${label} 제한 시간 초과 (${duration})`)
+  }
+}
+
+class EnvironmentPreparationError extends Error {
+  constructor(
+    message: string,
+    readonly command: string,
+    readonly output: string
+  ) {
+    super(message)
   }
 }
 
@@ -410,7 +426,7 @@ export class AgentRunner {
     if (usesProjectTests && !project.testCommand.trim()) {
       throw new Error('프로젝트 설정에서 검증 명령을 등록한 뒤 작업을 실행하세요.')
     }
-    if (!['queued', 'failed', 'stopped', 'awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+    if (!['queued', 'failed', 'stopped', 'blocked_environment', 'awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
       throw new Error(`현재 상태에서는 실행할 수 없습니다: ${task.status}`)
     }
     if (!legacy && usesRuntime && plan.runtimeSource === 'task-scenario' && !task.runtimeContract) {
@@ -427,7 +443,7 @@ export class AgentRunner {
 
     try {
       const worktreePath = await this.prepareWorktree(task)
-      task = this.store.transitionTask(taskId, 'running', 1)
+      task = this.store.transitionTask(taskId, 'running', 0)
       task = this.store.setTaskVerificationResult(taskId, createVerificationResult(plan))
       this.emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
       this.emit(
@@ -437,6 +453,18 @@ export class AgentRunner {
         `검증 계획 고정 · ${plan.mode} · 테스트 설계 ${plan.testDesign} · Simulator ${plan.runtimeSource}`
       )
       const approvedRuntimeContract = runtimeContractPrompt(task)
+      const setupCommand = project.setupCommand.trim() || await detectProjectSetupCommand(project.path)
+      if (usesProjectTests || usesRuntime) {
+        await this.runEnvironmentSetup(
+          taskId,
+          worktreePath,
+          control,
+          plan,
+          setupCommand,
+          '격리 작업공간의 기본 의존성을 준비합니다.'
+        )
+      }
+      let preparedManifestFingerprint = await this.dependencyManifestFingerprint(worktreePath)
 
       let critiqueMessage = '이 검증 계획은 새 테스트 설계를 사용하지 않습니다.'
       const designsTests = usesProjectTests && !['existing-tests', 'skip'].includes(plan.testDesign)
@@ -486,8 +514,8 @@ export class AgentRunner {
       let runtimeResult: RuntimeRunResult | null = null
       for (let attempt = 1; attempt <= task.maxAttempts; attempt += 1) {
         if (control.stopped) throw new StoppedError()
+        this.store.transitionTask(taskId, 'running', attempt)
         if (attempt > 1) {
-          this.store.transitionTask(taskId, 'running', attempt)
           this.emit(
             this.store.getTask(taskId),
             'agent',
@@ -517,6 +545,23 @@ export class AgentRunner {
           repairImagePaths
         )
 
+        const currentManifestFingerprint = await this.dependencyManifestFingerprint(worktreePath)
+        if (
+          setupCommand &&
+          currentManifestFingerprint &&
+          currentManifestFingerprint !== preparedManifestFingerprint
+        ) {
+          await this.runEnvironmentSetup(
+            taskId,
+            worktreePath,
+            control,
+            plan,
+            setupCommand,
+            '의존성 매니페스트 변경을 반영합니다.'
+          )
+          preparedManifestFingerprint = currentManifestFingerprint
+        }
+
         if (usesProjectTests || usesRuntime) {
           this.store.transitionTask(taskId, 'testing', attempt)
         }
@@ -540,6 +585,13 @@ export class AgentRunner {
               `테스트 실패 · 종료 코드 ${testResult.code}\n${testResult.output.slice(-3_000)}`,
               'high'
             )
+            if (isEnvironmentFailureOutput(testResult.output)) {
+              throw new EnvironmentPreparationError(
+                environmentFailureMessage(testResult.output),
+                setupCommand || project.testCommand,
+                testResult.output
+              )
+            }
             repairContext = [
               '직전 테스트가 실패했습니다. 아래 출력의 원인을 수정하고 기존 테스트를 유지하세요.',
               testResult.output.slice(-4_000)
@@ -675,31 +727,132 @@ export class AgentRunner {
           : '선택한 자동 검증 단계가 끝났습니다. 사람의 최종 승인을 기다립니다.'
       )
     } catch (error) {
-      const current = this.store.getTask(taskId)
-      if (error instanceof StoppedError || control.stopped) {
-        await this.stopRuntimeSession(current, 'stopped', '사용자가 작업을 중단해 Simulator 앱을 종료했습니다.')
-        if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
-        this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
-      } else if (error instanceof ProcessTimeoutError) {
-        await this.stopRuntimeSession(current, 'failed', '시간 초과로 Simulator 앱을 종료했습니다.')
-        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
-        this.emit(current, 'task_timed_out', 'orchestrator', `시간 초과 · ${error.message}`, 'high')
-        this.store.addFinding(current.projectId, current.id, `${current.title} · ${error.label} 시간 초과`, 'high')
-      } else if (error instanceof IosRuntimeStageError) {
-        await this.stopRuntimeSession(current, 'failed', error.message)
-        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
-        this.store.addFinding(
-          current.projectId,
-          current.id,
-          `${current.title} · Swift runtime ${error.status} 단계 실패`,
-          'high'
+      await this.handleExecutionError(taskId, control, error)
+      throw error
+    } finally {
+      this.activeRuns.delete(taskId)
+      control.resolveDone()
+    }
+  }
+
+  async retryVerification(taskId: string): Promise<void> {
+    if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
+
+    let task = this.store.getTask(taskId)
+    if (!['blocked_environment', 'failed', 'stopped'].includes(task.status)) {
+      throw new Error('환경 준비 또는 검증에 실패한 작업만 구현 없이 다시 검증할 수 있습니다.')
+    }
+    if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
+      throw new Error('다시 검증할 격리 작업공간을 찾을 수 없습니다.')
+    }
+
+    const project = this.store.getProject(task.projectId)
+    const { plan, legacy } = resolveTaskVerificationPlan(task)
+    const usesProjectTests = verificationUsesProjectTests(plan)
+    const usesRuntime = verificationUsesRuntime(plan)
+    if (usesProjectTests && !project.testCommand.trim()) {
+      throw new Error('프로젝트 설정에서 검증 명령을 등록한 뒤 다시 검증하세요.')
+    }
+
+    let resolveDone = (): void => undefined
+    const done = new Promise<void>((resolvePromise) => {
+      resolveDone = resolvePromise
+    })
+    const control: ActiveRun = { child: null, stopped: false, termination: null, done, resolveDone }
+    const runId = randomUUID()
+    this.activeRuns.set(taskId, control)
+
+    try {
+      const worktreePath = task.worktreePath
+      task = this.store.transitionTask(taskId, 'running', task.attempt)
+      this.store.setTaskVerificationResult(taskId, createVerificationResult(plan))
+      this.setVerificationStep(taskId, plan, 'test-design', 'skipped', '기존 구현과 테스트 설계를 유지하고 검증만 다시 실행합니다.')
+      this.emit(task, 'task_started', 'orchestrator', `${task.title} 환경 준비와 검증만 다시 실행`)
+
+      const setupCommand = project.setupCommand.trim() || await detectProjectSetupCommand(project.path)
+      if (usesProjectTests || usesRuntime) {
+        await this.runEnvironmentSetup(
+          taskId,
+          worktreePath,
+          control,
+          plan,
+          setupCommand,
+          '기존 변경을 유지한 채 검증 환경을 다시 준비합니다.'
         )
-      } else {
-        await this.stopRuntimeSession(current, 'failed', '작업 실패로 Simulator 앱을 종료했습니다.')
-        if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
-        this.emit(current, 'agent', 'orchestrator', `실행 실패 · ${redact(String(error))}`, 'high')
-        this.store.addFinding(current.projectId, current.id, `${current.title} 실행 실패`, 'high')
       }
+
+      let runtimeResult: RuntimeRunResult | null = null
+      if (usesProjectTests || usesRuntime) {
+        this.store.transitionTask(taskId, 'testing', task.attempt)
+      }
+
+      if (usesProjectTests) {
+        this.setVerificationStep(taskId, plan, 'project-tests', 'running', `${project.testCommand} 다시 실행 중`)
+        this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 재검증`)
+        const result = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
+        if (result.code !== 0) {
+          this.setVerificationStep(taskId, plan, 'project-tests', 'failed', `종료 코드 ${result.code}로 다시 실패했습니다.`)
+          this.emit(task, 'test_failed', 'test-runner', `재검증 실패 · 종료 코드 ${result.code}\n${result.output.slice(-3_000)}`, 'high')
+          if (isEnvironmentFailureOutput(result.output)) {
+            throw new EnvironmentPreparationError(
+              environmentFailureMessage(result.output),
+              setupCommand || project.testCommand,
+              result.output
+            )
+          }
+          this.store.transitionTask(taskId, 'failed')
+          this.store.addFinding(task.projectId, task.id, `${task.title} · 프로젝트 재검증 실패`, 'high')
+          return
+        }
+        this.setVerificationStep(taskId, plan, 'project-tests', 'passed', '프로젝트 테스트가 다시 통과했습니다.')
+        this.emit(task, 'test_passed', 'test-runner', '프로젝트 재검증이 통과했습니다.')
+      }
+
+      if (usesRuntime) {
+        this.setVerificationStep(taskId, plan, 'simulator-runtime', 'running', 'Simulator 인수 검증을 다시 실행하고 있습니다.')
+        runtimeResult = await this.runRuntimeIfConfigured(
+          this.store.getTask(taskId),
+          project,
+          worktreePath,
+          control,
+          runId,
+          plan.runtimeSource,
+          !legacy
+        )
+        this.setVerificationStep(
+          taskId,
+          plan,
+          'simulator-runtime',
+          runtimeResult ? 'passed' : 'skipped',
+          runtimeResult?.summary ?? '기존 작업에 Simulator 검증 계약이 없어 건너뛰었습니다.'
+        )
+      }
+
+      this.setVerificationStep(taskId, plan, 'reviewer', 'running', 'Reviewer가 기존 변경과 재검증 결과를 확인하고 있습니다.')
+      const review = await this.runReviewer(
+        this.store.getTask(taskId),
+        worktreePath,
+        runtimeContractPrompt(task),
+        runtimeResult
+      )
+      const reviewerFindings = parseReviewerFindings(review.finalMessage)
+      this.store.resolveTaskFindings(task.id)
+      for (const finding of reviewerFindings) {
+        this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
+      }
+      if (reviewerFindings.length > 0) {
+        this.setVerificationStep(taskId, plan, 'reviewer', 'failed', `Reviewer finding ${reviewerFindings.length}개가 남아 있습니다.`)
+        this.store.transitionTask(taskId, 'failed')
+        await this.stopRuntimeSession(task, 'stopped', '재검증 Reviewer finding을 확인하기 위해 Simulator 앱을 정리했습니다.')
+        return
+      }
+
+      this.setVerificationStep(taskId, plan, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
+      const finalStatus = plan.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval'
+      this.store.transitionTask(taskId, finalStatus)
+      this.emit(task, 'agent', 'orchestrator', '기존 구현을 수정하지 않고 환경 준비와 검증을 다시 완료했습니다.')
+    } catch (error) {
+      await this.handleExecutionError(taskId, control, error)
       throw error
     } finally {
       this.activeRuns.delete(taskId)
@@ -1226,6 +1379,184 @@ export class AgentRunner {
     )
   }
 
+  private async runEnvironmentSetup(
+    taskId: string,
+    worktreePath: string,
+    control: ActiveRun,
+    plan: TaskVerificationPlan,
+    setupCommand: string,
+    reason: string
+  ): Promise<void> {
+    if (!setupCommand.trim()) {
+      this.setVerificationStep(
+        taskId,
+        plan,
+        'environment-setup',
+        'skipped',
+        '별도 환경 준비 명령이 설정되지 않았습니다.'
+      )
+      return
+    }
+
+    const task = this.store.getTask(taskId)
+    this.setVerificationStep(
+      taskId,
+      plan,
+      'environment-setup',
+      'running',
+      `${setupCommand} 실행 중`
+    )
+    this.emit(task, 'environment_started', 'environment', `${reason} · ${setupCommand}`)
+
+    try {
+      const result = await this.runConfiguredCommand(
+        setupCommand,
+        worktreePath,
+        control,
+        `환경 준비 명령 (${setupCommand})`
+      )
+      if (result.code !== 0) {
+        throw new EnvironmentPreparationError(
+          environmentFailureMessage(result.output),
+          setupCommand,
+          result.output
+        )
+      }
+      this.setVerificationStep(
+        taskId,
+        plan,
+        'environment-setup',
+        'passed',
+        `${setupCommand} 실행을 완료했습니다.`
+      )
+      this.emit(
+        this.store.getTask(taskId),
+        'environment_passed',
+        'environment',
+        `격리 작업공간 환경 준비 완료 · ${setupCommand}`
+      )
+    } catch (error) {
+      if (error instanceof StoppedError) throw error
+      const environmentError = error instanceof EnvironmentPreparationError
+        ? error
+        : new EnvironmentPreparationError(
+            error instanceof ProcessTimeoutError
+              ? error.message
+              : `환경 준비 명령을 실행하지 못했습니다. ${redact(String(error))}`,
+            setupCommand,
+            error instanceof Error ? error.message : String(error)
+          )
+      this.setVerificationStep(
+        taskId,
+        plan,
+        'environment-setup',
+        'failed',
+        environmentError.message
+      )
+      throw environmentError
+    }
+  }
+
+  private async dependencyManifestFingerprint(worktreePath: string): Promise<string | null> {
+    const [tracked, untracked] = await Promise.all([
+      this.runProcess(
+        'git',
+        ['-c', 'core.quotepath=false', 'diff', '--name-only', 'HEAD', '--'],
+        worktreePath,
+        null
+      ),
+      this.runProcess(
+        'git',
+        ['-c', 'core.quotepath=false', 'ls-files', '--others', '--exclude-standard'],
+        worktreePath,
+        null
+      )
+    ])
+    if (tracked.code !== 0 || untracked.code !== 0) return null
+
+    const manifestPaths = [...new Set(
+      `${tracked.stdout}\n${untracked.stdout}`
+        .split(/\r?\n/)
+        .filter(isDependencyManifestPath)
+    )].sort()
+    if (manifestPaths.length === 0) return null
+
+    const hash = createHash('sha256')
+    for (const manifestPath of manifestPaths) {
+      hash.update(manifestPath)
+      const absolutePath = resolve(worktreePath, manifestPath)
+      if (!isPathInside(worktreePath, absolutePath)) continue
+      try {
+        hash.update(await readFile(absolutePath))
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        hash.update('[deleted]')
+      }
+    }
+    return hash.digest('hex')
+  }
+
+  private async handleExecutionError(
+    taskId: string,
+    control: ActiveRun,
+    error: unknown
+  ): Promise<void> {
+    const current = this.store.getTask(taskId)
+    if (error instanceof StoppedError || control.stopped) {
+      await this.stopRuntimeSession(current, 'stopped', '사용자가 작업을 중단해 Simulator 앱을 종료했습니다.')
+      if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
+      this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
+      return
+    }
+    if (error instanceof EnvironmentPreparationError) {
+      const { plan } = resolveTaskVerificationPlan(current)
+      this.setVerificationStep(taskId, plan, 'environment-setup', 'failed', error.message)
+      await this.stopRuntimeSession(current, 'failed', '검증 환경을 준비하지 못해 Simulator 앱을 종료했습니다.')
+      if (isActiveTask(current)) this.store.transitionTask(taskId, 'blocked_environment')
+      this.emit(
+        current,
+        'environment_failed',
+        'environment',
+        [
+          `검증 환경 준비 필요 · ${error.message}`,
+          `실행 명령: ${error.command}`,
+          error.output.slice(-2_000)
+        ].filter(Boolean).join('\n'),
+        'high'
+      )
+      this.store.addFinding(
+        current.projectId,
+        current.id,
+        `${current.title} · 검증 환경 준비 필요`,
+        'high'
+      )
+      return
+    }
+    if (error instanceof ProcessTimeoutError) {
+      await this.stopRuntimeSession(current, 'failed', '시간 초과로 Simulator 앱을 종료했습니다.')
+      if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+      this.emit(current, 'task_timed_out', 'orchestrator', `시간 초과 · ${error.message}`, 'high')
+      this.store.addFinding(current.projectId, current.id, `${current.title} · ${error.label} 시간 초과`, 'high')
+      return
+    }
+    if (error instanceof IosRuntimeStageError) {
+      await this.stopRuntimeSession(current, 'failed', error.message)
+      if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+      this.store.addFinding(
+        current.projectId,
+        current.id,
+        `${current.title} · Swift runtime ${error.status} 단계 실패`,
+        'high'
+      )
+      return
+    }
+
+    await this.stopRuntimeSession(current, 'failed', '작업 실패로 Simulator 앱을 종료했습니다.')
+    if (isActiveTask(current)) this.store.transitionTask(taskId, 'failed')
+    this.emit(current, 'agent', 'orchestrator', `실행 실패 · ${redact(String(error))}`, 'high')
+    this.store.addFinding(current.projectId, current.id, `${current.title} 실행 실패`, 'high')
+  }
+
   private async runCodexStage(
     task: TaskRecord,
     cwd: string,
@@ -1272,11 +1603,16 @@ export class AgentRunner {
     return result
   }
 
-  private async runConfiguredCommand(commandLine: string, cwd: string, control: ActiveRun): Promise<ProcessResult> {
+  private async runConfiguredCommand(
+    commandLine: string,
+    cwd: string,
+    control: ActiveRun,
+    label = `검증 명령 (${commandLine})`
+  ): Promise<ProcessResult> {
     const { command, args } = parseConfiguredCommand(commandLine)
     return this.runProcess(command, args, cwd, control, undefined, process.env, {
       timeoutMs: this.policy.testCommandTimeoutMs,
-      label: `검증 명령 (${commandLine})`
+      label
     })
   }
 

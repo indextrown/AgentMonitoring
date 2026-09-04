@@ -52,6 +52,7 @@ async function createExecutionFixture(options: {
   runtimeAdapter?: IosSimulatorRuntimeAdapter
   runtimeContract?: ApprovedRuntimeContract
   verificationPlan?: TaskVerificationPlan
+  setupCommand?: string | null
   testCommand?: string | null
 }): Promise<{
   directory: string
@@ -142,10 +143,11 @@ async function createExecutionFixture(options: {
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Runtime fixture', repository)
-  if (options.testCommand !== null) {
+  if (options.testCommand !== null || options.setupCommand) {
     store.updateProject({
       projectId: project.id,
       name: project.name,
+      setupCommand: options.setupCommand ?? '',
       testCommand: options.testCommand ?? 'make test'
     })
   }
@@ -225,6 +227,181 @@ describe('AgentRunner', () => {
   it('accepts Tuist validation commands and rejects unknown executables', () => {
     expect(parseConfiguredCommand('tuist test Core')).toEqual({ command: 'tuist', args: ['test', 'Core'] })
     expect(() => parseConfiguredCommand('bash verify.sh')).toThrow('허용되지 않은 테스트 실행 파일입니다: bash')
+  })
+
+  it('prepares the isolated environment before running project tests', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      makefile: 'setup:\n\t@touch .environment-ready\n\ntest:\n\t@test -f .environment-ready\n',
+      setupCommand: 'make setup',
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task.status).toBe('awaiting_approval')
+    expect(task.verificationResult).toMatchObject({
+      environmentSetup: { status: 'passed' },
+      projectTests: { status: 'passed' }
+    })
+    expect(await readFile(join(task.worktreePath!, '.environment-ready'), 'utf8')).toBe('')
+    expect(fixture.store.getSnapshot(task.projectId).events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(['environment_started', 'environment_passed', 'test_passed'])
+    )
+    fixture.store.close()
+  })
+
+  it('prepares dependencies again when the Implementer changes a manifest', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+if (prompt.includes('구현 담당자')) writeFileSync('Package.swift', '// dependency changed\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      makefile: 'setup:\n\t@echo prepared >> .setup-count\n\ntest:\n\t@test "$$(wc -l < .setup-count)" -eq 2\n',
+      setupCommand: 'make setup',
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task.status).toBe('awaiting_approval')
+    expect((await readFile(join(task.worktreePath!, '.setup-count'), 'utf8')).trim().split('\n')).toHaveLength(2)
+    expect(
+      fixture.store.getSnapshot(task.projectId).events.filter((event) => event.kind === 'environment_passed')
+    ).toHaveLength(2)
+    fixture.store.close()
+  })
+
+  it('blocks on environment setup failure without consuming an implementation attempt', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'environment-failure-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(callsPath)}, 'called\\n')
+`
+      },
+      makefile: 'setup:\n\t@echo "Could not find external dependencies. Run tuist install before you continue"; false\n\ntest:\n\t@true\n',
+      setupCommand: 'make setup',
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('Tuist 외부 의존성이 준비되지 않았습니다.')
+
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task).toMatchObject({ status: 'blocked_environment', attempt: 0 })
+    expect(task.verificationResult?.environmentSetup.status).toBe('failed')
+    await expect(readFile(callsPath, 'utf8')).rejects.toThrow()
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'environment_failed')).toBe(true)
+    fixture.store.close()
+  })
+
+  it('classifies dependency resolution test output without repeating the Implementer', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'dependency-failure-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      makefile: 'test:\n\t@echo "MapboxMaps is not a valid configured external dependency"; false\n',
+      maxAttempts: 3,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('Tuist 외부 의존성이 준비되지 않았습니다.')
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(task).toMatchObject({ status: 'blocked_environment', attempt: 1 })
+    expect(prompts.filter((prompt) => prompt.includes('구현 담당자'))).toHaveLength(1)
+    fixture.store.close()
+  })
+
+  it('retries environment and verification without running the Implementer again', async () => {
+    let callsPath = ''
+    let sentinelPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'verification-retry-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      makefile: 'setup:\n\t@test -f "$(SENTINEL)"\n\ntest:\n\t@true\n',
+      setupCommand: 'make setup',
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+    sentinelPath = join(fixture.directory, 'environment-ready')
+    const project = fixture.store.getProject(fixture.store.getTask(fixture.taskId).projectId)
+    fixture.store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: `make setup SENTINEL=${sentinelPath}`,
+      testCommand: project.testCommand,
+      runtimeAdapter: project.runtimeAdapter
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('프로젝트 검증 환경을 준비하지 못했습니다.')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('blocked_environment')
+    await writeFile(sentinelPath, 'ready\n')
+
+    await fixture.runner.retryVerification(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(task).toMatchObject({ status: 'awaiting_approval', attempt: 0 })
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('최종 읽기 전용 Reviewer')
+    expect(prompts[0]).not.toContain('구현 담당자')
+    fixture.store.close()
   })
 
   it('requires a validation command before creating a worktree', async () => {
@@ -560,7 +737,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     const store = new AppStore(join(directory, 'store.sqlite'))
     const project = store.addProject('Fixture', repository)
-    store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
+    store.updateProject({ projectId: project.id, name: project.name, setupCommand: '', testCommand: 'make test' })
     const task = store.createTask(project.id, '기능 구현', 'fixture 파일을 생성하고 검토한다.', 2)
     const published: Array<{ actor: string; message: string }> = []
     const codexHome = join(directory, 'codex-home')

@@ -30,6 +30,7 @@ const bridge: AgentMonitoringBridge = {
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),
   runTask: (taskId: string) => ipcRenderer.invoke('task:run', taskId),
+  retryTaskVerification: (taskId: string) => ipcRenderer.invoke('task:retry-verification', taskId),
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),
   discardTask: (taskId: string) => ipcRenderer.invoke('task:discard', taskId),

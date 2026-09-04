@@ -68,6 +68,7 @@ describe('inspectProject', () => {
       id: '11111111-1111-4111-8111-111111111111',
       name: 'Fixture',
       path: repository,
+      setupCommand: '',
       testCommand: '',
       isDemo: false,
       createdAt: new Date().toISOString()
@@ -187,6 +188,7 @@ describe('inspectProject', () => {
       id: '22222222-2222-4222-8222-222222222222',
       name: 'PopPang',
       path: repository,
+      setupCommand: 'tuist install',
       testCommand: 'tuist test',
       isDemo: false,
       createdAt: new Date().toISOString()
@@ -239,6 +241,7 @@ describe('inspectProject', () => {
       id: '33333333-3333-4333-8333-333333333333',
       name: 'Invalid',
       path: repository,
+      setupCommand: '',
       testCommand: '',
       isDemo: false,
       createdAt: new Date().toISOString()
@@ -349,6 +352,7 @@ describe('inspectProject', () => {
         id: '44444444-4444-4444-8444-444444444444',
         name: 'Large',
         path: repository,
+        setupCommand: '',
         testCommand: '',
         isDemo: false,
         createdAt: new Date().toISOString()

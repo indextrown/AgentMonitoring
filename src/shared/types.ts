@@ -4,6 +4,7 @@ export type TaskStatus =
   | 'testing'
   | 'awaiting_approval'
   | 'awaiting_manual_validation'
+  | 'blocked_environment'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -16,6 +17,9 @@ export type EventKind =
   | 'test_started'
   | 'test_passed'
   | 'test_failed'
+  | 'environment_started'
+  | 'environment_passed'
+  | 'environment_failed'
   | 'finding_created'
   | 'finding_resolved'
   | 'finding_reopened'
@@ -148,6 +152,7 @@ export interface TaskVerificationPlan {
 }
 
 export type VerificationStepKey =
+  | 'environment-setup'
   | 'test-design'
   | 'project-tests'
   | 'simulator-runtime'
@@ -162,6 +167,7 @@ export interface VerificationStepResult {
 }
 
 export interface TaskVerificationResult {
+  environmentSetup: VerificationStepResult
   testDesign: VerificationStepResult
   projectTests: VerificationStepResult
   simulatorRuntime: VerificationStepResult
@@ -178,6 +184,7 @@ export interface ProjectRecord {
   name: string
   path: string
   testCommand: string
+  setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   runtimeConfigSource?: ProjectRuntimeConfigSource | null
   isDemo: boolean
@@ -405,6 +412,7 @@ export interface UpdateProjectInput {
   projectId: string
   name: string
   testCommand: string
+  setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
 }
 
@@ -420,7 +428,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 3
+export const AGENT_MONITORING_BRIDGE_VERSION = 4
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -441,6 +449,7 @@ export interface AgentMonitoringBridge {
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
+  retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<void>
   discardTask: (taskId: string) => Promise<void>
