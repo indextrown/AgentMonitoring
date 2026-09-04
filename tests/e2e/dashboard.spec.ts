@@ -340,6 +340,34 @@ test('explains dirty repositories with exact file categories and paths', async (
   })
 })
 
+test('stages selected files and commits them from source control', async ({ page }) => {
+  await page.goto('/?workspace=empty&source-control=dirty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '소스 제어' }).click()
+
+  await expect(page.getByRole('heading', { name: '소스 제어' })).toBeVisible()
+  await expect(page.getByText('커밋되지 않은 파일')).toBeVisible()
+  await expect(page.getByText('2개', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: /Projects\/Shared\/Featcher\/Project.swift$/ }).click()
+  await expect(page.locator('.source-diff')).toContainText('FeatcherTests')
+
+  await page.getByRole('button', { name: 'Projects/Shared/Featcher/Project.swift 스테이징' }).click()
+  await expect(page.getByRole('button', { name: 'Projects/Shared/Featcher/Project.swift 스테이징 해제' })).toBeVisible()
+
+  await page.getByLabel('커밋 메시지').fill('Featcher 테스트 타깃을 추가한다')
+  await page.getByRole('button', { name: 'staged 1개 커밋' }).click()
+
+  await expect(page.getByText('d4e5f6a 커밋을 만들었습니다.')).toBeVisible()
+  await expect(page.getByText('1개', { exact: true })).toBeVisible()
+  await expect(page.getByText('Projects/Shared/Featcher/Tests/FetcherTests.swift')).toBeVisible()
+  await expect(page).toHaveScreenshot('source-control.png', {
+    animations: 'disabled',
+    fullPage: true,
+    maxDiffPixelRatio: 0.01
+  })
+})
+
 test('distinguishes supported iOS runtime capabilities from planned access', async ({ page }) => {
   await page.goto('/?workspace=empty&contract=ios')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
@@ -404,7 +432,7 @@ test('explains and confirms applying an approved task to the original checkout',
   await expect(drawer.getByRole('button', { name: '원본에 적용' })).toBeVisible()
 
   page.once('dialog', async (dialog) => {
-    expect(dialog.message()).toContain('fast-forward 방식으로 적용합니다')
+    expect(dialog.message()).toContain('최신 변경을 반영하고 검증한 뒤 다시 승인을 요청합니다')
     await dialog.accept()
   })
   await drawer.getByRole('button', { name: '원본에 적용' }).click()

@@ -11,6 +11,10 @@ import type {
   EventRecord,
   GenerateRuntimeScenarioInput,
   RecommendVerificationPlanInput,
+  SourceControlCommitInput,
+  SourceControlDiffInput,
+  SourceControlIdentityInput,
+  SourceControlPathsInput,
   StorageCleanupInput,
   StoragePolicy,
   UpdateProjectInput
@@ -21,6 +25,8 @@ import { detectProjectSetupCommand } from './project-environment'
 import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
 import { resolveProjectRuntimeConfig } from './project-runtime-config'
 import { AgentRunner } from './runner'
+import { GitOperationCoordinator } from './git-operation-coordinator'
+import { SourceControlService } from './source-control'
 import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
 import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
@@ -102,9 +108,33 @@ const storageCleanupSchema = z.object({
   removeLocalBranches: z.boolean()
 })
 
+const sourceControlPathsSchema = z.object({
+  projectId: z.string().uuid(),
+  paths: z.array(z.string().min(1).max(4_096)).min(1).max(500)
+}).strict()
+
+const sourceControlDiffSchema = z.object({
+  projectId: z.string().uuid(),
+  path: z.string().min(1).max(4_096),
+  area: z.enum(['staged', 'working'])
+}).strict()
+
+const sourceControlCommitSchema = z.object({
+  projectId: z.string().uuid(),
+  message: z.string().trim().min(1).max(2_000),
+  includeWorking: z.boolean()
+}).strict()
+
+const sourceControlIdentitySchema = z.object({
+  projectId: z.string().uuid(),
+  name: z.string().trim().min(1).max(200),
+  email: z.string().trim().email().max(320)
+}).strict()
+
 let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
 let runner: AgentRunner | null = null
+let sourceControl: SourceControlService | null = null
 let codexAuth: CodexAuthManager | null = null
 let scenarioGenerator: RuntimeScenarioGenerator | null = null
 let verificationPlanRecommender: VerificationPlanRecommender | null = null
@@ -145,6 +175,11 @@ function requireRunner(): AgentRunner {
   return runner
 }
 
+function requireSourceControl(): SourceControlService {
+  if (!sourceControl) throw new Error('Source Control이 준비되지 않았습니다.')
+  return sourceControl
+}
+
 function requireCodexAuth(): CodexAuthManager {
   if (!codexAuth) throw new Error('Codex 인증 관리자가 준비되지 않았습니다.')
   return codexAuth
@@ -165,6 +200,7 @@ async function shutdownApplication(): Promise<void> {
   const activeCodexAuth = codexAuth
   const activeStore = store
   runner = null
+  sourceControl = null
   codexAuth = null
   scenarioGenerator = null
   verificationPlanRecommender = null
@@ -282,6 +318,58 @@ function registerIpc(): void {
     return inspectProject(project)
   })
 
+  ipcMain.handle('source-control:status', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().getStatus(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('source-control:diff', (_event, rawInput: SourceControlDiffInput) => {
+    const input = sourceControlDiffSchema.parse(rawInput)
+    return requireSourceControl().getDiff(
+      requireStore().getProject(input.projectId),
+      input.path,
+      input.area
+    )
+  })
+
+  ipcMain.handle('source-control:stage', (_event, rawInput: SourceControlPathsInput) => {
+    const input = sourceControlPathsSchema.parse(rawInput)
+    return requireSourceControl().stage(requireStore().getProject(input.projectId), input.paths)
+  })
+
+  ipcMain.handle('source-control:unstage', (_event, rawInput: SourceControlPathsInput) => {
+    const input = sourceControlPathsSchema.parse(rawInput)
+    return requireSourceControl().unstage(requireStore().getProject(input.projectId), input.paths)
+  })
+
+  ipcMain.handle('source-control:stage-all', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().stageAll(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('source-control:unstage-all', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().unstageAll(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('source-control:set-identity', (_event, rawInput: SourceControlIdentityInput) => {
+    const input = sourceControlIdentitySchema.parse(rawInput)
+    return requireSourceControl().setIdentity(
+      requireStore().getProject(input.projectId),
+      input.name,
+      input.email
+    )
+  })
+
+  ipcMain.handle('source-control:commit', (_event, rawInput: SourceControlCommitInput) => {
+    const input = sourceControlCommitSchema.parse(rawInput)
+    return requireSourceControl().commit(
+      requireStore().getProject(input.projectId),
+      input.message,
+      input.includeWorking
+    )
+  })
+
   ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     const project = requireStore().getProject(validProjectId)
@@ -386,7 +474,7 @@ function registerIpc(): void {
 
   ipcMain.handle('task:approve', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
-    await requireRunner().approve(taskId)
+    return requireRunner().approve(taskId)
   })
 
   ipcMain.handle('task:discard', async (_event, taskId: string) => {
@@ -453,7 +541,18 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   codexAuth = new CodexAuthManager(codexHome, publishAuth, codexCommand)
   scenarioGenerator = new RuntimeScenarioGenerator(codexCommand, codexHome)
   verificationPlanRecommender = new VerificationPlanRecommender(codexCommand, codexHome)
-  runner = new AgentRunner(store, join(userDataPath, 'worktrees'), publish, codexCommand, codexHome)
+  const gitCoordinator = new GitOperationCoordinator()
+  sourceControl = new SourceControlService(gitCoordinator)
+  runner = new AgentRunner(
+    store,
+    join(userDataPath, 'worktrees'),
+    publish,
+    codexCommand,
+    codexHome,
+    {},
+    undefined,
+    gitCoordinator
+  )
   registerIpc()
   await createWindow()
   void runner.reconcileStorage().catch((error) => console.error('저장 공간 시작 정리 실패', error))

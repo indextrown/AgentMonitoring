@@ -248,6 +248,78 @@ export interface ProjectInspection {
   inspectedAt: string
 }
 
+export type SourceControlArea = 'staged' | 'working'
+
+export interface SourceControlFile {
+  path: string
+  originalPath: string | null
+  staged: ProjectChangeKind | null
+  working: ProjectChangeKind | null
+  conflicted: boolean
+}
+
+export interface SourceControlIdentity {
+  name: string | null
+  email: string | null
+  complete: boolean
+}
+
+export interface SourceControlStatus {
+  projectId: string
+  branch: string | null
+  headCommit: string | null
+  identity: SourceControlIdentity
+  files: SourceControlFile[]
+  stagedCount: number
+  workingCount: number
+  conflictedCount: number
+  inspectedAt: string
+}
+
+export interface SourceControlDiff {
+  projectId: string
+  path: string
+  area: SourceControlArea
+  patch: string
+  available: boolean
+  binary: boolean
+  truncated: boolean
+}
+
+export interface SourceControlPathsInput {
+  projectId: string
+  paths: string[]
+}
+
+export interface SourceControlDiffInput {
+  projectId: string
+  path: string
+  area: SourceControlArea
+}
+
+export interface SourceControlCommitInput {
+  projectId: string
+  message: string
+  includeWorking: boolean
+}
+
+export interface SourceControlIdentityInput {
+  projectId: string
+  name: string
+  email: string
+}
+
+export interface SourceControlCommitResult {
+  commit: string
+  summary: string
+  status: SourceControlStatus
+}
+
+export interface TaskApprovalResult {
+  outcome: 'applied' | 'reverified'
+  message: string
+}
+
 export interface TaskRecord {
   id: string
   projectId: string
@@ -259,6 +331,8 @@ export interface TaskRecord {
   attempt: number
   branchName: string | null
   worktreePath: string | null
+  sourceBranch: string | null
+  baseCommit: string | null
   runtimeContract?: ApprovedRuntimeContract | null
   runtimeScenarioSummary?: string | null
   runtimeScenarioApprovedAt?: string | null
@@ -428,7 +502,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 4
+export const AGENT_MONITORING_BRIDGE_VERSION = 5
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -440,6 +514,14 @@ export interface AgentMonitoringBridge {
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
   inspectProject: (projectId: string) => Promise<ProjectInspection>
+  getSourceControlStatus: (projectId: string) => Promise<SourceControlStatus>
+  getSourceControlDiff: (input: SourceControlDiffInput) => Promise<SourceControlDiff>
+  stageSourceControlPaths: (input: SourceControlPathsInput) => Promise<SourceControlStatus>
+  unstageSourceControlPaths: (input: SourceControlPathsInput) => Promise<SourceControlStatus>
+  stageAllSourceControlChanges: (projectId: string) => Promise<SourceControlStatus>
+  unstageAllSourceControlChanges: (projectId: string) => Promise<SourceControlStatus>
+  setSourceControlIdentity: (input: SourceControlIdentityInput) => Promise<SourceControlStatus>
+  commitSourceControlChanges: (input: SourceControlCommitInput) => Promise<SourceControlCommitResult>
   autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
@@ -451,7 +533,7 @@ export interface AgentMonitoringBridge {
   runTask: (taskId: string) => Promise<void>
   retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
-  approveTask: (taskId: string) => Promise<void>
+  approveTask: (taskId: string) => Promise<TaskApprovalResult>
   discardTask: (taskId: string) => Promise<void>
   getStorageOverview: () => Promise<StorageOverview>
   setStoragePolicy: (policy: StoragePolicy) => Promise<StorageOverview>

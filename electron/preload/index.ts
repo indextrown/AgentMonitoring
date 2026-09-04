@@ -7,6 +7,10 @@ import type {
   EventRecord,
   GenerateRuntimeScenarioInput,
   RecommendVerificationPlanInput,
+  SourceControlCommitInput,
+  SourceControlDiffInput,
+  SourceControlIdentityInput,
+  SourceControlPathsInput,
   UpdateProjectInput
 } from '../../src/shared/types'
 
@@ -20,6 +24,16 @@ const bridge: AgentMonitoringBridge = {
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
   inspectProject: (projectId: string) => ipcRenderer.invoke('project:inspect', projectId),
+  getSourceControlStatus: (projectId: string) => ipcRenderer.invoke('source-control:status', projectId),
+  getSourceControlDiff: (input: SourceControlDiffInput) => ipcRenderer.invoke('source-control:diff', input),
+  stageSourceControlPaths: (input: SourceControlPathsInput) => ipcRenderer.invoke('source-control:stage', input),
+  unstageSourceControlPaths: (input: SourceControlPathsInput) => ipcRenderer.invoke('source-control:unstage', input),
+  stageAllSourceControlChanges: (projectId: string) => ipcRenderer.invoke('source-control:stage-all', projectId),
+  unstageAllSourceControlChanges: (projectId: string) => ipcRenderer.invoke('source-control:unstage-all', projectId),
+  setSourceControlIdentity: (input: SourceControlIdentityInput) =>
+    ipcRenderer.invoke('source-control:set-identity', input),
+  commitSourceControlChanges: (input: SourceControlCommitInput) =>
+    ipcRenderer.invoke('source-control:commit', input),
   autoConfigureProjectRuntime: (projectId: string) =>
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>

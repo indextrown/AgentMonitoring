@@ -66,6 +66,8 @@ describe('activity aggregation', () => {
         attempt: 1,
         branchName: null,
         worktreePath: null,
+        sourceBranch: null,
+        baseCommit: null,
         createdAt: created.toISOString(),
         updatedAt: new Date(created.getTime() + 60 * 60 * 1000).toISOString()
       }
