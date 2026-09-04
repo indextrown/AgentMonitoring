@@ -349,6 +349,7 @@ export interface TaskPublication {
   remoteBranch: string | null
   pullRequestUrl: string | null
   publishedCommit: string | null
+  mergeCommit: string | null
   message: string | null
   updatedAt: string | null
 }
@@ -366,6 +367,7 @@ export interface TaskRecord {
   worktreePath: string | null
   sourceBranch: string | null
   baseCommit: string | null
+  verificationBaseCommit: string | null
   publishStrategy?: PublishStrategy
   publication?: TaskPublication | null
   runtimeContract?: ApprovedRuntimeContract | null

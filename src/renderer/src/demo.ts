@@ -83,6 +83,7 @@ function buildSnapshot(): DashboardSnapshot {
       worktreePath: null,
       sourceBranch: null,
       baseCommit: null,
+      verificationBaseCommit: null,
       publishStrategy: 'pull-request' as const,
       publication: null,
       runtimeContract: null,
@@ -112,6 +113,30 @@ function buildSnapshot(): DashboardSnapshot {
         'failed',
         'Tuist 외부 의존성이 준비되지 않았습니다.'
       )
+    }
+  }
+  if (searchParams.get('publication') === 'local-sync') {
+    tasks[0] = {
+      ...tasks[0],
+      status: 'awaiting_approval',
+      branchName: `agentmonitor/demo-${tasks[0].id.slice(0, 6)}`,
+      worktreePath: `demo://worktrees/${tasks[0].id}`,
+      sourceBranch: 'main',
+      baseCommit: '1111111111111111111111111111111111111111',
+      verificationBaseCommit: '1111111111111111111111111111111111111111',
+      publishStrategy: 'direct',
+      publication: {
+        strategy: 'direct',
+        status: 'awaiting_local_sync',
+        remoteName: 'origin',
+        baseBranch: 'main',
+        remoteBranch: 'main',
+        pullRequestUrl: null,
+        publishedCommit: '2222222222222222222222222222222222222222',
+        mergeCommit: null,
+        message: '원격 origin/main 게시 완료 · 로컬 동기화 대기',
+        updatedAt: new Date().toISOString()
+      }
     }
   }
   const findings = Array.from({ length: 6 }, (_, index) => ({
@@ -760,6 +785,7 @@ export const demoBridge: AgentMonitoringBridge = {
       worktreePath: null,
       sourceBranch: null,
       baseCommit: null,
+      verificationBaseCommit: null,
       publishStrategy: input.publishStrategy,
       publication: null,
       runtimeContract: input.runtimeContract ?? null,
@@ -853,6 +879,7 @@ export const demoBridge: AgentMonitoringBridge = {
         remoteBranch: current.branchName,
         pullRequestUrl: 'https://github.com/example/AgentMonitoring/pull/42',
         publishedCommit: 'd4e5f6a7',
+        mergeCommit: null,
         message: 'PR을 만들었습니다. GitHub에서 병합한 뒤 상태를 확인하세요.',
         updatedAt: new Date().toISOString()
       }

@@ -43,6 +43,14 @@ describe('AppStore', () => {
       { version: 1, mode: 'project-tests', testDesign: 'swift-testing', runtimeSource: 'off' }
     )
     expect(task.status).toBe('queued')
+    store.setTaskWorkspace(
+      task.id,
+      'agentmonitor/test-task',
+      join(directory, 'worktrees', task.id),
+      'main',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    )
+    store.setTaskVerificationBaseCommit(task.id, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
 
     store.transitionTask(task.id, 'running', 1)
     store.transitionTask(task.id, 'awaiting_approval')
@@ -55,6 +63,7 @@ describe('AppStore', () => {
       remoteBranch: 'main',
       pullRequestUrl: null,
       publishedCommit: 'abcdef123456',
+      mergeCommit: 'cccccccccccccccccccccccccccccccccccccccc',
       message: '원격 게시 완료',
       updatedAt: new Date().toISOString()
     })
@@ -72,6 +81,8 @@ describe('AppStore', () => {
     expect(snapshot.tasks[0].status).toBe('completed')
     expect(snapshot.tasks[0]).toMatchObject({
       publishStrategy: 'direct',
+      baseCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      verificationBaseCommit: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       publication: { status: 'published', remoteName: 'origin', baseBranch: 'main' }
     })
     expect(snapshot.tasks[0].verificationPlan).toEqual({

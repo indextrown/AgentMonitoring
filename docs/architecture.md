@@ -180,6 +180,8 @@ Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porc
 원격 기준 브랜치가 작업 브랜치의 조상이 아님
   → 격리 worktree에서 작업 브랜치를 최신 원격 commit 위로 rebase
   → 충돌 시 `git rebase --abort`, 원본 미변경, 승인 대기 유지
+  → 최신 원격 commit을 작업의 검증 기준 commit으로 저장
+  → 변경 화면과 Reviewer가 `git diff <verification-base> --`로 작업 diff만 확인
   → 성공 시 선택한 프로젝트 테스트·Simulator 검증·Reviewer 재실행
   → 재검증 통과 후 사람의 두 번째 승인 대기
   → 두 번째 승인에서 게시 방식 실행
@@ -187,16 +189,19 @@ Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porc
 pull-request
   → 기존 `agentmonitor/*` 작업 브랜치를 origin에 push
   → GitHub CLI 인증으로 기준 브랜치 대상 PR 생성
+  → PR base·head branch와 head commit이 승인한 게시 기록과 같은지 확인
   → `awaiting_merge`에서 사람의 GitHub 병합 대기
+  → GitHub merge commit이 원격 기준 브랜치에 포함됐는지 확인
   → 병합 확인 뒤 `git fetch`와 `git merge --ff-only origin/<base>`로 로컬 동기화
 
 direct
   → 작업 브랜치 commit을 `refs/heads/<base>`에 일반 push
   → 원격이 바뀌거나 브랜치 보호 정책이 거절하면 중단
+  → 승인한 작업 commit이 원격 기준 브랜치에 포함됐는지 확인
   → 성공 뒤 `git fetch`와 `git merge --ff-only origin/<base>`로 로컬 동기화
 ```
 
-재검증이 실패하면 원격과 원본 checkout을 바꾸지 않는다. 작업 상태와 worktree를 유지해 사용자가 실패 단계를 확인하고 다시 검증하거나 폐기할 수 있게 한다. 검증 뒤 원격이 다시 바뀌면 일반 push가 non-fast-forward로 거절되므로 덮어쓰지 않는다. 강제 push, 강제 merge, reset, stash나 사용자 파일 덮어쓰기는 시도하지 않는다.
+재검증이 실패하면 원격과 원본 checkout을 바꾸지 않는다. 작업 상태와 worktree를 유지해 사용자가 실패 단계를 확인하고 다시 검증하거나 폐기할 수 있게 한다. 검증 뒤 원격이 다시 바뀌면 일반 push가 non-fast-forward로 거절되므로 덮어쓰지 않는다. PR head나 원격 기준 브랜치가 승인한 게시 기록과 다르면 완료와 worktree 정리를 중단한다. 원격 `fetch`·`push`와 GitHub CLI는 비대화형 환경과 제한 시간 안에서 실행하며, 오류 출력의 HTTPS 자격 증명과 알려진 토큰 형식을 저장하기 전에 마스킹한다. 강제 push, 강제 merge, reset, stash나 사용자 파일 덮어쓰기는 시도하지 않는다.
 
 성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. `blocked_environment`·`failed`·`stopped` 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
 
@@ -209,7 +214,7 @@ direct
 | 테이블 | 의미 |
 | --- | --- |
 | `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 기본 게시 방식, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
-| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·기준 commit, 작업별 게시 방식·원격 브랜치·PR URL·게시 상태, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
+| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·최초 및 최신 검증 기준 commit, 작업별 게시 방식·원격 브랜치·PR URL·게시 및 merge commit·게시 상태, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |

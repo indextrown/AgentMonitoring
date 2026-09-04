@@ -302,6 +302,10 @@ function statusTone(status: TaskStatus): string {
   return 'amber'
 }
 
+function isAwaitingLocalPublicationSync(task: TaskRecord): boolean {
+  return task.publication?.status === 'awaiting_local_sync'
+}
+
 export function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
   const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null)
@@ -1667,8 +1671,8 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <div className="row-actions">
               {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
-              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
-              {task.status === 'awaiting_merge' && <button title="PR 상태 확인" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
+              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {(task.status === 'awaiting_merge' || isAwaitingLocalPublicationSync(task)) && <button title={isAwaitingLocalPublicationSync(task) ? '로컬 동기화 다시 시도' : 'PR 상태 확인'} onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
             </div>
           </div>
         ))}
@@ -2799,6 +2803,7 @@ function TaskDrawer({
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
+  const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
     : runtimeReport
@@ -2976,9 +2981,10 @@ function TaskDrawer({
           {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
           {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'}</button></>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}
-          {task.status === 'awaiting_merge' && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
+          {task.status === 'awaiting_merge' && !awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
+          {awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />로컬 동기화 다시 시도</button>}
         </footer>
       </aside>
     </div>

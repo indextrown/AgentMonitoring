@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ProjectRecord } from '../../src/shared/types'
 import { GitOperationCoordinator } from '../../electron/main/git-operation-coordinator'
+import { redactProcessOutput } from '../../electron/main/process-output'
 import { parseSourceControlStatus, SourceControlService } from '../../electron/main/source-control'
 
 const execFileAsync = promisify(execFile)
@@ -65,6 +66,14 @@ describe('parseSourceControlStatus', () => {
   })
 })
 
+describe('redactProcessOutput', () => {
+  it('redacts GitHub and bearer tokens from process output', () => {
+    expect(redactProcessOutput(
+      'ghp_1234567890abcdefghijkl Bearer abcdefghijklmnopqrstuvwxyz'
+    )).toBe('[REDACTED] Bearer [REDACTED]')
+  })
+})
+
 describe('SourceControlService', () => {
   it('does not expose credentials embedded in an HTTPS remote URL', async () => {
     const { project, repository } = await createRepository()
@@ -72,6 +81,21 @@ describe('SourceControlService', () => {
     const service = new SourceControlService(new GitOperationCoordinator())
 
     expect((await service.getStatus(project)).remote?.url).toBe('https://[REDACTED]@github.com/example/private.git')
+  })
+
+  it('redacts credentials from a failed remote fetch error', async () => {
+    const { project, repository } = await createRepository()
+    await git(repository, ['remote', 'add', 'origin', 'https://secret-token@127.0.0.1:1/private.git'])
+    const service = new SourceControlService(new GitOperationCoordinator())
+
+    let message = ''
+    try {
+      await service.fetch(project)
+    } catch (error) {
+      message = String(error)
+    }
+    expect(message).toBeTruthy()
+    expect(message).not.toContain('secret-token')
   })
 
   it('serializes mutating Git operations for the same project', async () => {

@@ -68,6 +68,7 @@ describe('activity aggregation', () => {
         worktreePath: null,
         sourceBranch: null,
         baseCommit: null,
+        verificationBaseCommit: null,
         createdAt: created.toISOString(),
         updatedAt: new Date(created.getTime() + 60 * 60 * 1000).toISOString()
       }

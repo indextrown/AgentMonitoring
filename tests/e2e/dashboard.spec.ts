@@ -463,6 +463,19 @@ test('lets each task publish directly to the remote base branch', async ({ page 
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })
 
+test('retries only the local sync after the remote publication already succeeded', async ({ page }) => {
+  await page.goto('/?publication=local-sync')
+  await page.locator('.main-nav').getByRole('button', { name: /작업/ }).click()
+  await page.locator('.task-name').first().click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('원격 origin/main 게시 완료 · 로컬 동기화 대기')).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '로컬 동기화 다시 시도' })).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' })).toHaveCount(0)
+  await drawer.getByRole('button', { name: '로컬 동기화 다시 시도' }).click()
+  await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
+})
+
 test('removes monitoring data while preserving the source-repository boundary', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

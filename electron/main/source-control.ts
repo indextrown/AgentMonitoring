@@ -12,10 +12,12 @@ import type {
   SourceControlStatus
 } from '../../src/shared/types'
 import { GitOperationCoordinator } from './git-operation-coordinator'
+import { redactProcessOutput } from './process-output'
 
 const execFileAsync = promisify(execFile)
 const MAX_GIT_OUTPUT_BYTES = 8_000_000
 const MAX_DIFF_LENGTH = 120_000
+const REMOTE_GIT_TIMEOUT_MS = 2 * 60_000
 const CONFLICT_CODES = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
 
 interface GitResult {
@@ -26,12 +28,19 @@ interface GitResult {
 async function runGit(
   projectPath: string,
   args: string[],
-  acceptedExitCodes: number[] = [0]
+  acceptedExitCodes: number[] = [0],
+  timeoutMs?: number
 ): Promise<GitResult> {
   try {
     const result = await execFileAsync('git', ['-C', projectPath, ...args], {
       encoding: 'utf8',
-      maxBuffer: MAX_GIT_OUTPUT_BYTES
+      maxBuffer: MAX_GIT_OUTPUT_BYTES,
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GCM_INTERACTIVE: 'Never'
+      }
     })
     return { stdout: result.stdout, stderr: result.stderr }
   } catch (error) {
@@ -39,14 +48,18 @@ async function runGit(
       code?: number | string
       stdout?: string
       stderr?: string
+      killed?: boolean
     }
     if (typeof failure.code === 'number' && acceptedExitCodes.includes(failure.code)) {
       return { stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' }
     }
-    const detail = [failure.stdout, failure.stderr]
+    if (failure.killed && timeoutMs) {
+      throw new Error(`원격 Git 명령 제한 시간 초과 (${Math.ceil(timeoutMs / 1_000)}초)`)
+    }
+    const detail = redactProcessOutput([failure.stdout, failure.stderr]
       .filter(Boolean)
       .join('\n')
-      .trim()
+      .trim())
       .slice(-4_000)
     throw new Error(detail || `Git 명령을 실행할 수 없습니다: git ${args[0] ?? ''}`)
   }
@@ -119,7 +132,7 @@ function identityFromValues(name: string, email: string): SourceControlIdentity 
 }
 
 function redactRemoteUrl(remoteUrl: string): string {
-  return remoteUrl.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[REDACTED]@')
+  return redactProcessOutput(remoteUrl)
 }
 
 export class SourceControlService {
@@ -178,7 +191,7 @@ export class SourceControlService {
       this.assertRealProject(project)
       const remote = await runGit(project.path, ['remote', 'get-url', 'origin'], [0, 2])
       if (!remote.stdout.trim()) throw new Error('origin 원격 저장소가 설정되지 않았습니다.')
-      await runGit(project.path, ['fetch', 'origin', '--prune'])
+      await runGit(project.path, ['fetch', 'origin', '--prune'], [0], REMOTE_GIT_TIMEOUT_MS)
       return this.getStatus(project)
     })
   }
