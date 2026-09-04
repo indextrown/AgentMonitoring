@@ -2506,6 +2506,117 @@ kbd {
   margin-top: 14px;
 }
 
+.runtime-environment-settings {
+  display: grid;
+  gap: 14px;
+}
+
+.runtime-environment-list {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-environment-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(7, 10, 12, 0.35);
+}
+
+.runtime-environment-item > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.runtime-environment-item code,
+.runtime-environment-item small {
+  color: var(--muted);
+}
+
+.runtime-environment-item > span {
+  color: var(--red);
+  font-size: 11px;
+}
+
+.runtime-environment-item > span.configured {
+  color: var(--green);
+}
+
+.runtime-environment-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.runtime-environment-form > .secondary-button {
+  align-self: end;
+  min-height: 38px;
+}
+
+.scenario-case-list,
+.scenario-case {
+  display: grid;
+  gap: 12px;
+}
+
+.scenario-case {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(7, 10, 12, 0.28);
+}
+
+.scenario-case > header {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.scenario-case > header span,
+.scenario-case > header code,
+.scenario-environment-requirements code {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scenario-checkpoint {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--blue) 55%, transparent);
+}
+
+.scenario-environment-requirements {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scenario-environment-requirements > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.scenario-environment-requirements > span.ready {
+  color: var(--green);
+}
+
+.scenario-environment-requirements > span.missing {
+  color: var(--red);
+}
+
 .text-button {
   padding: 5px 7px;
   color: #7997b2;

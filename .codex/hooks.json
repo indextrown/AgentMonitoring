@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/sync_tech_specs.py\" --root \"$(git rev-parse --show-toplevel)\" --hook",
+            "timeout": 30,
+            "statusMessage": "테크 스펙 HTML을 동기화하는 중"
+          }
+        ],
+        "matcher": "apply_patch|Edit|Write"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/sync_tech_specs.py\" --root \"$(git rev-parse --show-toplevel)\" --hook",
+            "timeout": 30,
+            "statusMessage": "테크 스펙 HTML을 동기화하는 중"
+          }
+        ]
+      }
+    ]
+  }
+}

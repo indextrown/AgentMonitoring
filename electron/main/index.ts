@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
 import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
@@ -11,6 +11,7 @@ import type {
   EventRecord,
   GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
+  DeleteProjectRuntimeEnvironmentInput,
   ProjectSimulatorSession,
   RecommendVerificationPlanInput,
   RefineTechSpecInput,
@@ -20,12 +21,14 @@ import type {
   SourceControlPathsInput,
   StorageCleanupInput,
   StoragePolicy,
+  UpsertProjectRuntimeEnvironmentInput,
   UpdateProjectInput
 } from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
 import { detectProjectSetupCommand } from './project-environment'
-import { iosRuntimeAdapterSchema, projectCapabilityManifestSchema } from './project-capabilities'
+import { iosRuntimeAdapterSchema } from './project-capabilities'
+import { taskRuntimeContractSchema } from './runtime-contract'
 import {
   discoverProjectRuntimeConfig,
   resolveProjectRuntimeConfig
@@ -40,6 +43,7 @@ import { RuntimeScenarioGenerator } from './runtime-scenario-generator'
 import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
+import { ProjectRuntimeEnvironmentService } from './runtime-environment'
 
 const execFileAsync = promisify(execFile)
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
@@ -64,7 +68,7 @@ const createTaskSchema = z.object({
   title: z.string().trim().min(2).max(120),
   prompt: z.string().trim().min(10).max(20_000),
   maxAttempts: z.number().int().min(1).max(5),
-  runtimeContract: projectCapabilityManifestSchema.nullable().optional(),
+  runtimeContract: taskRuntimeContractSchema.nullable().optional(),
   runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
   techSpec: techSpecDraftSchema.nullable().optional(),
   verificationPlan: verificationPlanSchema,
@@ -94,6 +98,22 @@ const updateProjectSchema = z.object({
   runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional(),
   publishStrategy: z.enum(['pull-request', 'direct']).optional()
 })
+
+const upsertProjectRuntimeEnvironmentSchema = z.object({
+  projectId: z.string().uuid(),
+  id: z.string().uuid().optional(),
+  key: z.string().trim().min(1).max(80),
+  label: z.string().trim().min(1).max(120),
+  scope: z.enum(['build', 'launch', 'both']),
+  buildSetting: z.string().trim().max(128).nullable().optional(),
+  launchVariable: z.string().trim().max(128).nullable().optional(),
+  value: z.string().max(10_000).optional()
+}).strict()
+
+const deleteProjectRuntimeEnvironmentSchema = z.object({
+  projectId: z.string().uuid(),
+  id: z.string().uuid()
+}).strict()
 
 const generateRuntimeScenarioSchema = z.object({
   projectId: z.string().uuid(),
@@ -165,6 +185,7 @@ const externalUrlSchema = z.string().url().refine((url) => url.startsWith('https
 
 let mainWindow: BrowserWindow | null = null
 let store: AppStore | null = null
+let runtimeEnvironment: ProjectRuntimeEnvironmentService | null = null
 let runner: AgentRunner | null = null
 let sourceControl: SourceControlService | null = null
 let projectSimulator: ProjectSimulatorService | null = null
@@ -208,6 +229,11 @@ function publishProjectSimulator(session: ProjectSimulatorSession): void {
 function requireStore(): AppStore {
   if (!store) throw new Error('데이터베이스가 준비되지 않았습니다.')
   return store
+}
+
+function requireRuntimeEnvironment(): ProjectRuntimeEnvironmentService {
+  if (!runtimeEnvironment) throw new Error('프로젝트 실행 환경 저장소가 준비되지 않았습니다.')
+  return runtimeEnvironment
 }
 
 function requireRunner(): AgentRunner {
@@ -257,6 +283,7 @@ async function shutdownApplication(): Promise<void> {
   scenarioGenerator = null
   verificationPlanRecommender = null
   techSpecGenerator = null
+  runtimeEnvironment = null
 
   try {
     await shutdownResources({
@@ -354,6 +381,21 @@ function registerIpc(): void {
   ipcMain.handle('project:update', (_event, rawInput: UpdateProjectInput) => {
     const input = updateProjectSchema.parse(rawInput)
     return requireStore().updateProject(input)
+  })
+
+  ipcMain.handle('project-runtime-environment:list', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireRuntimeEnvironment().list(validProjectId)
+  })
+
+  ipcMain.handle('project-runtime-environment:upsert', (_event, rawInput: UpsertProjectRuntimeEnvironmentInput) => {
+    const input = upsertProjectRuntimeEnvironmentSchema.parse(rawInput)
+    return requireRuntimeEnvironment().upsert(input)
+  })
+
+  ipcMain.handle('project-runtime-environment:delete', (_event, rawInput: DeleteProjectRuntimeEnvironmentInput) => {
+    const input = deleteProjectRuntimeEnvironmentSchema.parse(rawInput)
+    return requireRuntimeEnvironment().delete(input.projectId, input.id)
   })
 
   ipcMain.handle('project:inspect', async (_event, projectId: string) => {
@@ -695,6 +737,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const codexCommand = await resolveCodexCommand()
   const githubCommand = await resolveGithubCommand()
   store = new AppStore(databasePath)
+  runtimeEnvironment = new ProjectRuntimeEnvironmentService(store, safeStorage)
   for (const project of store.listProjects()) {
     if (project.setupCommand) continue
     const setupCommand = await detectProjectSetupCommand(project.path)
@@ -721,7 +764,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     {},
     undefined,
     gitCoordinator,
-    githubCommand
+    githubCommand,
+    runtimeEnvironment
   )
   registerIpc()
   await createWindow()

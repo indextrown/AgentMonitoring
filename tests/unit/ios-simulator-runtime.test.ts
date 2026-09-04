@@ -6,6 +6,7 @@ import {
   launchIosSimulatorRuntime,
   parseAccessibilityObserverOutput,
   parseAvailableSimulatorDevices,
+  parseUiFailureObserverOutput,
   parseUiActionObserverOutput,
   type RuntimeUiAction,
   type RuntimeCommandRequest
@@ -75,6 +76,30 @@ function uiActionObserverOutput(
   ].join('\n')
 }
 
+function uiFailureObserverOutput(
+  bundleIdentifier = 'com.example.PopPang'
+): string {
+  const payload = {
+    schemaVersion: 1,
+    bundleIdentifier,
+    failedAt: '2026-09-03T00:00:00Z',
+    failure: {
+      index: 2,
+      kind: 'tap',
+      identifier: 'map-current-location-button',
+      completedActionCount: 2,
+      message: '요소를 찾지 못했습니다.'
+    },
+    completedActions: []
+  }
+  return [
+    'AGENTMONITOR_UI_FAILURE_BEGIN',
+    Buffer.from(JSON.stringify(payload)).toString('base64'),
+    'AGENTMONITOR_UI_FAILURE_END',
+    ''
+  ].join('\n')
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
@@ -91,6 +116,7 @@ describe('iOS Simulator runtime adapter', () => {
     await mkdir(appDataContainer)
 
     const commands: RuntimeCommandRequest[] = []
+    let runtimeXcconfigContent = ''
     const progress: string[] = []
     const progressUpdates: Array<Record<string, unknown>> = []
     const uiActions: RuntimeUiAction[] = [
@@ -130,6 +156,8 @@ describe('iOS Simulator runtime adapter', () => {
       }
       if (request.command === '/usr/bin/xcrun' && request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build') {
         const derivedDataPath = request.args[request.args.indexOf('-derivedDataPath') + 1]
+        const xcconfigIndex = request.args.indexOf('-xcconfig')
+        if (xcconfigIndex >= 0) runtimeXcconfigContent = await readFile(request.args[xcconfigIndex + 1], 'utf8')
         await mkdir(join(derivedDataPath, 'Build', 'Products', 'Debug-iphonesimulator', 'PopPang.app'), {
           recursive: true
         })
@@ -203,6 +231,8 @@ describe('iOS Simulator runtime adapter', () => {
         id: 'signed-in-home',
         payload: { accountID: 'fixture-user', selectedTab: 'home' }
       },
+      buildSettings: { MAPBOX_ACCESS_TOKEN: 'pk.local-secret' },
+      launchVariables: { UITEST_MAPBOX_ACCESS_TOKEN: 'pk.local-secret' },
       execute,
       wait: async () => {
         const requests = join(
@@ -340,6 +370,11 @@ describe('iOS Simulator runtime adapter', () => {
     expect(result.uiActionEvidence?.content).toContain('destination-search')
     expect(result.debugStateEvidence?.content).toContain('signed-in-home')
     expect(result.debugStateEvidence?.content).toContain('selectedTab')
+    expect(runtimeXcconfigContent).toContain('MAPBOX_ACCESS_TOKEN = "pk.local-secret"')
+    await expect(readFile(join(runtimeRoot, taskId, 'runtime-environment.xcconfig'), 'utf8')).rejects.toThrow()
+    expect(commands.find((request) => request.args.includes('launch'))?.environment).toMatchObject({
+      SIMCTL_CHILD_UITEST_MAPBOX_ACCESS_TOKEN: 'pk.local-secret'
+    })
     expect(commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         args: ['simctl', 'privacy', 'IPHONE-UDID', 'grant', 'location', 'com.example.PopPang']
@@ -568,5 +603,20 @@ describe('iOS Simulator runtime adapter', () => {
         [{ kind: 'tap', identifier: 'different-control', timeoutSeconds: 10 }]
       )
     ).toThrow('요청한 action 계약과 다릅니다')
+  })
+
+  it('extracts the exact failed UI action from observer output', () => {
+    expect(
+      parseUiFailureObserverOutput(
+        uiFailureObserverOutput(),
+        'com.example.PopPang'
+      )
+    ).toMatchObject({
+      failure: {
+        index: 2,
+        identifier: 'map-current-location-button',
+        completedActionCount: 2
+      }
+    })
   })
 })

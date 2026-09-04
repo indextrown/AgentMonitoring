@@ -31,18 +31,17 @@ describe('runtime scenario generation', () => {
     try {
       const payload = {
         summary: '저장 버튼을 누른 뒤 완료 화면을 확인합니다.',
-        permissions: [],
-        actions: [{
-          kind: 'tap',
-          identifier: 'save-profile',
-          text: null,
-          timeoutSeconds: 10
-        }],
-        assertions: [{
-          name: '완료 화면 표시',
-          identifier: 'profile-complete-screen',
-          property: 'exists',
-          expected: true
+        environmentRequirements: [],
+        cases: [{
+          id: 'save-profile-success',
+          name: '프로필 저장 성공',
+          permissions: [],
+          requiredEnvironmentKeys: [],
+          resetAppData: false,
+          steps: [
+            { kind: 'action', action: { kind: 'tap', identifier: 'save-profile', text: null, timeoutSeconds: 10 } },
+            { kind: 'assert', assertions: [{ name: '완료 화면 표시', identifier: 'profile-complete-screen', property: 'exists', expected: true }] }
+          ]
         }]
       }
       await writeFile(fakeCodex, [
@@ -63,14 +62,12 @@ describe('runtime scenario generation', () => {
       })
 
       expect(generated.summary).toBe(payload.summary)
-      expect(generated.contract.runtimeScenario.actions).toEqual([
-        { kind: 'tap', identifier: 'save-profile', timeoutSeconds: 10 }
-      ])
-      expect(generated.contract.runtimeScenario.assertions).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ identifier: 'profile-complete-screen', expected: true })
-        ])
-      )
+      expect(generated.contract.version).toBe(2)
+      if (generated.contract.version !== 2) throw new Error('version 2 계약이 필요합니다.')
+      expect(generated.contract.runtimeScenarios.cases[0].steps).toEqual(expect.arrayContaining([
+        { kind: 'action', action: { kind: 'tap', identifier: 'save-profile', timeoutSeconds: 10 } },
+        expect.objectContaining({ kind: 'assert' })
+      ]))
     } finally {
       await rm(root, { recursive: true, force: true })
     }

@@ -120,6 +120,20 @@ export interface RuntimePrivacyPermission {
 
 export type RuntimeAcceptanceAssertion =
   | {
+      kind: 'state'
+      name?: string
+      path: Array<string | number>
+      operator: 'exists'
+      expected: boolean
+    }
+  | {
+      kind: 'state'
+      name?: string
+      path: Array<string | number>
+      operator: 'equals' | 'not-equals'
+      expected: unknown
+    }
+  | {
       kind: 'accessibility'
       name?: string
       identifier: string
@@ -143,7 +157,7 @@ export type RuntimeAcceptanceAssertion =
   | {
       kind: 'evidence'
       name?: string
-      target: 'screen' | 'accessibility' | 'ui-actions'
+      target: 'screen' | 'accessibility' | 'state' | 'ui-actions' | 'fixture'
     }
 
 export interface TaskRuntimeScenario {
@@ -152,7 +166,7 @@ export interface TaskRuntimeScenario {
   assertions: RuntimeAcceptanceAssertion[]
 }
 
-export interface ApprovedRuntimeContract {
+export interface ApprovedRuntimeContractV1 {
   version: 1
   adapter: IosRuntimeAdapterConfig
   capabilities: {
@@ -163,6 +177,77 @@ export interface ApprovedRuntimeContract {
     verify: Array<'test-command' | 'runtime-scenario'>
   }
   runtimeScenario: TaskRuntimeScenario
+}
+
+export interface RuntimeEnvironmentRequirement {
+  key: string
+  label: string
+  required: boolean
+}
+
+export interface RuntimeScenarioPreconditions {
+  permissions?: RuntimePrivacyPermission[]
+  requiredEnvironmentKeys?: string[]
+  resetAppData?: boolean
+}
+
+export type RuntimeScenarioStep =
+  | {
+      kind: 'action'
+      action: RuntimeUiAction
+    }
+  | {
+      kind: 'assert'
+      assertions: RuntimeAcceptanceAssertion[]
+    }
+
+export interface RuntimeScenarioCase {
+  id: string
+  name: string
+  preconditions: RuntimeScenarioPreconditions
+  steps: RuntimeScenarioStep[]
+}
+
+export interface ApprovedRuntimeContractV2 {
+  version: 2
+  adapter: IosRuntimeAdapterConfig
+  capabilities: ApprovedRuntimeContractV1['capabilities']
+  environmentRequirements: RuntimeEnvironmentRequirement[]
+  runtimeScenarios: {
+    cases: RuntimeScenarioCase[]
+  }
+}
+
+export type ApprovedRuntimeContract = ApprovedRuntimeContractV1 | ApprovedRuntimeContractV2
+
+export type RuntimeEnvironmentScope = 'build' | 'launch' | 'both'
+
+export interface ProjectRuntimeEnvironmentEntry {
+  id: string
+  projectId: string
+  key: string
+  label: string
+  scope: RuntimeEnvironmentScope
+  buildSetting: string | null
+  launchVariable: string | null
+  configured: boolean
+  updatedAt: string
+}
+
+export interface UpsertProjectRuntimeEnvironmentInput {
+  projectId: string
+  id?: string
+  key: string
+  label: string
+  scope: RuntimeEnvironmentScope
+  buildSetting?: string | null
+  launchVariable?: string | null
+  value?: string
+}
+
+export interface DeleteProjectRuntimeEnvironmentInput {
+  projectId: string
+  id: string
 }
 
 export interface GeneratedRuntimeScenario {
@@ -636,7 +721,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 10
+export const AGENT_MONITORING_BRIDGE_VERSION = 11
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -647,6 +732,13 @@ export interface AgentMonitoringBridge {
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
+  listProjectRuntimeEnvironment: (projectId: string) => Promise<ProjectRuntimeEnvironmentEntry[]>
+  upsertProjectRuntimeEnvironment: (
+    input: UpsertProjectRuntimeEnvironmentInput
+  ) => Promise<ProjectRuntimeEnvironmentEntry[]>
+  deleteProjectRuntimeEnvironment: (
+    input: DeleteProjectRuntimeEnvironmentInput
+  ) => Promise<ProjectRuntimeEnvironmentEntry[]>
   inspectProject: (projectId: string) => Promise<ProjectInspection>
   getSourceControlStatus: (projectId: string) => Promise<SourceControlStatus>
   getSourceControlDiff: (input: SourceControlDiffInput) => Promise<SourceControlDiff>

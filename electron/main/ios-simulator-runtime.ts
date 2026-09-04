@@ -21,6 +21,7 @@ export interface RuntimeCommandRequest {
   cwd: string
   label: string
   timeoutMs: number
+  environment?: NodeJS.ProcessEnv
 }
 
 export interface RuntimeCommandResult {
@@ -51,6 +52,9 @@ export interface IosSimulatorLaunchInput {
   uiActions: RuntimeUiAction[]
   debugBridge: RuntimeDebugBridgeContract | null
   debugFixture: RuntimeDebugFixture | null
+  buildSettings?: Record<string, string>
+  launchVariables?: Record<string, string>
+  resetAppData?: boolean
   accessibilityObserverTemplateRoot?: string
   execute: RuntimeCommandExecutor
   wait?: (milliseconds: number) => Promise<void>
@@ -160,6 +164,8 @@ const ACCESSIBILITY_BEGIN_MARKER = 'AGENTMONITOR_ACCESSIBILITY_BEGIN'
 const ACCESSIBILITY_END_MARKER = 'AGENTMONITOR_ACCESSIBILITY_END'
 const UI_ACTIONS_BEGIN_MARKER = 'AGENTMONITOR_UI_ACTIONS_BEGIN'
 const UI_ACTIONS_END_MARKER = 'AGENTMONITOR_UI_ACTIONS_END'
+const UI_FAILURE_BEGIN_MARKER = 'AGENTMONITOR_UI_FAILURE_BEGIN'
+const UI_FAILURE_END_MARKER = 'AGENTMONITOR_UI_FAILURE_END'
 const ACCESSIBILITY_OBSERVER_NAME = 'AgentMonitoringAccessibility'
 const ACCESSIBILITY_OBSERVER_TARGET_ID = 'AA0000000000000000000001'
 
@@ -199,6 +205,20 @@ export interface RuntimeUiActionPayload {
   executedAt: string
   actionCount: number
   results: RuntimeUiActionResult[]
+}
+
+export interface RuntimeUiFailurePayload {
+  schemaVersion: 1
+  bundleIdentifier: string
+  failedAt: string
+  failure: {
+    index: number
+    kind: RuntimeUiAction['kind']
+    identifier: string
+    completedActionCount: number
+    message: string
+  }
+  completedActions: RuntimeUiActionResult[]
 }
 
 const boundedAccessibilityString = z.string().max(2_000)
@@ -257,14 +277,47 @@ const runtimeUiActionPayloadSchema = z
       .max(20)
   })
   .strict()
+const runtimeUiFailurePayloadSchema = z.object({
+  schemaVersion: z.literal(1),
+  bundleIdentifier: z.string().min(1).max(512),
+  failedAt: z.string().datetime({ offset: true }),
+  failure: z.object({
+    index: z.number().int().min(0).max(19),
+    kind: z.enum(['tap', 'type-text']),
+    identifier: z.string().min(1).max(256),
+    completedActionCount: z.number().int().min(0).max(20),
+    message: z.string().min(1).max(1_000)
+  }).strict(),
+  completedActions: z.array(z.object({
+    index: z.number().int().min(0).max(19),
+    kind: z.enum(['tap', 'type-text']),
+    identifier: z.string().min(1).max(256),
+    durationMilliseconds: z.number().finite().min(0).max(5 * 60_000)
+  }).strict()).max(20)
+}).strict()
 
 export class IosRuntimeStageError extends Error {
   constructor(
     readonly status: RuntimeSessionStatus,
-    message: string
+    message: string,
+    readonly failureEvidence: Partial<Pick<IosSimulatorLaunchResult, 'screenEvidence' | 'accessibilityEvidence' | 'uiActionEvidence'>> | null = null
   ) {
     super(message)
   }
+}
+
+function redactSensitiveValues(source: string, values: string[]): string {
+  return values
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+    .reduce((result, value) => result.split(value).join('[REDACTED]'), source)
+}
+
+function xcconfigValue(value: string): string {
+  if (/\r|\n|\u0000/.test(value)) {
+    throw new IosRuntimeStageError('preparing', '실행 환경값에는 줄바꿈이나 NUL 문자를 사용할 수 없습니다.')
+  }
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$')}"`
 }
 
 function parseJson(source: string, label: string): unknown {
@@ -386,6 +439,25 @@ export function parseUiActionObserverOutput(
     })
   ) {
     throw new IosRuntimeStageError('acting', 'UI 조작 결과가 요청한 action 계약과 다릅니다.')
+  }
+  return payload
+}
+
+export function parseUiFailureObserverOutput(
+  source: string,
+  expectedBundleIdentifier: string
+): RuntimeUiFailurePayload {
+  const decoded = decodeObserverPayload(
+    source,
+    UI_FAILURE_BEGIN_MARKER,
+    UI_FAILURE_END_MARKER,
+    'UI 조작 실패 결과',
+    MAX_UI_ACTION_JSON_BYTES,
+    'acting'
+  )
+  const payload = runtimeUiFailurePayloadSchema.parse(decoded)
+  if (payload.bundleIdentifier !== expectedBundleIdentifier) {
+    throw new IosRuntimeStageError('acting', 'UI 조작 실패 결과의 bundle identifier가 실행한 앱과 다릅니다.')
   }
   return payload
 }
@@ -658,6 +730,18 @@ async function writeRuntimeJsonEvidence(
 export async function launchIosSimulatorRuntime(
   input: IosSimulatorLaunchInput
 ): Promise<IosSimulatorLaunchResult> {
+  const sensitiveValues = [
+    ...Object.values(input.buildSettings ?? {}),
+    ...Object.values(input.launchVariables ?? {})
+  ]
+  const execute: RuntimeCommandExecutor = async (request) => {
+    const result = await input.execute(request)
+    return {
+      ...result,
+      output: redactSensitiveValues(result.output, sensitiveValues),
+      stdout: redactSensitiveValues(result.stdout, sensitiveValues)
+    }
+  }
   const deviceFamilyLabel = input.contract.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
   input.onProgress(
     'preparing',
@@ -685,7 +769,7 @@ export async function launchIosSimulatorRuntime(
   )
 
   const deviceList = await executeRequired(
-    input.execute,
+    execute,
     {
       command: XCRUN_COMMAND,
       args: ['simctl', 'list', 'devices', 'available', '--json'],
@@ -709,7 +793,7 @@ export async function launchIosSimulatorRuntime(
     { deviceId: device.udid, deviceName: device.name }
   )
   await executeRequired(
-    input.execute,
+    execute,
     {
       command: XCRUN_COMMAND,
       args: ['simctl', 'bootstatus', device.udid, '-b'],
@@ -720,7 +804,7 @@ export async function launchIosSimulatorRuntime(
     'booting'
   )
   await executeRequired(
-    input.execute,
+    execute,
     {
       command: '/usr/bin/open',
       args: ['-a', 'Simulator', '--args', '-CurrentDeviceUDID', device.udid],
@@ -731,6 +815,15 @@ export async function launchIosSimulatorRuntime(
     'booting'
   )
 
+  const runtimeXcconfigPath = resolve(resolvedSessionRoot, 'runtime-environment.xcconfig')
+  const buildSettingEntries = Object.entries(input.buildSettings ?? {})
+  if (buildSettingEntries.length > 0) {
+    await writeFile(
+      runtimeXcconfigPath,
+      `${buildSettingEntries.map(([key, value]) => `${key} = ${xcconfigValue(value)}`).join('\n')}\n`,
+      { encoding: 'utf8', mode: 0o600 }
+    )
+  }
   const commonXcodeArguments = [
     ...xcodeContainerArguments(containerPath),
     '-scheme',
@@ -742,35 +835,41 @@ export async function launchIosSimulatorRuntime(
     '-destination',
     `id=${device.udid}`,
     '-derivedDataPath',
-    derivedDataPath
+    derivedDataPath,
+    ...(buildSettingEntries.length > 0 ? ['-xcconfig', runtimeXcconfigPath] : [])
   ]
 
   input.onProgress(
     'building',
     `${input.contract.scheme} ${input.contract.configuration} 앱을 격리 worktree에서 빌드하고 있습니다.`
   )
-  await executeRequired(
-    input.execute,
-    {
-      command: XCRUN_COMMAND,
-      args: ['xcodebuild', ...commonXcodeArguments, 'build'],
-      cwd: worktreePath,
-      label: 'Swift 앱 빌드',
-      timeoutMs: RUNTIME_TIMEOUTS.build
-    },
-    'building'
-  )
-  const buildSettings = await executeRequired(
-    input.execute,
-    {
-      command: XCRUN_COMMAND,
-      args: ['xcodebuild', ...commonXcodeArguments, '-showBuildSettings', '-json'],
-      cwd: worktreePath,
-      label: '앱 산출물 설정 확인',
-      timeoutMs: RUNTIME_TIMEOUTS.inspect
-    },
-    'building'
-  )
+  let buildSettings: RuntimeCommandResult
+  try {
+    await executeRequired(
+      execute,
+      {
+        command: XCRUN_COMMAND,
+        args: ['xcodebuild', ...commonXcodeArguments, 'build'],
+        cwd: worktreePath,
+        label: 'Swift 앱 빌드',
+        timeoutMs: RUNTIME_TIMEOUTS.build
+      },
+      'building'
+    )
+    buildSettings = await executeRequired(
+      execute,
+      {
+        command: XCRUN_COMMAND,
+        args: ['xcodebuild', ...commonXcodeArguments, '-showBuildSettings', '-json'],
+        cwd: worktreePath,
+        label: '앱 산출물 설정 확인',
+        timeoutMs: RUNTIME_TIMEOUTS.inspect
+      },
+      'building'
+    )
+  } finally {
+    await rm(runtimeXcconfigPath, { force: true })
+  }
   const product = parseXcodeAppProduct(buildSettings.stdout)
   const appPath = await requireContainedDirectory(
     derivedDataPath,
@@ -783,8 +882,17 @@ export async function launchIosSimulatorRuntime(
     `${device.name}에 ${product.wrapperName}을 설치하고 있습니다.`,
     { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
   )
+  if (input.resetAppData) {
+    await execute({
+      command: XCRUN_COMMAND,
+      args: ['simctl', 'uninstall', device.udid, product.bundleIdentifier],
+      cwd: worktreePath,
+      label: 'Simulator 앱 데이터 초기화',
+      timeoutMs: RUNTIME_TIMEOUTS.install
+    })
+  }
   await executeRequired(
-    input.execute,
+    execute,
     {
       command: XCRUN_COMMAND,
       args: ['simctl', 'install', device.udid, appPath],
@@ -808,7 +916,7 @@ export async function launchIosSimulatorRuntime(
           ? 'revoke'
           : 'reset'
       await executeRequired(
-        input.execute,
+        execute,
         {
           command: XCRUN_COMMAND,
           args: [
@@ -834,7 +942,7 @@ export async function launchIosSimulatorRuntime(
     { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
   )
   const launchResult = await executeRequired(
-    input.execute,
+    execute,
     {
       command: XCRUN_COMMAND,
       args: [
@@ -846,7 +954,13 @@ export async function launchIosSimulatorRuntime(
       ],
       cwd: worktreePath,
       label: 'Simulator 앱 실행',
-      timeoutMs: RUNTIME_TIMEOUTS.launch
+      timeoutMs: RUNTIME_TIMEOUTS.launch,
+      environment: {
+        ...process.env,
+        ...Object.fromEntries(
+          Object.entries(input.launchVariables ?? {}).map(([key, value]) => [`SIMCTL_CHILD_${key}`, value])
+        )
+      }
     },
     'launching'
   )
@@ -866,7 +980,7 @@ export async function launchIosSimulatorRuntime(
         fixture: input.debugFixture,
         captureState: false,
         timeoutSeconds: input.debugBridge.responseTimeoutSeconds,
-        execute: input.execute,
+        execute,
         wait: input.wait
       })
     } catch (error) {
@@ -898,9 +1012,7 @@ export async function launchIosSimulatorRuntime(
       input.uiActions,
       input.accessibilityObserverTemplateRoot
     )
-    const observerResult = await executeRequired(
-      input.execute,
-      {
+    const observerRequest: RuntimeCommandRequest = {
         command: XCRUN_COMMAND,
         args: [
           'xcodebuild',
@@ -924,10 +1036,87 @@ export async function launchIosSimulatorRuntime(
           ? 'Simulator identifier UI 조작'
           : 'Simulator 접근성 트리 수집',
         timeoutMs: RUNTIME_TIMEOUTS.accessibility
-      },
-      automationStatus
-    )
+      }
+    const observerResult = await execute(observerRequest)
     const observerOutput = observerResult.stdout || observerResult.output
+    if (observerResult.code !== 0) {
+      const failureEvidence: Partial<Pick<IosSimulatorLaunchResult, 'screenEvidence' | 'accessibilityEvidence' | 'uiActionEvidence'>> = {}
+      let failureMessage: string | null = null
+      try {
+        const failure = parseUiFailureObserverOutput(observerOutput, product.bundleIdentifier)
+        failureMessage = failure.failure.message
+        const actionEvidence = await writeRuntimeJsonEvidence(
+          resolvedSessionRoot,
+          'ui-actions-failed',
+          failure,
+          MAX_UI_ACTION_EVIDENCE_BYTES,
+          'acting',
+          '실패한 UI 조작 증거'
+        )
+        failureEvidence.uiActionEvidence = {
+          path: actionEvidence.path,
+          mimeType: 'application/json',
+          sizeBytes: actionEvidence.sizeBytes,
+          executedAt: failure.failedAt,
+          actionCount: failure.failure.completedActionCount,
+          content: actionEvidence.content
+        }
+      } catch {
+        // XCTest가 기계 판독 marker를 남기지 못해도 나머지 실패 증거를 계속 수집합니다.
+      }
+      try {
+        const accessibility = parseAccessibilityObserverOutput(observerOutput, product.bundleIdentifier)
+        const treeEvidence = await writeRuntimeJsonEvidence(
+          resolvedSessionRoot,
+          'accessibility-failed',
+          accessibility,
+          MAX_ACCESSIBILITY_EVIDENCE_BYTES,
+          'observing',
+          '실패 시점 접근성 증거'
+        )
+        failureEvidence.accessibilityEvidence = {
+          path: treeEvidence.path,
+          mimeType: 'application/json',
+          sizeBytes: treeEvidence.sizeBytes,
+          capturedAt: accessibility.capturedAt,
+          nodeCount: accessibility.nodeCount,
+          truncated: accessibility.truncated,
+          content: treeEvidence.content
+        }
+      } catch {
+        // 접근성 트리가 손상돼도 Simulator 화면 캡처를 시도합니다.
+      }
+      try {
+        await mkdir(resolve(resolvedSessionRoot, 'evidence'), { recursive: true })
+        const evidenceRoot = await requireContainedDirectory(resolvedSessionRoot, 'evidence', 'runtime evidence')
+        const screenshotPath = resolve(evidenceRoot, `screen-failed-${randomUUID()}.png`)
+        const screenshotResult = await execute({
+          command: XCRUN_COMMAND,
+          args: ['simctl', 'io', device.udid, 'screenshot', '--type=png', screenshotPath],
+          cwd: worktreePath,
+          label: '실패 시점 Simulator 화면 캡처',
+          timeoutMs: RUNTIME_TIMEOUTS.observe
+        })
+        const screenshotStats = screenshotResult.code === 0 ? await lstat(screenshotPath).catch(() => null) : null
+        if (screenshotStats?.isFile() && !screenshotStats.isSymbolicLink() && screenshotStats.size > 0 && screenshotStats.size <= MAX_SCREENSHOT_BYTES) {
+          failureEvidence.screenEvidence = {
+            path: await realpath(screenshotPath),
+            mimeType: 'image/png',
+            sizeBytes: screenshotStats.size,
+            capturedAt: new Date().toISOString()
+          }
+        }
+      } catch {
+        // 화면 캡처 자체가 실패해도 원래 XCTest 오류와 이미 모은 증거는 보존합니다.
+      }
+      const detail = observerResult.output.trim().slice(-2_000)
+      const exactFailure = observerResult.output.match(/UI action\s+\d+: identifier '[^']+' (?:요소를 찾지 못했습니다\.|요소가 \d+개여서 조작을 중단했습니다\.)/)?.[0]
+      throw new IosRuntimeStageError(
+        automationStatus,
+        exactFailure ?? failureMessage ?? (detail ? `${observerRequest.label} 실패\n${detail}` : `${observerRequest.label} 실패`),
+        Object.keys(failureEvidence).length > 0 ? failureEvidence : null
+      )
+    }
     if (input.uiActions.length > 0) {
       const payload = parseUiActionObserverOutput(
         observerOutput,
@@ -991,7 +1180,7 @@ export async function launchIosSimulatorRuntime(
         fixture: null,
         captureState: true,
         timeoutSeconds: input.debugBridge.responseTimeoutSeconds,
-        execute: input.execute,
+        execute,
         wait: input.wait
       })
     } catch (error) {
@@ -1047,7 +1236,7 @@ export async function launchIosSimulatorRuntime(
     )
     const screenshotPath = resolve(evidenceRoot, `screen-${randomUUID()}.png`)
     await executeRequired(
-      input.execute,
+      execute,
       {
         command: XCRUN_COMMAND,
         args: ['simctl', 'io', device.udid, 'screenshot', '--type=png', screenshotPath],

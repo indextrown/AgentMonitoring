@@ -71,6 +71,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  ProjectRuntimeEnvironmentEntry,
   ProjectRuntimeDiscovery,
   ProjectSimulatorSession,
   PublishStrategy,
@@ -78,6 +79,7 @@ import type {
   RuntimeEvidenceRecord,
   RuntimeAcceptanceAssertion,
   RuntimePrivacyPermission,
+  RuntimeScenarioCase,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   RuntimeUiAction,
@@ -109,6 +111,9 @@ const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'autoConfigureProjectRuntime',
+  'listProjectRuntimeEnvironment',
+  'upsertProjectRuntimeEnvironment',
+  'deleteProjectRuntimeEnvironment',
   'generateTechSpec',
   'refineTechSpec',
   'recommendVerificationPlan',
@@ -2288,6 +2293,15 @@ function ProjectsPage({
   const [testCommand, setTestCommand] = useState(project.testCommand)
   const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
   const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
+  const [runtimeEnvironment, setRuntimeEnvironment] = useState<ProjectRuntimeEnvironmentEntry[]>([])
+  const [environmentKey, setEnvironmentKey] = useState('')
+  const [environmentLabel, setEnvironmentLabel] = useState('')
+  const [environmentScope, setEnvironmentScope] = useState<'build' | 'launch' | 'both'>('both')
+  const [buildSetting, setBuildSetting] = useState('')
+  const [launchVariable, setLaunchVariable] = useState('')
+  const [environmentValue, setEnvironmentValue] = useState('')
+  const [environmentBusy, setEnvironmentBusy] = useState(false)
+  const [environmentError, setEnvironmentError] = useState<string | null>(null)
   useEffect(() => {
     setName(project.name)
     setSetupCommand(project.setupCommand)
@@ -2295,6 +2309,39 @@ function ProjectsPage({
     setRuntimeAdapter(project.runtimeAdapter)
     setPublishStrategy(project.publishStrategy ?? 'pull-request')
   }, [project])
+  useEffect(() => {
+    let active = true
+    void bridge.listProjectRuntimeEnvironment(project.id)
+      .then((entries) => { if (active) setRuntimeEnvironment(entries) })
+      .catch((error) => { if (active) setEnvironmentError(String(error).replace(/^Error:\s*/, '')) })
+    return () => { active = false }
+  }, [project.id])
+
+  const saveRuntimeEnvironment = async (): Promise<void> => {
+    setEnvironmentBusy(true)
+    setEnvironmentError(null)
+    try {
+      const entries = await bridge.upsertProjectRuntimeEnvironment({
+        projectId: project.id,
+        key: environmentKey,
+        label: environmentLabel,
+        scope: environmentScope,
+        buildSetting: environmentScope === 'launch' ? null : buildSetting,
+        launchVariable: environmentScope === 'build' ? null : launchVariable,
+        value: environmentValue
+      })
+      setRuntimeEnvironment(entries)
+      setEnvironmentKey('')
+      setEnvironmentLabel('')
+      setBuildSetting('')
+      setLaunchVariable('')
+      setEnvironmentValue('')
+    } catch (error) {
+      setEnvironmentError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setEnvironmentBusy(false)
+    }
+  }
   useEffect(() => {
     if (
       runtimeDiscovery?.state !== 'selection-required' ||
@@ -2415,6 +2462,58 @@ function ProjectsPage({
               </label>
             </div>
           )}
+        </section>
+        <section className="runtime-settings runtime-environment-settings">
+          <div className="runtime-settings-heading">
+            <div>
+              <strong>Simulator 실행 환경</strong>
+              <small>토큰 같은 로컬 값을 암호화해 저장하고, 필요한 검증 케이스에만 주입합니다. 값은 다시 표시되지 않습니다.</small>
+            </div>
+          </div>
+          {runtimeEnvironment.length > 0 && (
+            <div className="runtime-environment-list">
+              {runtimeEnvironment.map((entry) => (
+                <div className="runtime-environment-item" key={entry.id}>
+                  <div>
+                    <strong>{entry.label}</strong>
+                    <code>{entry.key}</code>
+                    <small>
+                      {entry.buildSetting ? `빌드 ${entry.buildSetting}` : ''}
+                      {entry.buildSetting && entry.launchVariable ? ' · ' : ''}
+                      {entry.launchVariable ? `실행 ${entry.launchVariable}` : ''}
+                    </small>
+                  </div>
+                  <span className={entry.configured ? 'configured' : ''}>{entry.configured ? '값 저장됨' : '값 없음'}</span>
+                  <button
+                    className="text-button"
+                    type="button"
+                    disabled={environmentBusy}
+                    onClick={() => void bridge.deleteProjectRuntimeEnvironment({ projectId: project.id, id: entry.id }).then(setRuntimeEnvironment)}
+                  >삭제</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="runtime-environment-form">
+            <label><span>항목 key</span><input value={environmentKey} onChange={(event) => setEnvironmentKey(event.target.value)} placeholder="mapbox-public-token" /></label>
+            <label><span>표시 이름</span><input value={environmentLabel} onChange={(event) => setEnvironmentLabel(event.target.value)} placeholder="Mapbox 공개 토큰" /></label>
+            <label>
+              <span>적용 범위</span>
+              <select value={environmentScope} onChange={(event) => setEnvironmentScope(event.target.value as typeof environmentScope)}>
+                <option value="both">빌드 + 앱 실행</option>
+                <option value="build">Xcode 빌드만</option>
+                <option value="launch">앱 실행만</option>
+              </select>
+            </label>
+            {environmentScope !== 'launch' && <label><span>Build setting</span><input value={buildSetting} onChange={(event) => setBuildSetting(event.target.value)} placeholder="MAPBOX_ACCESS_TOKEN" /></label>}
+            {environmentScope !== 'build' && <label><span>앱 환경변수</span><input value={launchVariable} onChange={(event) => setLaunchVariable(event.target.value)} placeholder="UITEST_MAPBOX_ACCESS_TOKEN" /></label>}
+            <label><span>민감한 값</span><input type="password" autoComplete="off" value={environmentValue} onChange={(event) => setEnvironmentValue(event.target.value)} placeholder="저장 후 다시 표시되지 않음" /></label>
+            <button className="secondary-button" type="button" disabled={environmentBusy || !environmentKey.trim() || !environmentLabel.trim() || !environmentValue} onClick={() => void saveRuntimeEnvironment()}>
+              {environmentBusy ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}
+              환경값 저장
+            </button>
+          </div>
+          {environmentError && <p className="tech-spec-error" role="alert">{environmentError}</p>}
         </section>
         <button className="primary-button" type="submit">설정 저장</button>
       </form>
@@ -2743,6 +2842,7 @@ function TaskModal({
   const [generated, setGenerated] = useState<GeneratedRuntimeScenario | null>(null)
   const [generating, setGenerating] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
+  const [configuredEnvironmentKeys, setConfiguredEnvironmentKeys] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
   const usesTests = mode === 'project-tests' || mode === 'both'
   const usesRuntime = mode === 'simulator-runtime' || mode === 'both'
@@ -2758,6 +2858,13 @@ function TaskModal({
         openQuestions: techSpec.openQuestions
       }
     : null
+  useEffect(() => {
+    let active = true
+    void bridge.listProjectRuntimeEnvironment(project.id).then((entries) => {
+      if (active) setConfiguredEnvironmentKeys(new Set(entries.filter((entry) => entry.configured).map((entry) => entry.key)))
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [project.id])
 
   const invalidateDownstreamPlanning = (): void => {
     setGenerated(null)
@@ -2864,7 +2971,7 @@ function TaskModal({
     }
   }
   const updateAction = (index: number, action: RuntimeUiAction): void => {
-    if (!generated) return
+    if (!generated || generated.contract.version !== 1) return
     const actions = generated.contract.runtimeScenario.actions.map((current, actionIndex) => actionIndex === index ? action : current)
     setGenerated({
       ...generated,
@@ -2872,7 +2979,7 @@ function TaskModal({
     })
   }
   const updatePermission = (index: number, permission: RuntimePrivacyPermission): void => {
-    if (!generated) return
+    if (!generated || generated.contract.version !== 1) return
     const permissions = (generated.contract.runtimeScenario.permissions ?? []).map(
       (current, permissionIndex) => permissionIndex === index ? permission : current
     )
@@ -2885,13 +2992,25 @@ function TaskModal({
     })
   }
   const updateAssertion = (index: number, assertion: RuntimeAcceptanceAssertion): void => {
-    if (!generated) return
+    if (!generated || generated.contract.version !== 1) return
     const assertions = generated.contract.runtimeScenario.assertions.map((current, assertionIndex) => assertionIndex === index ? assertion : current)
     setGenerated({
       ...generated,
       contract: { ...generated.contract, runtimeScenario: { ...generated.contract.runtimeScenario, assertions } }
     })
   }
+  const updateV2Case = (
+    caseIndex: number,
+    update: (scenario: RuntimeScenarioCase) => RuntimeScenarioCase
+  ): void => {
+    if (!generated || generated.contract.version !== 2) return
+    const cases = generated.contract.runtimeScenarios.cases.map((scenario, index) => index === caseIndex ? update(scenario) : scenario)
+    setGenerated({ ...generated, contract: { ...generated.contract, runtimeScenarios: { cases } } })
+  }
+  const missingRuntimeEnvironmentKeys = generated?.contract.version === 2
+    ? [...new Set(generated.contract.runtimeScenarios.cases.flatMap((scenario) => scenario.preconditions.requiredEnvironmentKeys ?? []))]
+        .filter((key) => !configuredEnvironmentKeys.has(key))
+    : []
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     if (usesTests && !project.testCommand.trim()) {
@@ -2904,6 +3023,10 @@ function TaskModal({
     }
     if (usesRuntime && runtimeSource === 'task-scenario' && !generated) {
       setGenerationError('작업을 등록하기 전에 검증 시나리오를 만들고 확인하세요.')
+      return
+    }
+    if (missingRuntimeEnvironmentKeys.length > 0) {
+      setGenerationError(`프로젝트 설정에서 필수 실행 환경값을 먼저 등록하세요: ${missingRuntimeEnvironmentKeys.join(', ')}`)
       return
     }
     setSubmitting(true)
@@ -3124,7 +3247,7 @@ function TaskModal({
                   <div><span>승인 전 검토</span><strong>{generated.summary}</strong></div>
                   <button className="text-button" type="button" disabled={generating} onClick={() => void generate()}>다시 생성</button>
                 </header>
-                <div className="scenario-list">
+                {generated.contract.version === 1 ? <div className="scenario-list">
                   {(generated.contract.runtimeScenario.permissions?.length ?? 0) > 0 && (
                     <>
                       <p>Simulator 준비 조건</p>
@@ -3168,6 +3291,8 @@ function TaskModal({
                   <p>합격 조건</p>
                   {generated.contract.runtimeScenario.assertions.map((assertion, index) => assertion.kind === 'evidence' ? (
                     <div className="scenario-evidence" key={`assertion-${index}`}><FileJson size={12} /><span>{assertion.name}</span></div>
+                  ) : assertion.kind === 'state' ? (
+                    <div className="scenario-evidence" key={`assertion-${index}`}><FileJson size={12} /><span>{assertion.name ?? assertion.path.join('.')} · {String(assertion.expected)}</span></div>
                   ) : (
                     <div className="scenario-row assertion" key={`assertion-${index}`}>
                       <Check size={12} />
@@ -3182,7 +3307,92 @@ function TaskModal({
                       )}
                     </div>
                   ))}
-                </div>
+                </div> : <div className="scenario-case-list">
+                  {generated.contract.environmentRequirements.length > 0 && (
+                    <div className="scenario-environment-requirements">
+                      <p>필수 실행 환경</p>
+                      {generated.contract.environmentRequirements.map((requirement) => (
+                        <span className={configuredEnvironmentKeys.has(requirement.key) ? 'ready' : 'missing'} key={requirement.key}>
+                          {configuredEnvironmentKeys.has(requirement.key) ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+                          {requirement.label} <code>{requirement.key}</code>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {generated.contract.runtimeScenarios.cases.map((scenario, caseIndex) => (
+                    <section className="scenario-case" key={scenario.id}>
+                      <header><span>케이스 {caseIndex + 1}</span><strong>{scenario.name}</strong><code>{scenario.id}</code></header>
+                      {(scenario.preconditions.permissions?.length ?? 0) > 0 && (
+                        <div className="scenario-list">
+                          <p>Simulator 준비 조건</p>
+                          {scenario.preconditions.permissions!.map((permission, permissionIndex) => (
+                            <div className="scenario-row permission" key={`${scenario.id}-permission-${permissionIndex}`}>
+                              <span>{permissionIndex + 1}</span>
+                              <strong>개인정보 권한</strong>
+                              <select value={permission.service} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                                ...current,
+                                preconditions: {
+                                  ...current.preconditions,
+                                  permissions: (current.preconditions.permissions ?? []).map((item, index) => index === permissionIndex ? { ...item, service: event.target.value as RuntimePrivacyPermission['service'] } : item)
+                                }
+                              }))}>
+                                {Object.entries(PRIVACY_SERVICE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                              </select>
+                              <select value={permission.state} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                                ...current,
+                                preconditions: {
+                                  ...current.preconditions,
+                                  permissions: (current.preconditions.permissions ?? []).map((item, index) => index === permissionIndex ? { ...item, state: event.target.value as RuntimePrivacyPermission['state'] } : item)
+                                }
+                              }))}>
+                                {Object.entries(PRIVACY_STATE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="scenario-list">
+                        {scenario.steps.map((step, stepIndex) => step.kind === 'action' ? (
+                          <div className="scenario-row" key={`${scenario.id}-step-${stepIndex}`}>
+                            <span>{stepIndex + 1}</span>
+                            <strong>{step.action.kind === 'tap' ? '누르기' : '텍스트 입력'}</strong>
+                            <input value={step.action.identifier} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                              ...current,
+                              steps: current.steps.map((item, index) => index === stepIndex && item.kind === 'action' ? { ...item, action: { ...item.action, identifier: event.target.value } } : item)
+                            }))} />
+                            {step.action.kind === 'type-text' && <input value={step.action.text} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                              ...current,
+                              steps: current.steps.map((item, index) => index === stepIndex && item.kind === 'action' && item.action.kind === 'type-text' ? { ...item, action: { ...item.action, text: event.target.value } } : item)
+                            }))} />}
+                          </div>
+                        ) : (
+                          <div className="scenario-checkpoint" key={`${scenario.id}-step-${stepIndex}`}>
+                            <p>체크포인트 {stepIndex + 1}</p>
+                            {step.assertions.map((assertion, assertionIndex) => assertion.kind === 'evidence' ? (
+                              <div className="scenario-evidence" key={assertionIndex}><FileJson size={12} /><span>{assertion.name}</span></div>
+                            ) : assertion.kind === 'state' ? (
+                              <div className="scenario-evidence" key={assertionIndex}><FileJson size={12} /><span>{assertion.name ?? assertion.path.join('.')} · {String(assertion.expected)}</span></div>
+                            ) : (
+                              <div className="scenario-row assertion" key={assertionIndex}>
+                                <Check size={12} />
+                                <input value={assertion.name ?? ''} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                                  ...current,
+                                  steps: current.steps.map((item, index) => index === stepIndex && item.kind === 'assert' ? { ...item, assertions: item.assertions.map((value, position) => position === assertionIndex ? { ...value, name: event.target.value } : value) } : item)
+                                }))} />
+                                <input value={assertion.identifier} onChange={(event) => updateV2Case(caseIndex, (current) => ({
+                                  ...current,
+                                  steps: current.steps.map((item, index) => index === stepIndex && item.kind === 'assert' ? { ...item, assertions: item.assertions.map((value, position) => position === assertionIndex && value.kind === 'accessibility' ? { ...value, identifier: event.target.value } : value) } : item)
+                                }))} />
+                                <span>{String(assertion.expected)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                  {missingRuntimeEnvironmentKeys.length > 0 && <p className="scenario-error"><AlertTriangle size={13} />프로젝트 설정에서 값을 등록하세요: {missingRuntimeEnvironmentKeys.join(', ')}</p>}
+                </div>}
                 <p className="scenario-lock"><ShieldCheck size={12} />등록하면 이 조건이 작업에 고정됩니다. 구현 에이전트는 조건을 낮추거나 바꿀 수 없습니다.</p>
               </div>
             )}
@@ -3204,7 +3414,7 @@ function TaskModal({
           {usesRuntime && <><span><SquareTerminal size={13} />Simulator</span><i /></>}
           <span><Search size={13} />Reviewer</span><i /><span><ShieldCheck size={13} />사람 확인</span><i /><span><GitBranch size={13} />{publishStrategy === 'pull-request' ? 'PR' : '원격 게시'}</span>
         </div>
-        <button className="primary-button" disabled={submitting || generating || recommending || techSpecLoading || project.isDemo || (useTechSpec && !techSpecReady) || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
+        <button className="primary-button" disabled={submitting || generating || recommending || techSpecLoading || project.isDemo || missingRuntimeEnvironmentKeys.length > 0 || (useTechSpec && !techSpecReady) || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
       </form>
     </Modal>
   )
@@ -3314,9 +3524,18 @@ function TaskDrawer({
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
-  const runtimeScenario = task.runtimeContract
+  const runtimeScenario = task.runtimeContract?.version === 1
     ? normalizeRuntimeScenarioEnvironment(task.runtimeContract.runtimeScenario)
     : null
+  const runtimeCaseCount = task.runtimeContract?.version === 2
+    ? task.runtimeContract.runtimeScenarios.cases.length
+    : task.runtimeContract ? 1 : 0
+  const runtimeActionCount = task.runtimeContract?.version === 2
+    ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.filter((step) => step.kind === 'action').length, 0)
+    : runtimeScenario?.actions.length ?? 0
+  const runtimeAssertionCount = task.runtimeContract?.version === 2
+    ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
+    : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
@@ -3376,9 +3595,10 @@ function TaskDrawer({
             <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>
             <p>{task.runtimeScenarioSummary ?? '사용자가 승인한 작업별 검증 시나리오'}</p>
             <div>
+              {runtimeCaseCount > 1 && <span><ListTodo size={12} />케이스 {runtimeCaseCount}개</span>}
               {(runtimeScenario?.permissions.length ?? 0) > 0 && <span><ShieldCheck size={12} />권한 {runtimeScenario!.permissions.length}개</span>}
-              <span><Play size={12} />조작 {runtimeScenario?.actions.length ?? 0}단계</span>
-              <span><CheckCircle2 size={12} />검증 {task.runtimeContract.runtimeScenario.assertions.length}개</span>
+              <span><Play size={12} />조작 {runtimeActionCount}단계</span>
+              <span><CheckCircle2 size={12} />검증 {runtimeAssertionCount}개</span>
               <span><SquareTerminal size={12} />{task.runtimeContract.adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'}</span>
             </div>
             <small>

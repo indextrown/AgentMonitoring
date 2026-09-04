@@ -4,6 +4,7 @@ import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
   CreateTaskInput,
+  DeleteProjectRuntimeEnvironmentInput,
   EventRecord,
   GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
@@ -14,7 +15,8 @@ import type {
   SourceControlDiffInput,
   SourceControlIdentityInput,
   SourceControlPathsInput,
-  UpdateProjectInput
+  UpdateProjectInput,
+  UpsertProjectRuntimeEnvironmentInput
 } from '../../src/shared/types'
 
 const bridge: AgentMonitoringBridge = {
@@ -26,6 +28,12 @@ const bridge: AgentMonitoringBridge = {
   getSnapshot: (projectId?: string) => ipcRenderer.invoke('dashboard:snapshot', projectId),
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),
+  listProjectRuntimeEnvironment: (projectId: string) =>
+    ipcRenderer.invoke('project-runtime-environment:list', projectId),
+  upsertProjectRuntimeEnvironment: (input: UpsertProjectRuntimeEnvironmentInput) =>
+    ipcRenderer.invoke('project-runtime-environment:upsert', input),
+  deleteProjectRuntimeEnvironment: (input: DeleteProjectRuntimeEnvironmentInput) =>
+    ipcRenderer.invoke('project-runtime-environment:delete', input),
   inspectProject: (projectId: string) => ipcRenderer.invoke('project:inspect', projectId),
   getSourceControlStatus: (projectId: string) => ipcRenderer.invoke('source-control:status', projectId),
   getSourceControlDiff: (input: SourceControlDiffInput) => ipcRenderer.invoke('source-control:diff', input),
