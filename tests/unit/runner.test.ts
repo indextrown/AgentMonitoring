@@ -1296,6 +1296,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       ['-c', 'user.name=Agent Test', '-c', 'user.email=agent@example.com', 'commit', '-m', 'advance main'],
       { cwd: fixture.repository }
     )
+    await execFileAsync('git', ['config', '--local', 'user.name', ''], { cwd: fixture.repository })
+    await execFileAsync('git', ['config', '--local', 'user.email', ''], { cwd: fixture.repository })
 
     await expect(fixture.runner.approve(fixture.taskId)).resolves.toMatchObject({ outcome: 'reverified' })
     const reverified = fixture.store.getTask(fixture.taskId)

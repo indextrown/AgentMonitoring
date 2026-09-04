@@ -1155,7 +1155,19 @@ export class AgentRunner {
   ): Promise<void> {
     const worktreePath = task.worktreePath!
     this.emit(task, 'agent', 'git', `원본 ${targetBranch} 최신 변경을 격리 작업공간에 반영 시작`)
-    const rebase = await this.runProcess('git', ['rebase', targetHead], worktreePath, null)
+    const rebase = await this.runProcess(
+      'git',
+      [
+        '-c',
+        'user.name=AgentMonitoring',
+        '-c',
+        'user.email=agentmonitoring@localhost',
+        'rebase',
+        targetHead
+      ],
+      worktreePath,
+      null
+    )
     if (rebase.code !== 0) {
       const conflicts = await this.runProcess(
         'git',
@@ -1165,9 +1177,16 @@ export class AgentRunner {
       )
       await this.runProcess('git', ['rebase', '--abort'], worktreePath, null)
       const conflictPaths = conflicts.output.trim().split(/\r?\n/).filter(Boolean)
-      const detail = conflictPaths.length > 0 ? ` 충돌 파일: ${conflictPaths.join(', ')}` : ''
+      if (conflictPaths.length === 0) {
+        const detail = rebase.output.trim().slice(-1_000)
+        throw new Error(
+          `원본 ${targetBranch} 최신 변경을 AI 작업에 반영하지 못했습니다. ` +
+            `${detail || 'Git rebase 실행 상태를 확인하세요.'} 원본 저장소는 변경하지 않았습니다.`
+        )
+      }
       throw new Error(
-        `원본 ${targetBranch} 최신 변경과 AI 작업이 충돌했습니다.${detail} ` +
+        `원본 ${targetBranch} 최신 변경과 AI 작업이 충돌했습니다. ` +
+          `충돌 파일: ${conflictPaths.join(', ')} ` +
           '원본 저장소는 변경하지 않았습니다. 작업 내용을 정리한 뒤 다시 승인하세요.'
       )
     }
