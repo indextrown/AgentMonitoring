@@ -79,6 +79,12 @@ import type {
   TaskChanges,
   TaskRecord,
   TaskStatus,
+  TaskVerificationPlan,
+  TestDesignStrategy,
+  VerificationMode,
+  VerificationPlanRecommendation,
+  VerificationStepStatus,
+  RuntimeVerificationSource,
   UpdateProjectInput
 } from '../../shared/types'
 import { demoBridge } from './demo'
@@ -91,6 +97,7 @@ const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'autoConfigureProjectRuntime',
+  'recommendVerificationPlan',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage'
@@ -113,10 +120,40 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   running: '구현 중',
   testing: '테스트 중',
   awaiting_approval: '승인 대기',
+  awaiting_manual_validation: '수동 검증 필요',
   completed: '완료',
   failed: '실패',
   stopped: '중단',
   discarded: '폐기'
+}
+
+const VERIFICATION_MODE_LABELS: Record<VerificationMode, string> = {
+  'project-tests': '프로젝트 테스트만',
+  'simulator-runtime': 'Simulator 검증만',
+  both: '프로젝트 테스트 + Simulator',
+  'manual-review': '수동 검토만'
+}
+
+const TEST_DESIGN_LABELS: Record<TestDesignStrategy, string> = {
+  automatic: '프로젝트에 맞게 자동 선택',
+  'swift-testing': 'Swift Testing',
+  xctest: 'XCTest',
+  'existing-tests': '기존 테스트만 실행',
+  skip: '테스트 설계 건너뛰기'
+}
+
+const RUNTIME_SOURCE_LABELS: Record<RuntimeVerificationSource, string> = {
+  'task-scenario': '이 작업 전용 시나리오',
+  'project-default': '프로젝트 기본 시나리오',
+  off: '사용 안 함'
+}
+
+const VERIFICATION_STEP_STATUS_LABELS: Record<VerificationStepStatus, string> = {
+  pending: '대기',
+  running: '진행 중',
+  passed: '통과',
+  failed: '확인 필요',
+  skipped: '건너뜀'
 }
 
 const PROJECT_CHANGE_LABELS: Record<ProjectChangeKind, string> = {
@@ -239,6 +276,7 @@ function statusTone(status: TaskStatus): string {
   if (status === 'completed') return 'green'
   if (status === 'failed') return 'red'
   if (status === 'awaiting_approval') return 'violet'
+  if (status === 'awaiting_manual_validation') return 'amber'
   if (status === 'running' || status === 'testing') return 'blue'
   if (status === 'stopped' || status === 'discarded') return 'muted'
   return 'amber'
@@ -421,7 +459,9 @@ export function App(): React.JSX.Element {
 
   const runTask = (task: TaskRecord): void => {
     const project = snapshot?.projects.find((item) => item.id === task.projectId)
-    if (!project?.testCommand.trim()) {
+    const requiresProjectTests = !task.verificationPlan ||
+      ['project-tests', 'both'].includes(task.verificationPlan.mode)
+    if (requiresProjectTests && !project?.testCommand.trim()) {
       setPage('projects')
       setSelectedTask(null)
       setError('작업을 실행하기 전에 프로젝트 검증 명령을 등록하세요.')
@@ -438,7 +478,9 @@ export function App(): React.JSX.Element {
       if (
         action === 'approve' &&
         !window.confirm(
-          '승인하면 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다. 계속할까요?'
+          task.status === 'awaiting_manual_validation'
+            ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 확인했다면 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다.'
+            : '승인하면 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다. 계속할까요?'
         )
       ) return
       if (action === 'stop') await bridge.stopTask(task.id)
@@ -555,7 +597,9 @@ export function App(): React.JSX.Element {
 
   const unresolved = snapshot.findings.filter((finding) => !finding.resolved)
   const activeTask = snapshot.tasks.find(isActiveTask) ?? null
-  const awaitingTask = snapshot.tasks.find((task) => task.status === 'awaiting_approval') ?? null
+  const awaitingTask = snapshot.tasks.find((task) =>
+    ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)
+  ) ?? null
   const selectedProject = snapshot.selectedProject
 
   return (
@@ -684,6 +728,7 @@ export function App(): React.JSX.Element {
         <TaskModal
           project={selectedProject}
           onGenerate={(input) => bridge.generateRuntimeScenario(input)}
+          onRecommend={(input) => bridge.recommendVerificationPlan(input)}
           onClose={() => setTaskModal(false)}
           onCreate={async (input) => {
             const task = await bridge.createTask(input)
@@ -817,8 +862,8 @@ function EmptyWorkspace({
           <div>
             <span>02</span>
             <SquareTerminal size={17} />
-            <strong>검증 명령 설정</strong>
-            <p>프로젝트 테스트 명령을 등록합니다.</p>
+            <strong>검증 영역 연결</strong>
+            <p>필요하면 테스트 명령과 Simulator를 연결합니다.</p>
           </div>
           <div>
             <span>03</span>
@@ -856,7 +901,7 @@ function ProjectStartPage({
   onNewTask: () => void
 }): React.JSX.Element {
   const hasTestCommand = Boolean(project.testCommand.trim())
-  const ready = hasTestCommand && inspection?.clean
+  const ready = Boolean(inspection?.clean)
 
   return (
     <section className="project-start-page">
@@ -900,8 +945,8 @@ function ProjectStartPage({
           <article className={`panel readiness-card ${hasTestCommand ? 'ready' : 'attention'}`}>
             <ShieldCheck size={16} />
             <span>검증 명령</span>
-            <strong>{hasTestCommand ? '설정 완료' : '설정 필요'}</strong>
-            <small>{project.testCommand || '자동 성공 처리를 막기 위해 실행 전에 반드시 등록합니다.'}</small>
+            <strong>{hasTestCommand ? '설정 완료' : '선택 사항'}</strong>
+            <small>{project.testCommand || '프로젝트 테스트를 선택할 작업에서만 필요합니다.'}</small>
           </article>
         </div>
       ) : (
@@ -948,9 +993,9 @@ function ProjectStartPage({
       {!hasTestCommand && (
         <article className="panel validation-setup">
           <div>
-            <p className="eyebrow">REQUIRED VALIDATION</p>
-            <h3>검증 명령을 먼저 연결하세요</h3>
-            <p>테스트가 실제로 통과한 작업만 승인 단계로 보냅니다. 감지 결과는 후보만 제안하며, 저장은 직접 확인해야 합니다.</p>
+            <p className="eyebrow">OPTIONAL VALIDATION</p>
+            <h3>프로젝트 테스트를 쓰려면 검증 명령을 연결하세요</h3>
+            <p>Simulator 검증만 또는 수동 검토만 선택한 작업은 지금도 만들 수 있어요. 감지한 테스트 명령은 후보이므로 저장 전에 직접 확인하세요.</p>
           </div>
           {inspection?.suggestedTestCommands.length ? (
             <div className="command-suggestions">
@@ -968,11 +1013,11 @@ function ProjectStartPage({
         <div>
           <p className="eyebrow">NEXT STEP</p>
           <h3>첫 에이전트 작업을 등록하세요</h3>
-          <p>{hasTestCommand ? '목표와 완료 조건을 작성하면 테스트 설계부터 Reviewer 검토까지 격리 실행합니다.' : '검증 명령을 저장하면 첫 작업을 만들 수 있습니다.'}</p>
+          <p>{hasTestCommand ? '목표와 완료 조건을 작성하고 작업에 맞는 검증 조합을 선택하세요.' : '목표를 작성한 뒤 Simulator 검증 또는 수동 검토를 선택할 수 있습니다.'}</p>
         </div>
         <div>
           <button className="secondary-button" onClick={onConfigure}><Settings2 size={14} />프로젝트 설정</button>
-          <button className="primary-button" disabled={!hasTestCommand} onClick={onNewTask}><Plus size={14} />첫 작업 만들기</button>
+          <button className="primary-button" onClick={onNewTask}><Plus size={14} />첫 작업 만들기</button>
         </div>
       </article>
     </section>
@@ -1534,7 +1579,7 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <div className="row-actions">
               {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
-              {task.status === 'awaiting_approval' && <button title="원본에 적용" onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <button title={task.status === 'awaiting_manual_validation' ? '직접 확인 후 원본에 적용' : '원본에 적용'} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
             </div>
           </div>
         ))}
@@ -1741,19 +1786,25 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
   const startSteps = [
     ['1', '프로젝트 연결', '실제 Git 프로젝트 추가를 누르고 저장소 루트를 선택하세요.'],
     ['2', '실행 영역 연결', 'Swift 앱에서 Build·Run·Observe·Act가 회색이면 iOS 자동 연결을 누르세요.'],
-    ['3', '검증 명령 저장', '프로젝트 설정에서 실제로 통과하는 테스트 명령을 등록하세요.'],
+    ['3', '검증 명령 저장', '프로젝트 테스트를 쓸 때만 실제로 통과하는 테스트 명령을 등록하세요.'],
     ['4', '작업 만들기', '새 작업에서 목표와 확인 가능한 완료 조건을 작성하세요.'],
-    ['5', '조건 확인', 'Swift 앱은 검증 시나리오를 만들고 조작과 합격 조건을 확인하세요.'],
+    ['5', '검증 계획 확인', 'AI 추천을 보고 테스트, Simulator 또는 수동 검토 중 필요한 조합을 고르세요.'],
     ['6', '실행 시작', '작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.']
   ]
   const pipeline = [
-    ['테스트 설계', 'Test Designer가 성공·실패·경계 조건을 테스트로 만듭니다.'],
-    ['테스트 비평', 'Critic이 빠진 조건과 편법으로 통과할 수 있는 부분을 찾습니다.'],
+    ['검증 계획 적용', '작업을 만들 때 사람이 확인한 검증 단계만 실행합니다.'],
+    ['선택한 테스트 설계', '필요한 작업에서만 Test Designer와 Critic이 테스트를 만들고 검토합니다.'],
     ['기능 구현', 'Implementer가 격리된 Git worktree에서 코드를 수정합니다.'],
-    ['자동 검증', '등록한 테스트와 선택한 Simulator 사용 흐름을 실행합니다.'],
+    ['선택한 자동 검증', '프로젝트 테스트, Simulator 또는 두 검증을 선택한 조합대로 실행합니다.'],
     ['자가 수정', '실패하면 로그와 화면 증거를 전달해 남은 횟수만큼 다시 구현합니다.'],
     ['최종 검토', 'Reviewer가 diff, 테스트와 실행 증거를 읽고 문제를 보고합니다.'],
     ['사람 승인', '결과를 확인한 뒤 원본에 적용하거나 격리 변경을 폐기합니다.']
+  ]
+  const verificationModes = [
+    ['프로젝트 테스트만', '로직·데이터·회귀 작업', '테스트 설계(선택) → 구현 → 검증 명령 → Reviewer'],
+    ['Simulator 검증만', '화면 표시와 사용자 조작', '구현 → Simulator 실행·조작·판정 → Reviewer'],
+    ['둘 다', '로직과 화면을 함께 바꾸는 기능', '프로젝트 테스트와 Simulator를 차례로 실행'],
+    ['수동 검토만', '문서·설정처럼 자동 검증이 맞지 않는 작업', '구현 → Reviewer → 사람이 직접 확인']
   ]
 
   return (
@@ -1795,6 +1846,16 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
         </section>
 
         <section className="usage-help-section">
+          <header><span>VERIFY</span><h3>작업마다 필요한 검증만 고르세요</h3></header>
+          <div className="usage-verification-modes">
+            {verificationModes.map(([title, useCase, flow]) => (
+              <article key={title}><strong>{title}</strong><span>{useCase}</span><p>{flow}</p></article>
+            ))}
+          </div>
+          <p className="usage-retry-note">새 작업의 <strong>AI에게 추천받기</strong>는 초안을 만들어요. 실제 실행 계획은 사람이 확인하거나 바꾼 뒤 등록해야 해요.</p>
+        </section>
+
+        <section className="usage-help-section">
           <header><span>PIPELINE</span><h3>실행을 누르면 내부에서 이렇게 진행돼요</h3></header>
           <ol className="usage-pipeline">
             {pipeline.map(([title, description], index) => (
@@ -1808,13 +1869,13 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
         </section>
 
         <section className="usage-boundaries" aria-label="승인 단계 구분">
-          <article><ShieldCheck size={15} /><div><strong>검증 조건 승인하고 작업 등록</strong><p>합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.</p></div></article>
+          <article><ShieldCheck size={15} /><div><strong>검증 계획 확인하고 작업 등록</strong><p>실행할 단계와 합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.</p></div></article>
           <article><Play size={15} /><div><strong>실행</strong><p>격리 작업공간을 만들고 Codex 파이프라인을 시작해요.</p></div></article>
           <article><GitBranch size={15} /><div><strong>원본에 적용</strong><p>최종 확인한 변경만 현재 로컬 브랜치에 반영해요.</p></div></article>
         </section>
 
         <footer className="usage-help-footer">
-          <p>일반 Git 프로젝트는 Code와 Verify만으로 실행할 수 있어요. Simulator 검증은 Swift 앱에서 선택적으로 사용해요.</p>
+          <p>작업 상세에서 각 단계의 통과·확인 필요·건너뜀을 확인할 수 있어요. 수동 검토 작업은 자동 통과로 표시하지 않아요.</p>
           <button className="primary-button" type="button" onClick={onClose}>확인했어요</button>
         </footer>
       </div>
@@ -1974,21 +2035,67 @@ function TaskModal({
   project,
   onClose,
   onCreate,
-  onGenerate
+  onGenerate,
+  onRecommend
 }: {
   project: ProjectRecord
   onClose: () => void
   onCreate: (input: Parameters<AgentMonitoringBridge['createTask']>[0]) => Promise<void>
   onGenerate: (input: Parameters<AgentMonitoringBridge['generateRuntimeScenario']>[0]) => Promise<GeneratedRuntimeScenario>
+  onRecommend: (input: Parameters<AgentMonitoringBridge['recommendVerificationPlan']>[0]) => Promise<VerificationPlanRecommendation>
 }): React.JSX.Element {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [maxAttempts, setMaxAttempts] = useState(3)
-  const [includeRuntime, setIncludeRuntime] = useState(Boolean(project.runtimeAdapter))
+  const initialMode: VerificationMode = project.testCommand.trim()
+    ? project.runtimeAdapter ? 'both' : 'project-tests'
+    : project.runtimeAdapter ? 'simulator-runtime' : 'manual-review'
+  const [mode, setMode] = useState<VerificationMode>(initialMode)
+  const [testDesign, setTestDesign] = useState<TestDesignStrategy>(
+    initialMode === 'project-tests' || initialMode === 'both' ? 'automatic' : 'skip'
+  )
+  const [runtimeSource, setRuntimeSource] = useState<RuntimeVerificationSource>(
+    initialMode === 'simulator-runtime' || initialMode === 'both' ? 'task-scenario' : 'off'
+  )
+  const [recommendation, setRecommendation] = useState<string | null>(null)
+  const [recommending, setRecommending] = useState(false)
   const [generated, setGenerated] = useState<GeneratedRuntimeScenario | null>(null)
   const [generating, setGenerating] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const usesTests = mode === 'project-tests' || mode === 'both'
+  const usesRuntime = mode === 'simulator-runtime' || mode === 'both'
+
+  const changeMode = (nextMode: VerificationMode): void => {
+    const nextUsesTests = nextMode === 'project-tests' || nextMode === 'both'
+    const nextUsesRuntime = nextMode === 'simulator-runtime' || nextMode === 'both'
+    setMode(nextMode)
+    setTestDesign((current) => nextUsesTests ? current === 'skip' ? 'automatic' : current : 'skip')
+    setRuntimeSource((current) => nextUsesRuntime
+      ? current === 'off' ? 'task-scenario' : current
+      : 'off')
+    if (!nextUsesRuntime) setGenerated(null)
+    setRecommendation(null)
+    setGenerationError(null)
+  }
+
+  const recommend = async (): Promise<void> => {
+    setRecommending(true)
+    setGenerationError(null)
+    try {
+      const result = await onRecommend({ projectId: project.id, title, prompt })
+      setMode(result.plan.mode)
+      setTestDesign(result.plan.testDesign)
+      setRuntimeSource(result.plan.runtimeSource)
+      setGenerated(null)
+      setRecommendation(result.summary)
+    } catch (error) {
+      setGenerationError(String(error).replace(/^Error:\s*/, ''))
+    } finally {
+      setRecommending(false)
+    }
+  }
+
   const generate = async (): Promise<void> => {
     setGenerating(true)
     setGenerationError(null)
@@ -2018,7 +2125,11 @@ function TaskModal({
   }
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
-    if (includeRuntime && !generated) {
+    if (usesTests && !project.testCommand.trim()) {
+      setGenerationError('프로젝트 테스트를 사용하려면 프로젝트 설정에서 검증 명령을 먼저 등록하세요.')
+      return
+    }
+    if (usesRuntime && runtimeSource === 'task-scenario' && !generated) {
       setGenerationError('작업을 등록하기 전에 검증 시나리오를 만들고 확인하세요.')
       return
     }
@@ -2029,8 +2140,9 @@ function TaskModal({
         title,
         prompt,
         maxAttempts,
-        runtimeContract: includeRuntime ? generated?.contract ?? null : null,
-        runtimeScenarioSummary: includeRuntime ? generated?.summary ?? null : null
+        runtimeContract: usesRuntime && runtimeSource === 'task-scenario' ? generated?.contract ?? null : null,
+        runtimeScenarioSummary: usesRuntime && runtimeSource === 'task-scenario' ? generated?.summary ?? null : null,
+        verificationPlan: { version: 1, mode, testDesign, runtimeSource }
       })
     } finally {
       setSubmitting(false)
@@ -2039,18 +2151,66 @@ function TaskModal({
   return (
     <Modal wide title="새 에이전트 작업" description={`${project.name}의 격리된 worktree에서 실행된다.`} onClose={onClose}>
       <form className="modal-form" onSubmit={(event) => void submit(event)}>
-        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setGenerated(null) }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
-        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setGenerated(null) }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
-        {project.runtimeAdapter && (
+        <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setGenerated(null); setRecommendation(null) }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
+        <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setGenerated(null); setRecommendation(null) }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <section className="verification-planner">
+          <header>
+            <div><strong>이 작업의 검증 방식</strong><p>AI 추천을 받은 뒤 실제로 필요한 단계만 선택하세요. 등록하면 이 계획이 작업에 고정됩니다.</p></div>
+            <button className="secondary-button" type="button" disabled={recommending || title.trim().length < 2 || prompt.trim().length < 10} onClick={() => void recommend()}>
+              {recommending ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
+              {recommending ? '프로젝트 분석 중' : 'AI에게 추천받기'}
+            </button>
+          </header>
+          {recommendation && <p className="verification-recommendation"><ShieldCheck size={13} /><span><strong>AI 추천</strong>{recommendation}</span></p>}
+          <div className="verification-options">
+            <label>
+              <span>검증 조합</span>
+              <select value={mode} onChange={(event) => changeMode(event.target.value as VerificationMode)}>
+                <option value="project-tests" disabled={!project.testCommand.trim()}>프로젝트 테스트만{!project.testCommand.trim() ? ' · 검증 명령 필요' : ''}</option>
+                <option value="simulator-runtime" disabled={!project.runtimeAdapter}>Simulator 검증만{!project.runtimeAdapter ? ' · 실행 연결 필요' : ''}</option>
+                <option value="both" disabled={!project.testCommand.trim() || !project.runtimeAdapter}>프로젝트 테스트 + Simulator</option>
+                <option value="manual-review">수동 검토만</option>
+              </select>
+            </label>
+            {usesTests && (
+              <label>
+                <span>테스트 설계</span>
+                <select value={testDesign} onChange={(event) => setTestDesign(event.target.value as TestDesignStrategy)}>
+                  <option value="automatic">프로젝트에 맞게 자동 선택</option>
+                  <option value="swift-testing">Swift Testing</option>
+                  <option value="xctest">XCTest</option>
+                  <option value="existing-tests">기존 테스트만 실행</option>
+                  <option value="skip">테스트 설계 건너뛰기</option>
+                </select>
+              </label>
+            )}
+            {usesRuntime && (
+              <label>
+                <span>Simulator 시나리오</span>
+                <select value={runtimeSource} onChange={(event) => { setRuntimeSource(event.target.value as RuntimeVerificationSource); setGenerated(null); setRecommendation(null) }}>
+                  <option value="task-scenario">이 작업 전용 시나리오</option>
+                  <option value="project-default" disabled={project.runtimeConfigSource !== 'manifest'}>프로젝트 기본 시나리오{project.runtimeConfigSource !== 'manifest' ? ' · project.json 필요' : ''}</option>
+                </select>
+              </label>
+            )}
+          </div>
+          <p className="verification-plan-summary">
+            <strong>{VERIFICATION_MODE_LABELS[mode]}</strong>
+            {usesTests ? ` · ${TEST_DESIGN_LABELS[testDesign]}` : ''}
+            {usesRuntime ? ` · ${RUNTIME_SOURCE_LABELS[runtimeSource]}` : ''}
+          </p>
+          {mode === 'manual-review' && <p className="manual-review-warning"><AlertTriangle size={13} />자동 통과로 표시하지 않습니다. 구현과 Reviewer 검토 뒤 사람이 직접 확인해야 합니다.</p>}
+        </section>
+        {usesRuntime && runtimeSource === 'task-scenario' && project.runtimeAdapter && (
           <section className="scenario-builder">
-            <label className="scenario-toggle">
-              <input type="checkbox" checked={includeRuntime} onChange={(event) => setIncludeRuntime(event.target.checked)} />
+            <div className="scenario-toggle">
+              <SquareTerminal size={14} />
               <span>
-                <strong>Simulator에서 실제 사용 흐름 검증</strong>
+                <strong>작업 전용 Simulator 검증</strong>
                 <small>{project.runtimeAdapter.scheme} · {project.runtimeAdapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'} · Debug</small>
               </span>
-            </label>
-            {includeRuntime && !generated && (
+            </div>
+            {!generated && (
               <div className="scenario-empty">
                 <ShieldCheck size={18} />
                 <div><strong>자연어 목표를 검증 단계로 바꿉니다</strong><p>Codex가 저장소를 읽고 누를 요소와 확인할 결과를 제안합니다. 확인한 뒤에만 작업에 고정됩니다.</p></div>
@@ -2060,7 +2220,7 @@ function TaskModal({
                 </button>
               </div>
             )}
-            {includeRuntime && generated && (
+            {generated && (
               <div className="scenario-review">
                 <header>
                   <div><span>승인 전 검토</span><strong>{generated.summary}</strong></div>
@@ -2100,10 +2260,16 @@ function TaskModal({
             {generationError && <p className="scenario-error">{generationError}</p>}
           </section>
         )}
-        {!project.runtimeAdapter && <p className="scenario-unavailable"><FileJson size={13} />iOS 프로젝트가 아니거나 실행 설정이 없습니다. 코드와 테스트만 검증합니다.</p>}
+        {usesRuntime && runtimeSource === 'project-default' && <p className="scenario-unavailable"><FileJson size={13} />저장소의 `.agentmonitor/project.json`에 고정된 시나리오를 사용합니다.</p>}
         <label><span>최대 구현 시도 횟수</span><input type="number" min={1} max={5} value={maxAttempts} onChange={(event) => setMaxAttempts(Number(event.target.value))} /><small>최초 구현을 포함합니다. 테스트·Simulator 검증이나 Reviewer 검토에서 문제가 발견되면 남은 횟수만큼 다시 수정합니다.</small></label>
-        <div className="workflow-preview"><span><FileText size={13} />테스트 설계</span><i /><span><Search size={13} />비평</span><i /><span><Bot size={13} />구현</span><i /><span><CheckCircle2 size={13} />검증</span></div>
-        <button className="primary-button" disabled={submitting || generating || project.isDemo || (includeRuntime && Boolean(project.runtimeAdapter) && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : includeRuntime && generated ? '검증 조건 승인하고 작업 등록' : '작업 등록'}</button>
+        <div className="workflow-preview">
+          {usesTests && !['existing-tests', 'skip'].includes(testDesign) && <><span><FileText size={13} />테스트 설계</span><i /></>}
+          <span><Bot size={13} />구현</span><i />
+          {usesTests && <><span><CheckCircle2 size={13} />프로젝트 테스트</span><i /></>}
+          {usesRuntime && <><span><SquareTerminal size={13} />Simulator</span><i /></>}
+          <span><Search size={13} />Reviewer</span><i /><span><ShieldCheck size={13} />사람 확인</span>
+        </div>
+        <button className="primary-button" disabled={submitting || generating || recommending || project.isDemo || (usesRuntime && runtimeSource === 'task-scenario' && !generated)} type="submit">{submitting ? <LoaderCircle className="spin" size={14} /> : <ShieldCheck size={14} />}{project.isDemo ? '실제 프로젝트에서 사용 가능' : '검증 계획 확인하고 작업 등록'}</button>
       </form>
     </Modal>
   )
@@ -2221,6 +2387,36 @@ function TaskDrawer({
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {task.verificationPlan && (
+          <section className="verification-report">
+            <div className="drawer-section-title"><strong>작업별 검증 계획</strong><span>등록 시 고정됨</span></div>
+            <p className="verification-report-plan">
+              <strong>{VERIFICATION_MODE_LABELS[task.verificationPlan.mode]}</strong>
+              {task.verificationPlan.mode === 'project-tests' || task.verificationPlan.mode === 'both'
+                ? ` · ${TEST_DESIGN_LABELS[task.verificationPlan.testDesign]}`
+                : ''}
+              {task.verificationPlan.mode === 'simulator-runtime' || task.verificationPlan.mode === 'both'
+                ? ` · ${RUNTIME_SOURCE_LABELS[task.verificationPlan.runtimeSource]}`
+                : ''}
+            </p>
+            {task.verificationResult && (
+              <div className="verification-steps">
+                {([
+                  ['테스트 설계', task.verificationResult.testDesign],
+                  ['프로젝트 테스트', task.verificationResult.projectTests],
+                  ['Simulator', task.verificationResult.simulatorRuntime],
+                  ['Reviewer', task.verificationResult.reviewer]
+                ] as const).map(([label, result]) => (
+                  <div className={`verification-step step-${result.status}`} key={label}>
+                    <span>{result.status === 'passed' ? <CheckCircle2 size={13} /> : result.status === 'failed' ? <AlertTriangle size={13} /> : result.status === 'running' ? <LoaderCircle className="spin" size={13} /> : <Circle size={13} />}</span>
+                    <div><strong>{label}</strong><small>{result.message}</small></div>
+                    <em>{VERIFICATION_STEP_STATUS_LABELS[result.status]}</em>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
         {task.runtimeContract && (
           <section className="approved-scenario">
             <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>
@@ -2331,10 +2527,10 @@ function TaskDrawer({
           </section>
         )}
         <section className="drawer-events"><div className="drawer-section-title"><strong>실시간 로그</strong><span>{events.length}개</span></div>{events.length === 0 && <p className="empty-copy">아직 실행 로그가 없습니다.</p>}{events.map((event) => { const Icon = eventIcon(event.kind); return <div key={event.id}><span><Icon size={12} /></span><p><strong>{event.actor}</strong>{event.message}</p><time>{timeAgo(event.createdAt)}</time></div> })}</section>
-        {task.status === 'awaiting_approval' && (
-          <div className="approval-notice">
+        {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && (
+          <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}`}>
             <ShieldCheck size={14} />
-            <p><strong>안전한 로컬 적용</strong>원본 checkout이 깨끗하고 fast-forward 가능한 경우에만 변경을 적용합니다.</p>
+            <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 로컬 적용'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 적용하거나 폐기하세요.' : '원본 checkout이 깨끗하고 fast-forward 가능한 경우에만 변경을 적용합니다.'}</p>
           </div>
         )}
         <footer>
@@ -2342,7 +2538,7 @@ function TaskDrawer({
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
           {['failed', 'stopped'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {task.status === 'awaiting_approval' && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />원본에 적용</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{task.status === 'awaiting_manual_validation' ? '직접 확인 후 원본에 적용' : '원본에 적용'}</button></>}
         </footer>
       </aside>
     </div>

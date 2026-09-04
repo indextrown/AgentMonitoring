@@ -10,7 +10,7 @@ import {
   type IosSimulatorRuntimeAdapter
 } from '../../electron/main/ios-simulator-runtime'
 import { AppStore } from '../../electron/main/store'
-import type { ApprovedRuntimeContract } from '../../src/shared/types'
+import type { ApprovedRuntimeContract, TaskVerificationPlan } from '../../src/shared/types'
 
 const execFileAsync = promisify(execFile)
 const temporaryDirectories: string[] = []
@@ -51,6 +51,8 @@ async function createExecutionFixture(options: {
   maxAttempts?: number
   runtimeAdapter?: IosSimulatorRuntimeAdapter
   runtimeContract?: ApprovedRuntimeContract
+  verificationPlan?: TaskVerificationPlan
+  testCommand?: string | null
 }): Promise<{
   directory: string
   repository: string
@@ -140,14 +142,21 @@ async function createExecutionFixture(options: {
 
   const store = new AppStore(join(directory, 'store.sqlite'))
   const project = store.addProject('Runtime fixture', repository)
-  store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test' })
+  if (options.testCommand !== null) {
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      testCommand: options.testCommand ?? 'make test'
+    })
+  }
   const task = store.createTask(
     project.id,
     '실행 수명주기',
     '중단과 시간 초과를 안전하게 처리한다.',
     options.maxAttempts ?? 1,
     options.runtimeContract ?? null,
-    options.runtimeContract ? '승인된 테스트 시나리오' : null
+    options.runtimeContract ? '승인된 테스트 시나리오' : null,
+    options.verificationPlan ?? null
   )
   const runner = new AgentRunner(
     store,
@@ -231,6 +240,119 @@ describe('AgentRunner', () => {
     await expect(runner.run(task.id)).rejects.toThrow('검증 명령을 등록한 뒤 작업을 실행하세요.')
     expect(store.getTask(task.id).status).toBe('queued')
     store.close()
+  })
+
+  it('runs a manual-review task without a project test command and waits for human validation', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'manual-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      verificationPlan: {
+        version: 1,
+        mode: 'manual-review',
+        testDesign: 'skip',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(prompts).toHaveLength(2)
+    expect(prompts.some((prompt) => prompt.includes('테스트 설계자'))).toBe(false)
+    expect(task.status).toBe('awaiting_manual_validation')
+    expect(task.verificationResult).toMatchObject({
+      testDesign: { status: 'skipped' },
+      projectTests: { status: 'skipped' },
+      simulatorRuntime: { status: 'skipped' },
+      reviewer: { status: 'passed' }
+    })
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'test_started')).toBe(false)
+    await fixture.runner.dispose()
+    fixture.store.close()
+  })
+
+  it('runs a Simulator-only task without invoking Test Designer or the project test command', async () => {
+    let callsPath = ''
+    let launchCount = 0
+    const runtimeContract: ApprovedRuntimeContract = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'App.xcodeproj',
+        scheme: 'App',
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
+      },
+      capabilities: { build: true, run: true, observe: [], act: [], verify: [] },
+      runtimeScenario: { actions: [], assertions: [] }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'runtime-only-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      runtimeContract,
+      verificationPlan: {
+        version: 1,
+        mode: 'simulator-runtime',
+        testDesign: 'skip',
+        runtimeSource: 'task-scenario'
+      },
+      runtimeAdapter: {
+        launch: async (input) => {
+          launchCount += 1
+          return {
+            deviceId: 'IPHONE-UDID',
+            deviceName: 'iPhone 16 Pro',
+            bundleIdentifier: 'com.example.App',
+            processId: 101,
+            appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+            screenEvidence: null,
+            accessibilityEvidence: null,
+            uiActionEvidence: null,
+            debugStateEvidence: null
+          }
+        },
+        stop: async () => undefined
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(prompts).toHaveLength(2)
+    expect(launchCount).toBe(1)
+    expect(task.status).toBe('awaiting_approval')
+    expect(task.verificationResult).toMatchObject({
+      testDesign: { status: 'skipped' },
+      projectTests: { status: 'skipped' },
+      simulatorRuntime: { status: 'passed' },
+      reviewer: { status: 'passed' }
+    })
+    expect(fixture.store.getSnapshot(task.projectId).events.some((event) => event.kind === 'test_started')).toBe(false)
+    await fixture.runner.dispose()
+    fixture.store.close()
   })
 
   it('uses the task approval snapshot even when the repository has no project manifest', async () => {
