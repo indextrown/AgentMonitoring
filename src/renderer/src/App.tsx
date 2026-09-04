@@ -3257,6 +3257,7 @@ function TaskDrawer({
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
+        <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
         {task.techSpec && (
           <section className="approved-tech-spec">
@@ -3430,6 +3431,7 @@ function TaskDrawer({
             <p><strong>코드 문제가 아니라 검증 환경을 먼저 준비해야 합니다</strong>현재 변경과 작업공간은 그대로 보관했습니다. 프로젝트 설정의 환경 준비 명령을 확인한 뒤 구현을 다시 시키지 않고 검증만 재실행할 수 있습니다.</p>
           </div>
         )}
+        </div>
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
