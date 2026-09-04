@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   ProjectRuntimeConfigSource,
@@ -10,9 +8,9 @@ import type {
   VerificationPlanRecommendation
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
 
-const execFileAsync = promisify(execFile)
 const RECOMMENDATION_TIMEOUT_MS = 3 * 60_000
 
 const recommendationSchema = z.object({
@@ -83,7 +81,7 @@ export class VerificationPlanRecommender {
         'summary에는 왜 이 검증 조합이 적합한지 사용자가 이해하기 쉬운 한국어 한두 문장으로 적으세요.',
         '코드를 수정하지 마세요.'
       ].join('\n\n')
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCodexFile(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
