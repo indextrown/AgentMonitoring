@@ -83,9 +83,10 @@ running ──────────────────────→ aw
 
 queued/running/testing → stopped → running
 awaiting_approval/awaiting_manual_validation/blocked_environment/failed/stopped → discarded
+awaiting_approval/awaiting_manual_validation → running → testing → awaiting_approval/awaiting_manual_validation
 ```
 
-`running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다.
+`running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다. 승인 시 원본 브랜치가 앞서 있으면 작업 브랜치를 재배치한 뒤 검증 상태를 `running`으로 되돌리고 선택한 검증과 Reviewer를 다시 실행한다.
 
 ## 역할과 권한
 
@@ -162,7 +163,27 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 환경 준비 명령, Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 원본 checkout의 `.build`나 다른 무시 파일을 worktree에 복사하거나 심볼릭 링크하지 않는다. 각 작업공간에서 선언된 준비 명령으로 필요한 외부 의존성을 복원한다.
 
-사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗한지 확인하고, worktree 변경을 작업 브랜치에 커밋한 뒤 현재 로컬 브랜치에 `git merge --ff-only`로 반영한다. 원본이 dirty하거나 브랜치가 분기되었으면 상태를 `awaiting_approval`로 유지하고 적용을 중단한다.
+작업을 만들 때 현재 원본 브랜치와 기준 commit을 `tasks.source_branch`, `tasks.base_commit`에 기록한다. 사용자가 작업 도중 원본에서 새 커밋을 만들어도 어느 브랜치에서 시작한 작업인지 확인할 수 있다.
+
+Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 파일 폐기, hunk 단위 stage, amend, push와 충돌 해결은 제공하지 않는다.
+
+소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
+
+사람이 `원본에 적용`을 승인하면 앱은 원본 checkout이 깨끗하고 작업 시작 브랜치와 현재 브랜치가 같은지 확인한다. worktree 변경을 작업 브랜치에 커밋한 뒤 다음 순서로 처리한다.
+
+```text
+현재 원본 HEAD가 작업 브랜치의 조상임
+  → `git merge --ff-only`로 적용
+
+현재 원본 HEAD가 작업 브랜치의 조상이 아님
+  → 격리 worktree에서 작업 브랜치를 현재 원본 HEAD 위로 rebase
+  → 충돌 시 `git rebase --abort`, 원본 미변경, 승인 대기 유지
+  → 성공 시 선택한 프로젝트 테스트·Simulator 검증·Reviewer 재실행
+  → 재검증 통과 후 사람의 두 번째 승인 대기
+  → 두 번째 승인에서 `git merge --ff-only`로 적용
+```
+
+재검증이 실패하면 원본 checkout은 바꾸지 않는다. 작업 상태와 worktree를 유지해 사용자가 실패 단계를 확인하고 다시 검증하거나 폐기할 수 있게 한다. 승인 직전에 원본 HEAD가 다시 바뀌어 fast-forward가 불가능하면 적용을 멈추고 다시 승인을 요청한다. 강제 merge, reset, stash나 사용자 파일 덮어쓰기는 시도하지 않는다.
 
 성공한 승인에서는 격리 worktree를 정리하고 작업을 `completed`로 전환한다. 폐기는 `git worktree remove --force <exact-task-path>`만 사용하며 저장소 루트나 광범위한 경로를 대상으로 하지 않는다. `blocked_environment`·`failed`·`stopped` 작업은 재실행을 위해 worktree를 유지하고, 사용자가 폐기하면 같은 정리 경로를 사용한다.
 
@@ -175,7 +196,7 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 | 테이블 | 의미 |
 | --- | --- |
 | `projects` | 로컬 저장소 경로, 환경 준비·검증 명령, 자동 감지하거나 사용자가 수정한 iOS runtime adapter |
-| `tasks` | 목표, 상태, 재시도, 브랜치와 worktree, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
+| `tasks` | 목표, 상태, 재시도, 작업 브랜치·worktree·시작 원본 브랜치·기준 commit, 검증 계획·단계별 결과, 사람이 승인한 runtime 계약 스냅샷 |
 | `events` | 모든 관측 가능한 상태 변화와 역할 로그 |
 | `findings` | 테스트·실행 실패와 Reviewer 결함 |
 | `notes` | 사람의 결정과 프로젝트 문맥 |
@@ -229,7 +250,7 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 - 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HOME`을 사용한다.
 - 로그인은 app-server의 `account/login/start`로 시작하고 `account/login/completed` 알림으로 완료를 확정한다.
 - 작업용 `codex exec`에도 같은 전용 `CODEX_HOME`과 ChatGPT 전용 인증 정책을 적용한다.
-- 승인 적용은 깨끗한 원본 checkout과 fast-forward 가능 조건을 모두 만족할 때만 수행한다.
+- 승인 적용은 깨끗한 원본 checkout, 작업 시작 브랜치 일치와 fast-forward 가능 조건을 모두 만족할 때만 원본을 변경한다. 원본이 앞서 있으면 격리 작업 브랜치만 재배치하고 선택한 검증을 다시 통과시킨다.
 - 승인 실패 시 강제 merge, reset, stash 또는 사용자 파일 덮어쓰기를 시도하지 않는다.
 
 ## 의도적으로 남긴 제한
@@ -238,6 +259,7 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 - 비정상 종료로 Simulator 앱이 남으면 다음 동일 bundle 실행의 `--terminate-running-process` 또는 사용자의 수동 종료로 정리한다.
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
-- 분기된 작업 브랜치의 rebase나 충돌 해결은 자동화하지 않는다.
+- 분기된 작업 브랜치의 충돌 해결은 자동화하지 않는다. 충돌이 나면 rebase를 취소하고 충돌 파일을 사용자에게 보여준다.
+- 소스 제어는 hunk 단위 stage, 변경 폐기, amend, 원격 push를 제공하지 않는다.
 
 이 제한은 로컬 개인용 MVP에서 허용한다. 팀 사용이나 자동 merge를 추가하기 전에 복구 관리자, approval policy, 테스트 잠금, 서명된 감사 로그를 먼저 설계해야 한다.

@@ -46,6 +46,8 @@ const taskColumns = `
   attempt,
   branch_name AS branchName,
   worktree_path AS worktreePath,
+  source_branch AS sourceBranch,
+  base_commit AS baseCommit,
   runtime_contract_json AS runtimeContractJson,
   runtime_scenario_summary AS runtimeScenarioSummary,
   runtime_scenario_approved_at AS runtimeScenarioApprovedAt,
@@ -163,6 +165,8 @@ function taskFromRow(row: Row): TaskRecord {
     attempt: Number(row.attempt),
     branchName: row.branchName ? String(row.branchName) : null,
     worktreePath: row.worktreePath ? String(row.worktreePath) : null,
+    sourceBranch: row.sourceBranch ? String(row.sourceBranch) : null,
+    baseCommit: row.baseCommit ? String(row.baseCommit) : null,
     runtimeContract: row.runtimeContractJson
       ? JSON.parse(String(row.runtimeContractJson)) as ApprovedRuntimeContract
       : null,
@@ -285,6 +289,8 @@ export class AppStore {
         attempt INTEGER NOT NULL DEFAULT 0,
         branch_name TEXT,
         worktree_path TEXT,
+        source_branch TEXT,
+        base_commit TEXT,
         runtime_contract_json TEXT,
         runtime_scenario_summary TEXT,
         runtime_scenario_approved_at TEXT,
@@ -400,6 +406,12 @@ export class AppStore {
     }
     if (!taskColumnNames.has('verification_result_json')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN verification_result_json TEXT')
+    }
+    if (!taskColumnNames.has('source_branch')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN source_branch TEXT')
+    }
+    if (!taskColumnNames.has('base_commit')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN base_commit TEXT')
     }
 
     const runtimeEvidenceColumnNames = new Set(
@@ -552,6 +564,8 @@ export class AppStore {
       attempt: 0,
       branchName: null,
       worktreePath: null,
+      sourceBranch: null,
+      baseCommit: null,
       runtimeContract,
       runtimeScenarioSummary: runtimeScenarioSummary?.trim() || null,
       runtimeScenarioApprovedAt: runtimeContract ? now : null,
@@ -564,12 +578,13 @@ export class AppStore {
       .prepare(`
         INSERT INTO tasks (
           id, project_id, title, prompt, status, provider, max_attempts, attempt,
-          branch_name, worktree_path, runtime_contract_json, runtime_scenario_summary,
+          branch_name, worktree_path, source_branch, base_commit,
+          runtime_contract_json, runtime_scenario_summary,
           runtime_scenario_approved_at, verification_plan_json, verification_result_json,
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
-          NULL, NULL, $runtimeContract, $runtimeScenarioSummary,
+          NULL, NULL, NULL, NULL, $runtimeContract, $runtimeScenarioSummary,
           $runtimeScenarioApprovedAt, $verificationPlan, $verificationResult,
           $createdAt, $updatedAt
         )
@@ -634,11 +649,21 @@ export class AppStore {
     return this.getTask(taskId)
   }
 
-  setTaskWorkspace(taskId: string, branchName: string, worktreePath: string): TaskRecord {
+  setTaskWorkspace(
+    taskId: string,
+    branchName: string,
+    worktreePath: string,
+    sourceBranch: string | null = null,
+    baseCommit: string | null = null
+  ): TaskRecord {
     const now = new Date().toISOString()
     this.database
-      .prepare('UPDATE tasks SET branch_name = ?, worktree_path = ?, updated_at = ? WHERE id = ?')
-      .run(branchName, worktreePath, now, taskId)
+      .prepare(`
+        UPDATE tasks
+        SET branch_name = ?, worktree_path = ?, source_branch = ?, base_commit = ?, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(branchName, worktreePath, sourceBranch, baseCommit, now, taskId)
     return this.getTask(taskId)
   }
 

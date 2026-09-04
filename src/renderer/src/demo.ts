@@ -6,6 +6,8 @@ import {
   type EventKind,
   type EventRecord,
   type ProjectRecord,
+  type SourceControlFile,
+  type SourceControlStatus,
   type TaskRecord,
   type TaskStatus
 } from '../../shared/types'
@@ -77,6 +79,8 @@ function buildSnapshot(): DashboardSnapshot {
       attempt: index === 31 && runtimeRunning ? 2 : 1,
       branchName: null,
       worktreePath: null,
+      sourceBranch: null,
+      baseCommit: null,
       runtimeContract: null,
       runtimeScenarioSummary: null,
       runtimeScenarioApprovedAt: null,
@@ -316,6 +320,23 @@ let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
     }
   : buildSnapshot()
 let runtimeArtifactRetentionDays: 0 | 7 | 30 | 90 = 30
+let demoSourceControlFiles: SourceControlFile[] = [
+  {
+    path: 'Projects/Shared/Featcher/Project.swift',
+    originalPath: null,
+    staged: null,
+    working: 'modified',
+    conflicted: false
+  },
+  {
+    path: 'Projects/Shared/Featcher/Tests/FetcherTests.swift',
+    originalPath: null,
+    staged: null,
+    working: 'untracked',
+    conflicted: false
+  }
+]
+let demoSourceControlIdentity = { name: '김동현', email: 'developer@example.com', complete: true }
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
 let demoAuth: CodexAuthStatus = searchParams.get('auth') === 'signed-out'
@@ -326,6 +347,21 @@ function updateDemoAuth(status: CodexAuthStatus): CodexAuthStatus {
   demoAuth = status
   authListeners.forEach((listener) => listener(status))
   return status
+}
+
+function sourceControlStatus(requestedProjectId: string): SourceControlStatus {
+  const files = searchParams.get('source-control') === 'dirty' ? demoSourceControlFiles : []
+  return {
+    projectId: requestedProjectId,
+    branch: 'main',
+    headCommit: 'a1b2c3d',
+    identity: demoSourceControlIdentity,
+    files,
+    stagedCount: files.filter((file) => file.staged).length,
+    workingCount: files.filter((file) => file.working).length,
+    conflictedCount: files.filter((file) => file.conflicted).length,
+    inspectedAt: new Date().toISOString()
+  }
 }
 
 function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: string): void {
@@ -568,6 +604,62 @@ export const demoBridge: AgentMonitoringBridge = {
       inspectedAt: new Date().toISOString()
     }
   },
+  getSourceControlStatus: async (requestedProjectId) => sourceControlStatus(requestedProjectId),
+  getSourceControlDiff: async (input) => ({
+    projectId: input.projectId,
+    path: input.path,
+    area: input.area,
+    patch: input.path.endsWith('Project.swift')
+      ? 'diff --git a/Projects/Shared/Featcher/Project.swift b/Projects/Shared/Featcher/Project.swift\n@@ -34,2 +34,8 @@\n+        .target(\n+            name: "FeatcherTests"\n+        )\n'
+      : 'diff --git a/Projects/Shared/Featcher/Tests/FetcherTests.swift b/Projects/Shared/Featcher/Tests/FetcherTests.swift\nnew file mode 100644\n+import Testing\n+@Test func fetchesItems() {}\n',
+    available: true,
+    binary: false,
+    truncated: false
+  }),
+  stageSourceControlPaths: async (input) => {
+    const selected = new Set(input.paths)
+    demoSourceControlFiles = demoSourceControlFiles.map((file) => selected.has(file.path)
+      ? { ...file, staged: file.working, working: null }
+      : file)
+    return sourceControlStatus(input.projectId)
+  },
+  unstageSourceControlPaths: async (input) => {
+    const selected = new Set(input.paths)
+    demoSourceControlFiles = demoSourceControlFiles.map((file) => selected.has(file.path)
+      ? { ...file, working: file.staged, staged: null }
+      : file)
+    return sourceControlStatus(input.projectId)
+  },
+  stageAllSourceControlChanges: async (requestedProjectId) => {
+    demoSourceControlFiles = demoSourceControlFiles.map((file) => ({
+      ...file,
+      staged: file.working ?? file.staged,
+      working: null
+    }))
+    return sourceControlStatus(requestedProjectId)
+  },
+  unstageAllSourceControlChanges: async (requestedProjectId) => {
+    demoSourceControlFiles = demoSourceControlFiles.map((file) => ({
+      ...file,
+      working: file.staged ?? file.working,
+      staged: null
+    }))
+    return sourceControlStatus(requestedProjectId)
+  },
+  setSourceControlIdentity: async (input) => {
+    demoSourceControlIdentity = { name: input.name, email: input.email, complete: true }
+    return sourceControlStatus(input.projectId)
+  },
+  commitSourceControlChanges: async (input) => {
+    demoSourceControlFiles = input.includeWorking
+      ? []
+      : demoSourceControlFiles.filter((file) => !file.staged)
+    return {
+      commit: 'd4e5f6a',
+      summary: `[main d4e5f6a] ${input.message}`,
+      status: sourceControlStatus(input.projectId)
+    }
+  },
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
@@ -651,6 +743,8 @@ export const demoBridge: AgentMonitoringBridge = {
       attempt: 0,
       branchName: null,
       worktreePath: null,
+      sourceBranch: null,
+      baseCommit: null,
       runtimeContract: input.runtimeContract ?? null,
       runtimeScenarioSummary: input.runtimeScenarioSummary ?? null,
       runtimeScenarioApprovedAt: input.runtimeContract ? now : null,
@@ -733,6 +827,7 @@ export const demoBridge: AgentMonitoringBridge = {
   approveTask: async (taskId) => {
     const task = updateTask(taskId, 'completed', { worktreePath: null })
     emit(task, 'task_completed', 'human', `${task.title} 변경을 원본 브랜치에 적용`)
+    return { outcome: 'applied', message: 'AI 작업을 원본 브랜치에 적용했습니다.' }
   },
   discardTask: async (taskId) => {
     const task = updateTask(taskId, 'discarded', { worktreePath: null })

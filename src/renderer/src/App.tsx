@@ -18,6 +18,7 @@ import {
   HardDrive,
   GitCompareArrows,
   GitBranch,
+  GitCommitHorizontal,
   Image as ImageIcon,
   LayoutDashboard,
   ListTodo,
@@ -85,11 +86,15 @@ import type {
   VerificationPlanRecommendation,
   VerificationStepStatus,
   RuntimeVerificationSource,
+  SourceControlArea,
+  SourceControlDiff,
+  SourceControlFile,
+  SourceControlStatus,
   UpdateProjectInput
 } from '../../shared/types'
 import { demoBridge } from './demo'
 
-type Page = 'dashboard' | 'tasks' | 'findings' | 'notes' | 'projects'
+type Page = 'dashboard' | 'tasks' | 'findings' | 'notes' | 'source-control' | 'projects'
 type Range = 7 | 30 | 'all'
 type BridgeConnectionIssue = 'missing' | 'outdated'
 
@@ -101,7 +106,11 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'retryTaskVerification',
   'getStorageOverview',
   'setStoragePolicy',
-  'cleanupStorage'
+  'cleanupStorage',
+  'getSourceControlStatus',
+  'getSourceControlDiff',
+  'stageSourceControlPaths',
+  'commitSourceControlChanges'
 ]
 const bridgeConnectionIssue: BridgeConnectionIssue | null = !electronRuntime
   ? null
@@ -232,7 +241,8 @@ const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof LayoutDashboard
   { page: 'dashboard', label: '대시보드', icon: LayoutDashboard },
   { page: 'tasks', label: '작업', icon: ListTodo },
   { page: 'findings', label: '버그', icon: Bug },
-  { page: 'notes', label: '메모', icon: NotebookPen }
+  { page: 'notes', label: '메모', icon: NotebookPen },
+  { page: 'source-control', label: '소스 제어', icon: GitCompareArrows }
 ]
 
 function timeAgo(value: string): string {
@@ -308,6 +318,7 @@ export function App(): React.JSX.Element {
   const [runtimeConnecting, setRuntimeConnecting] = useState(false)
   const [selectingProjectId, setSelectingProjectId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async (projectId?: string) => {
@@ -487,16 +498,28 @@ export function App(): React.JSX.Element {
   const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard'): Promise<void> => {
     try {
       if (action === 'discard' && !window.confirm('격리 작업공간과 변경을 폐기할까요?')) return
+      if (action === 'approve') {
+        const sourceStatus = await bridge.getSourceControlStatus(task.projectId)
+        if (sourceStatus.files.length > 0) {
+          setSelectedTask(null)
+          setPage('source-control')
+          setError('원본에 커밋되지 않은 변경이 있습니다. 소스 제어에서 파일을 선택해 커밋한 뒤 다시 적용하세요.')
+          return
+        }
+      }
       if (
         action === 'approve' &&
         !window.confirm(
           task.status === 'awaiting_manual_validation'
-            ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 확인했다면 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다.'
-            : '승인하면 작업 변경을 커밋하고 현재 원본 브랜치에 fast-forward 방식으로 적용합니다. 계속할까요?'
+            ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 원본이 최신이면 바로 적용하고, 원본이 바뀌었다면 최신 변경을 반영한 뒤 다시 검증합니다.'
+            : '원본이 최신이면 작업을 바로 적용합니다. 원본이 바뀌었다면 최신 변경을 반영하고 검증한 뒤 다시 승인을 요청합니다. 계속할까요?'
         )
       ) return
       if (action === 'stop') await bridge.stopTask(task.id)
-      if (action === 'approve') await bridge.approveTask(task.id)
+      if (action === 'approve') {
+        const result = await bridge.approveTask(task.id)
+        setNotice(result.message)
+      }
       if (action === 'discard') await bridge.discardTask(task.id)
       await load(task.projectId)
     } catch (actionError) {
@@ -621,6 +644,7 @@ export function App(): React.JSX.Element {
         snapshot={snapshot}
         selectedProjectId={selectedProjectId ?? selectedProject?.id}
         page={page}
+        sourceControlCount={inspection?.changeCount ?? 0}
         busy={busy}
         selectingProjectId={selectingProjectId}
         onPage={setPage}
@@ -670,6 +694,7 @@ export function App(): React.JSX.Element {
             autoConnecting={runtimeConnecting}
             onOpen={() => void bridge.openPath(selectedProject.path)}
             onConfigure={() => setPage('projects')}
+            onSourceControl={() => setPage('source-control')}
             onApplyCommand={(command) => void applySuggestedTestCommand(selectedProject, command)}
             onNewTask={() => setTaskModal(true)}
           />
@@ -716,6 +741,16 @@ export function App(): React.JSX.Element {
               setNoteModal(true)
             }}
             onDelete={(note) => void removeNote(note)}
+          />
+        )}
+        {selectedProject && page === 'source-control' && (
+          <SourceControlPage
+            project={selectedProject}
+            onRepositoryChanged={async () => {
+              await load(selectedProject.id)
+              await refreshInspection(selectedProject.id)
+            }}
+            onError={setError}
           />
         )}
         {selectedProject && page === 'projects' && (
@@ -811,6 +846,13 @@ export function App(): React.JSX.Element {
           <button aria-label="오류 닫기" onClick={() => setError(null)}><X size={15} /></button>
         </div>
       )}
+      {notice && (
+        <div className="success-toast" role="status">
+          <CheckCircle2 size={16} />
+          <span>{notice}</span>
+          <button aria-label="알림 닫기" onClick={() => setNotice(null)}><X size={15} /></button>
+        </div>
+      )}
     </div>
   )
 }
@@ -900,6 +942,7 @@ function ProjectStartPage({
   autoConnecting,
   onOpen,
   onConfigure,
+  onSourceControl,
   onApplyCommand,
   onNewTask
 }: {
@@ -911,6 +954,7 @@ function ProjectStartPage({
   autoConnecting: boolean
   onOpen: () => void
   onConfigure: () => void
+  onSourceControl: () => void
   onApplyCommand: (command: string) => void
   onNewTask: () => void
 }): React.JSX.Element {
@@ -1003,6 +1047,9 @@ function ProjectStartPage({
               )}
             </div>
             <p>격리 작업은 만들 수 있지만 `원본에 적용`하려면 먼저 checkout을 clean 상태로 정리해야 합니다.</p>
+            <button className="secondary-button" onClick={onSourceControl}>
+              <GitCompareArrows size={13} /> 소스 제어에서 커밋
+            </button>
           </div>
         </div>
       )}
@@ -1267,6 +1314,7 @@ function Sidebar({
   snapshot,
   selectedProjectId,
   page,
+  sourceControlCount,
   busy,
   selectingProjectId,
   onPage,
@@ -1280,6 +1328,7 @@ function Sidebar({
   snapshot: DashboardSnapshot
   selectedProjectId?: string
   page: Page
+  sourceControlCount: number
   busy: boolean
   selectingProjectId: string | null
   onPage: (page: Page) => void
@@ -1320,7 +1369,13 @@ function Sidebar({
       <nav className="main-nav">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon
-          const count = item.page === 'tasks' ? snapshot.tasks.length : item.page === 'notes' ? snapshot.notes.length : null
+          const count = item.page === 'tasks'
+            ? snapshot.tasks.length
+            : item.page === 'notes'
+              ? snapshot.notes.length
+              : item.page === 'source-control'
+                ? sourceControlCount
+                : null
           return (
             <button
               key={item.page}
@@ -1666,6 +1721,302 @@ function NotesPage({
         {notes.length === 0 && <EmptyState icon={NotebookPen} title="등록된 메모가 없습니다." />}
       </div>
     </section>
+  )
+}
+
+function SourceControlPage({
+  project,
+  onRepositoryChanged,
+  onError
+}: {
+  project: ProjectRecord
+  onRepositoryChanged: () => Promise<void>
+  onError: (message: string) => void
+}): React.JSX.Element {
+  const [status, setStatus] = useState<SourceControlStatus | null>(null)
+  const [selected, setSelected] = useState<{ path: string; area: SourceControlArea } | null>(null)
+  const [diff, setDiff] = useState<SourceControlDiff | null>(null)
+  const [message, setMessage] = useState('')
+  const [identityName, setIdentityName] = useState('')
+  const [identityEmail, setIdentityEmail] = useState('')
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
+
+  const loadStatus = useCallback(async () => {
+    setBusyAction('refresh')
+    try {
+      const next = await bridge.getSourceControlStatus(project.id)
+      setStatus(next)
+      setIdentityName(next.identity.name ?? '')
+      setIdentityEmail(next.identity.email ?? '')
+      setSelected((current) => {
+        if (!current) return null
+        const file = next.files.find((candidate) => candidate.path === current.path)
+        if (!file || (current.area === 'staged' ? !file.staged : !file.working)) return null
+        return current
+      })
+    } catch (sourceError) {
+      onError(String(sourceError))
+    } finally {
+      setBusyAction(null)
+    }
+  }, [onError, project.id])
+
+  useEffect(() => {
+    void loadStatus()
+  }, [loadStatus])
+
+  useEffect(() => {
+    let cancelled = false
+    setDiff(null)
+    if (!selected) return undefined
+    void bridge.getSourceControlDiff({ projectId: project.id, ...selected })
+      .then((next) => {
+        if (!cancelled) setDiff(next)
+      })
+      .catch((sourceError) => {
+        if (!cancelled) onError(String(sourceError))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onError, project.id, selected])
+
+  const updateStatus = (next: SourceControlStatus): void => {
+    setStatus(next)
+    setSuccess(null)
+    setSelected((current) => {
+      if (!current) return null
+      const file = next.files.find((candidate) => candidate.path === current.path)
+      if (!file || (current.area === 'staged' ? !file.staged : !file.working)) return null
+      return current
+    })
+  }
+
+  const runStatusAction = async (
+    key: string,
+    operation: () => Promise<SourceControlStatus>
+  ): Promise<void> => {
+    setBusyAction(key)
+    try {
+      updateStatus(await operation())
+    } catch (sourceError) {
+      onError(String(sourceError))
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const saveIdentity = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    await runStatusAction('identity', () => bridge.setSourceControlIdentity({
+      projectId: project.id,
+      name: identityName,
+      email: identityEmail
+    }))
+  }
+
+  const commit = async (includeWorking: boolean): Promise<void> => {
+    if (!message.trim()) {
+      onError('커밋 메시지를 입력하세요.')
+      return
+    }
+    setBusyAction(includeWorking ? 'commit-all' : 'commit-staged')
+    try {
+      const result = await bridge.commitSourceControlChanges({
+        projectId: project.id,
+        message,
+        includeWorking
+      })
+      setStatus(result.status)
+      setSelected(null)
+      setDiff(null)
+      setMessage('')
+      setSuccess(`${result.commit} 커밋을 만들었습니다.`)
+      await onRepositoryChanged()
+    } catch (sourceError) {
+      onError(String(sourceError))
+      await loadStatus()
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const stagedFiles = status?.files.filter((file) => file.staged) ?? []
+  const workingFiles = status?.files.filter((file) => file.working) ?? []
+  const busy = busyAction !== null
+
+  return (
+    <section className="source-control-page">
+      <PageHeading
+        title="소스 제어"
+        description="원본 저장소의 변경을 확인하고 파일별 또는 전체로 커밋한다."
+        action={busyAction === 'refresh' ? '불러오는 중' : '다시 불러오기'}
+        onAction={() => void loadStatus()}
+      />
+
+      <div className="source-control-overview panel">
+        <div>
+          <GitBranch size={15} />
+          <span>현재 브랜치</span>
+          <strong>{status?.branch ?? '확인 중'}</strong>
+          {status?.headCommit && <code>{status.headCommit}</code>}
+        </div>
+        <div>
+          <GitCompareArrows size={15} />
+          <span>커밋되지 않은 파일</span>
+          <strong>{status?.files.length ?? 0}개</strong>
+          <small>staged {status?.stagedCount ?? 0} · working {status?.workingCount ?? 0}</small>
+        </div>
+        <div className={status?.conflictedCount ? 'attention' : ''}>
+          <ShieldCheck size={15} />
+          <span>Git 상태</span>
+          <strong>{status?.conflictedCount ? `충돌 ${status.conflictedCount}개` : '커밋 가능'}</strong>
+          <small>{status?.identity.complete ? `${status.identity.name} · ${status.identity.email}` : '작성자 설정 필요'}</small>
+        </div>
+      </div>
+
+      {status && !status.identity.complete && (
+        <form className="panel source-identity" onSubmit={(event) => void saveIdentity(event)}>
+          <div>
+            <strong>이 저장소에서 사용할 Git 작성자를 설정하세요</strong>
+            <p>전역 설정은 바꾸지 않고 이 저장소의 로컬 Git 설정에만 저장해요.</p>
+          </div>
+          <label><span>이름</span><input value={identityName} onChange={(event) => setIdentityName(event.target.value)} /></label>
+          <label><span>이메일</span><input type="email" value={identityEmail} onChange={(event) => setIdentityEmail(event.target.value)} /></label>
+          <button className="primary-button" disabled={busy} type="submit">
+            {busyAction === 'identity' ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />} 저장
+          </button>
+        </form>
+      )}
+
+      <div className="source-control-layout">
+        <section className="panel source-file-panel">
+          <SourceControlGroup
+            title="스테이징된 변경"
+            files={stagedFiles}
+            area="staged"
+            selected={selected}
+            busy={busy}
+            actionLabel="모두 스테이징 해제"
+            onAction={() => void runStatusAction('unstage-all', () => bridge.unstageAllSourceControlChanges(project.id))}
+            onSelect={setSelected}
+            onFileAction={(path) => void runStatusAction(`unstage:${path}`, () => bridge.unstageSourceControlPaths({ projectId: project.id, paths: [path] }))}
+          />
+          <SourceControlGroup
+            title="변경 사항"
+            files={workingFiles}
+            area="working"
+            selected={selected}
+            busy={busy}
+            actionLabel="모두 스테이징"
+            onAction={() => void runStatusAction('stage-all', () => bridge.stageAllSourceControlChanges(project.id))}
+            onSelect={setSelected}
+            onFileAction={(path) => void runStatusAction(`stage:${path}`, () => bridge.stageSourceControlPaths({ projectId: project.id, paths: [path] }))}
+          />
+        </section>
+
+        <section className="panel source-diff-panel">
+          <header>
+            <div>
+              <strong>{selected?.path ?? '변경 파일을 선택하세요'}</strong>
+              <small>{selected ? selected.area === 'staged' ? '스테이징된 diff' : '작업공간 diff' : '파일을 선택하면 변경 내용을 보여줘요.'}</small>
+            </div>
+            {diff?.truncated && <span>일부만 표시</span>}
+          </header>
+          {!selected && <div className="source-diff-empty"><GitCompareArrows size={24} /><p>왼쪽에서 파일을 선택하세요.</p></div>}
+          {selected && !diff && <div className="source-diff-empty"><LoaderCircle className="spin" size={20} /><p>diff를 불러오고 있어요.</p></div>}
+          {diff && !diff.available && <div className="source-diff-empty"><FileText size={22} /><p>텍스트로 표시할 diff가 없어요.</p></div>}
+          {diff?.available && <pre className="source-diff"><code>{diff.patch}</code></pre>}
+        </section>
+
+        <form className="panel source-commit-panel" onSubmit={(event) => {
+          event.preventDefault()
+          void commit(false)
+        }}>
+          <div>
+            <p className="eyebrow">CREATE COMMIT</p>
+            <h3>선택한 변경을 기록하세요</h3>
+            <p>스테이징된 파일만 커밋하거나 작업공간의 변경을 모두 한 번에 커밋할 수 있어요.</p>
+          </div>
+          <label>
+            <span>커밋 메시지</span>
+            <textarea
+              value={message}
+              maxLength={2_000}
+              placeholder="예: Featcher 테스트 타깃을 추가한다"
+              onChange={(event) => setMessage(event.target.value)}
+            />
+          </label>
+          {success && <div className="source-success"><CheckCircle2 size={14} />{success}</div>}
+          <div className="source-commit-actions">
+            <button className="secondary-button" type="submit" disabled={busy || !status?.identity.complete || stagedFiles.length === 0 || !message.trim()}>
+              {busyAction === 'commit-staged' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />}
+              staged {stagedFiles.length}개 커밋
+            </button>
+            <button className="primary-button" type="button" disabled={busy || !status?.identity.complete || !status?.files.length || !message.trim()} onClick={() => void commit(true)}>
+              {busyAction === 'commit-all' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />}
+              변경 사항 모두 커밋
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+  )
+}
+
+function SourceControlGroup({
+  title,
+  files,
+  area,
+  selected,
+  busy,
+  actionLabel,
+  onAction,
+  onSelect,
+  onFileAction
+}: {
+  title: string
+  files: SourceControlFile[]
+  area: SourceControlArea
+  selected: { path: string; area: SourceControlArea } | null
+  busy: boolean
+  actionLabel: string
+  onAction: () => void
+  onSelect: (selected: { path: string; area: SourceControlArea }) => void
+  onFileAction: (path: string) => void
+}): React.JSX.Element {
+  return (
+    <div className="source-file-group">
+      <header>
+        <strong>{title} <span>{files.length}</span></strong>
+        <button type="button" disabled={busy || files.length === 0} onClick={onAction}>{actionLabel}</button>
+      </header>
+      {files.length === 0 && <p className="source-file-empty">해당하는 파일이 없습니다.</p>}
+      {files.map((file) => {
+        const kind = area === 'staged' ? file.staged : file.working
+        const active = selected?.path === file.path && selected.area === area
+        return (
+          <div className={`source-file${active ? ' active' : ''}`} key={`${area}:${file.path}`}>
+            <button className="source-file-main" type="button" onClick={() => onSelect({ path: file.path, area })}>
+              <span className={`source-kind kind-${kind}`}>{kind ? PROJECT_CHANGE_PATH_LABELS[kind] : '변경'}</span>
+              <code title={file.path}>{file.path}</code>
+              {file.originalPath && <small>{file.originalPath}에서 이름 변경</small>}
+            </button>
+            <button
+              className="source-file-action"
+              type="button"
+              disabled={busy}
+              aria-label={`${file.path} ${area === 'staged' ? '스테이징 해제' : '스테이징'}`}
+              title={area === 'staged' ? '스테이징 해제' : '스테이징'}
+              onClick={() => onFileAction(file.path)}
+            >
+              {area === 'staged' ? '−' : '+'}
+            </button>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

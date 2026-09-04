@@ -12,6 +12,7 @@ import type {
   StorageCleanupResult,
   StorageOverview,
   StoragePolicy,
+  TaskApprovalResult,
   TaskChanges,
   TaskRecord,
   TaskVerificationPlan,
@@ -27,6 +28,7 @@ import {
 } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { GitOperationCoordinator } from './git-operation-coordinator'
 import {
   IosRuntimeStageError,
   iosSimulatorRuntimeAdapter,
@@ -292,7 +294,8 @@ export class AgentRunner {
     private readonly codexCommand = 'codex',
     private readonly codexHome?: string,
     policy: Partial<RunnerPolicy> = {},
-    private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter
+    private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter,
+    private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator()
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
     this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
@@ -739,8 +742,14 @@ export class AgentRunner {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
     let task = this.store.getTask(taskId)
-    if (!['blocked_environment', 'failed', 'stopped'].includes(task.status)) {
-      throw new Error('환경 준비 또는 검증에 실패한 작업만 구현 없이 다시 검증할 수 있습니다.')
+    if (![
+      'blocked_environment',
+      'failed',
+      'stopped',
+      'awaiting_approval',
+      'awaiting_manual_validation'
+    ].includes(task.status)) {
+      throw new Error('중단되었거나 사람의 확인을 기다리는 작업만 구현 없이 다시 검증할 수 있습니다.')
     }
     if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
       throw new Error('다시 검증할 격리 작업공간을 찾을 수 없습니다.')
@@ -1026,7 +1035,12 @@ export class AgentRunner {
     return this.cleanupStorage({ removeLocalBranches: false })
   }
 
-  async approve(taskId: string): Promise<void> {
+  async approve(taskId: string): Promise<TaskApprovalResult> {
+    const task = this.store.getTask(taskId)
+    return this.gitCoordinator.runExclusive(task.projectId, () => this.approveUnlocked(taskId))
+  }
+
+  private async approveUnlocked(taskId: string): Promise<TaskApprovalResult> {
     const task = this.store.getTask(taskId)
     if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
       throw new Error('검증 후 사람의 확인을 기다리는 작업만 원본에 적용할 수 있습니다.')
@@ -1044,6 +1058,13 @@ export class AgentRunner {
       projectRoot,
       '원본 저장소가 브랜치를 checkout한 상태인지 확인할 수 없습니다.'
     )
+    const currentTargetBranch = targetBranch.output.trim()
+    if (task.sourceBranch && task.sourceBranch !== currentTargetBranch) {
+      throw new Error(
+        `이 작업은 ${task.sourceBranch} 브랜치에서 시작했습니다. ` +
+          `${task.sourceBranch} 브랜치를 checkout한 뒤 다시 승인하세요.`
+      )
+    }
     await this.assertCleanCheckout(projectRoot)
 
     const worktreeBranch = await this.requireGit(
@@ -1079,16 +1100,39 @@ export class AgentRunner {
     }
 
     await this.assertCleanCheckout(projectRoot)
+    const targetHead = await this.requireGit(
+      ['rev-parse', 'HEAD'],
+      projectRoot,
+      '원본 브랜치의 최신 commit을 확인할 수 없습니다.'
+    )
+    const canFastForward = await this.runProcess(
+      'git',
+      ['merge-base', '--is-ancestor', targetHead.output.trim(), task.branchName],
+      projectRoot,
+      null
+    )
+    if (canFastForward.code === 1) {
+      await this.rebaseAndReverify(task, currentTargetBranch, targetHead.output.trim())
+      return {
+        outcome: 'reverified',
+        message:
+          `원본 ${currentTargetBranch} 브랜치의 최신 commit을 작업에 반영하고 검증을 다시 완료했습니다. ` +
+          '변경 내용을 확인한 뒤 한 번 더 적용하세요.'
+      }
+    }
+    if (canFastForward.code !== 0) {
+      throw new Error('원본과 작업 브랜치의 관계를 확인할 수 없습니다.')
+    }
+
     const mergeResult = await this.runProcess('git', ['merge', '--ff-only', task.branchName], projectRoot, null)
     if (mergeResult.code !== 0) {
       throw new Error(
-        `원본 ${targetBranch.output.trim()} 브랜치가 작업 시작 이후 변경되어 fast-forward 적용할 수 없습니다. ` +
-          '원본 브랜치와 작업 브랜치를 직접 정리한 뒤 다시 승인하세요.'
+        `원본 ${currentTargetBranch} 브랜치가 적용 직전에 변경되었습니다. 변경 상태를 확인한 뒤 다시 승인하세요.`
       )
     }
 
     const completed = this.store.transitionTask(taskId, 'completed')
-    this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원본 ${targetBranch.output.trim()} 브랜치에 적용`)
+    this.emit(completed, 'task_completed', 'human', `${task.title} 변경을 원본 ${currentTargetBranch} 브랜치에 적용`)
 
     try {
       await this.cleanupTaskWorktree(completed, false)
@@ -1098,6 +1142,44 @@ export class AgentRunner {
     }
     await this.cleanupTerminalDerivedData(completed)
     await this.removeRuntimeArtifactsWhenExpired(this.store.getTask(taskId))
+    return {
+      outcome: 'applied',
+      message: `작업 변경을 원본 ${currentTargetBranch} 브랜치에 적용했습니다.`
+    }
+  }
+
+  private async rebaseAndReverify(
+    task: TaskRecord,
+    targetBranch: string,
+    targetHead: string
+  ): Promise<void> {
+    const worktreePath = task.worktreePath!
+    this.emit(task, 'agent', 'git', `원본 ${targetBranch} 최신 변경을 격리 작업공간에 반영 시작`)
+    const rebase = await this.runProcess('git', ['rebase', targetHead], worktreePath, null)
+    if (rebase.code !== 0) {
+      const conflicts = await this.runProcess(
+        'git',
+        ['diff', '--name-only', '--diff-filter=U'],
+        worktreePath,
+        null
+      )
+      await this.runProcess('git', ['rebase', '--abort'], worktreePath, null)
+      const conflictPaths = conflicts.output.trim().split(/\r?\n/).filter(Boolean)
+      const detail = conflictPaths.length > 0 ? ` 충돌 파일: ${conflictPaths.join(', ')}` : ''
+      throw new Error(
+        `원본 ${targetBranch} 최신 변경과 AI 작업이 충돌했습니다.${detail} ` +
+          '원본 저장소는 변경하지 않았습니다. 작업 내용을 정리한 뒤 다시 승인하세요.'
+      )
+    }
+
+    this.emit(task, 'agent', 'git', `원본 ${targetBranch} 최신 변경 반영 완료 · 검증 다시 시작`)
+    await this.retryVerification(task.id)
+    const verifiedTask = this.store.getTask(task.id)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(verifiedTask.status)) {
+      throw new Error(
+        '원본 최신 변경을 반영했지만 재검증을 통과하지 못했습니다. 실패한 단계를 확인하고 다시 실행하세요.'
+      )
+    }
   }
 
   async discard(taskId: string): Promise<void> {
@@ -1323,9 +1405,29 @@ export class AgentRunner {
     if (!worktreePath.startsWith(`${root}/`)) throw new Error('안전하지 않은 worktree 경로입니다.')
     const branchName = `agentmonitor/${safeSlug(task.title)}-${task.id.slice(0, 6)}`
 
-    await this.runProcess('git', ['rev-parse', '--is-inside-work-tree'], projectRoot, null)
-    await this.runProcess('git', ['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'], projectRoot, null)
-    this.store.setTaskWorkspace(task.id, branchName, worktreePath)
+    await this.requireGit(['rev-parse', '--is-inside-work-tree'], projectRoot, 'Git 저장소를 확인할 수 없습니다.')
+    const sourceBranch = await this.requireGit(
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      projectRoot,
+      '작업을 시작할 원본 브랜치를 확인할 수 없습니다.'
+    )
+    const baseCommit = await this.requireGit(
+      ['rev-parse', 'HEAD'],
+      projectRoot,
+      '작업을 시작할 기준 commit을 확인할 수 없습니다.'
+    )
+    await this.requireGit(
+      ['worktree', 'add', '-b', branchName, worktreePath, baseCommit.output.trim()],
+      projectRoot,
+      '격리 작업공간을 만들 수 없습니다.'
+    )
+    this.store.setTaskWorkspace(
+      task.id,
+      branchName,
+      worktreePath,
+      sourceBranch.output.trim(),
+      baseCommit.output.trim()
+    )
     this.emit(task, 'agent', 'git', `격리 작업공간 생성 · ${basename(worktreePath)} · ${branchName}`)
     return worktreePath
   }
