@@ -6,6 +6,7 @@ import type {
   CreateTaskInput,
   EventRecord,
   GenerateRuntimeScenarioInput,
+  RecommendVerificationPlanInput,
   UpdateProjectInput
 } from '../../src/shared/types'
 
@@ -23,6 +24,8 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
     ipcRenderer.invoke('runtime-scenario:generate', input),
+  recommendVerificationPlan: (input: RecommendVerificationPlanInput) =>
+    ipcRenderer.invoke('verification-plan:recommend', input),
   removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),

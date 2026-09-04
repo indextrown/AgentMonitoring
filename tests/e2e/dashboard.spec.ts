@@ -31,6 +31,39 @@ test('opens search and task detail interactions', async ({ page }) => {
   await expect(page.getByText('작업 계약')).toBeVisible()
 })
 
+test('opens the in-app guide with a real task example and pipeline', async ({ page }) => {
+  await page.goto('/')
+
+  const helpButton = page.getByRole('button', { name: '도움말' })
+  await helpButton.focus()
+  await helpButton.press('Enter')
+
+  const guide = page.getByRole('dialog', { name: '처음 작업 시작하기' })
+  await expect(guide).toBeVisible()
+  await expect(guide.getByText('실제 Git 프로젝트 추가를 누르고 저장소 루트를 선택하세요.')).toBeVisible()
+  await expect(guide.getByText('장보기 목록 화면 구현', { exact: true })).toBeVisible()
+  await expect(guide.getByText('작업을 등록한 뒤 작업 상세에서 실행을 눌러야 개발이 시작돼요.')).toBeVisible()
+  await expect(guide.getByText('최대 구현 3회', { exact: true })).toBeVisible()
+  await expect(guide.getByText('실행할 단계와 합격 조건을 고정하고 작업만 만들어요. 아직 실행하지 않아요.')).toBeVisible()
+  await expect(guide).toHaveScreenshot('usage-help.png', { animations: 'disabled' })
+
+  await page.keyboard.press('Escape')
+  await expect(guide).not.toBeVisible()
+})
+
+test('keeps the in-app guide readable and closable in a compact window', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 })
+  await page.goto('/')
+  await page.getByRole('button', { name: '도움말' }).click()
+
+  const guide = page.getByRole('dialog', { name: '처음 작업 시작하기' })
+  const confirm = guide.getByRole('button', { name: '확인했어요' })
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeVisible()
+  await confirm.click()
+  await expect(guide).not.toBeVisible()
+})
+
 test('shows the task-scoped Swift runtime session target', async ({ page }) => {
   await page.goto('/?runtime=running&device=iphone')
   await page.locator('.search-trigger').click()
@@ -79,11 +112,11 @@ test('shows repository readiness when selecting a project without tasks', async 
   await page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' }).click()
 
   await expect(page.getByRole('heading', { name: 'AgentMonitoring', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '작업 전에 준비할 항목이 있습니다' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '첫 작업을 시작할 준비가 되었습니다' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'AI가 접근할 수 있는 영역' })).toBeVisible()
   await expect(page.getByText('현재 1개 사용 가능')).toBeVisible()
   await expect(page.getByText('코드 작업 모드', { exact: true })).toBeVisible()
-  await expect(page.getByText('검증 명령을 먼저 연결하세요')).toBeVisible()
+  await expect(page.getByText('프로젝트 테스트를 쓰려면 검증 명령을 연결하세요')).toBeVisible()
   await expect(page.locator('.project-list button').filter({ hasText: 'AgentMonitoring' })).toHaveClass(/selected/)
 
   await page.locator('.project-list button').filter({ hasText: 'ElmwoodOnline' }).click()
@@ -235,9 +268,9 @@ test('starts from a real-project onboarding state without seeded data', async ({
 
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   await expect(page.getByRole('heading', { name: 'ConnectedRepository' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '작업 전에 준비할 항목이 있습니다' })).toBeVisible()
-  await expect(page.getByText('검증 명령을 먼저 연결하세요')).toBeVisible()
-  await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeDisabled()
+  await expect(page.getByRole('heading', { name: '첫 작업을 시작할 준비가 되었습니다' })).toBeVisible()
+  await expect(page.getByText('프로젝트 테스트를 쓰려면 검증 명령을 연결하세요')).toBeVisible()
+  await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
   await expect(page).toHaveScreenshot('project-readiness.png', {
     animations: 'disabled',
     fullPage: true,
@@ -249,6 +282,26 @@ test('starts from a real-project onboarding state without seeded data', async ({
   await expect(page.getByText('설정 완료')).toBeVisible()
   await expect(page.locator('.capability-item').filter({ hasText: 'Verify' }).getByText('지금 사용 가능')).toBeVisible()
   await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
+})
+
+test('creates a manual-review task without a project test command', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('README 문구 정리')
+  await dialog.getByLabel('목표와 완료 조건').fill('README의 설치 설명을 읽기 쉽게 정리하고 링크가 유지되는지 확인해 주세요.')
+  await expect(dialog.getByLabel('검증 조합')).toHaveValue('manual-review')
+  await expect(dialog.getByText('자동 통과로 표시하지 않습니다.')).toBeVisible()
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('작업별 검증 계획')).toBeVisible()
+  await expect(drawer.getByText('수동 검토만', { exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: '실행' }).click()
+  await expect(drawer.getByText('수동 검증 필요', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('자동 통과로 판정하지 않았습니다.', { exact: false })).toBeVisible()
 })
 
 test('explains dirty repositories with exact file categories and paths', async ({ page }) => {
@@ -290,13 +343,16 @@ test('generates, reviews, and freezes a task-scoped Simulator scenario', async (
   await dialog
     .getByLabel('목표와 완료 조건')
     .fill('장보기 목록에서 우유를 입력하고 추가하면 목록에 우유가 표시되게 해줘.')
+  await dialog.getByRole('button', { name: 'AI에게 추천받기' }).click()
+  await expect(dialog.getByText('AI 추천', { exact: true })).toBeVisible()
+  await expect(dialog.getByLabel('검증 조합')).toHaveValue('both')
   await dialog.getByRole('button', { name: '검증 시나리오 만들기' }).click()
 
   await expect(dialog.getByText('승인 전 검토')).toBeVisible()
   await expect(dialog.getByLabel('조작 1 식별자')).toHaveValue('item-input')
   await dialog.getByLabel('조작 1 식별자').fill('shopping-item-input')
   await expect(dialog.getByText(/등록하면 이 조건이 작업에 고정됩니다/)).toBeVisible()
-  await dialog.getByRole('button', { name: '검증 조건 승인하고 작업 등록' }).click()
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
 
   const drawer = page.locator('.task-drawer')
   await expect(drawer.getByText('승인된 Simulator 검증')).toBeVisible()
@@ -317,7 +373,7 @@ test('explains and confirms applying an approved task to the original checkout',
   await page
     .getByPlaceholder('구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다.')
     .fill('승인된 변경을 원본 저장소에 안전하게 적용하는 흐름을 확인한다.')
-  await page.getByRole('button', { name: '작업 등록' }).click()
+  await page.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
 
   const drawer = page.locator('.task-drawer')
   await drawer.getByRole('button', { name: '실행' }).click()

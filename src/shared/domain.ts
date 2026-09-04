@@ -3,7 +3,12 @@ import type {
   FindingRecord,
   RuntimeEvidenceRecord,
   TaskRecord,
-  TaskStatus
+  TaskStatus,
+  TaskVerificationPlan,
+  TaskVerificationResult,
+  VerificationStepKey,
+  VerificationStepResult,
+  VerificationStepStatus
 } from './types'
 
 export const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'testing']
@@ -15,9 +20,10 @@ export function isActiveTask(task: TaskRecord): boolean {
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   const transitions: Record<TaskStatus, TaskStatus[]> = {
     queued: ['running', 'stopped', 'discarded'],
-    running: ['testing', 'awaiting_approval', 'failed', 'stopped'],
-    testing: ['running', 'awaiting_approval', 'failed', 'stopped'],
+    running: ['testing', 'awaiting_approval', 'awaiting_manual_validation', 'failed', 'stopped'],
+    testing: ['running', 'awaiting_approval', 'awaiting_manual_validation', 'failed', 'stopped'],
     awaiting_approval: ['completed', 'discarded', 'running'],
+    awaiting_manual_validation: ['completed', 'discarded', 'running'],
     completed: [],
     failed: ['running', 'discarded'],
     stopped: ['running', 'discarded'],
@@ -25,6 +31,53 @@ export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   }
 
   return transitions[from].includes(to)
+}
+
+export function verificationUsesProjectTests(plan: TaskVerificationPlan): boolean {
+  return plan.mode === 'project-tests' || plan.mode === 'both'
+}
+
+export function verificationUsesRuntime(plan: TaskVerificationPlan): boolean {
+  return plan.mode === 'simulator-runtime' || plan.mode === 'both'
+}
+
+export function createVerificationResult(
+  plan: TaskVerificationPlan,
+  timestamp = new Date().toISOString()
+): TaskVerificationResult {
+  const step = (status: VerificationStepStatus, message: string): VerificationStepResult => ({
+    status,
+    message,
+    updatedAt: timestamp
+  })
+  const designsTests = verificationUsesProjectTests(plan) &&
+    !['existing-tests', 'skip'].includes(plan.testDesign)
+  return {
+    testDesign: designsTests
+      ? step('pending', '테스트 설계를 기다리고 있습니다.')
+      : step('skipped', verificationUsesProjectTests(plan) ? '기존 테스트를 그대로 사용합니다.' : '선택한 검증 방식에서 사용하지 않습니다.'),
+    projectTests: verificationUsesProjectTests(plan)
+      ? step('pending', '프로젝트 검증 명령 실행을 기다리고 있습니다.')
+      : step('skipped', '선택한 검증 방식에서 사용하지 않습니다.'),
+    simulatorRuntime: verificationUsesRuntime(plan)
+      ? step('pending', 'Simulator 검증을 기다리고 있습니다.')
+      : step('skipped', '선택한 검증 방식에서 사용하지 않습니다.'),
+    reviewer: step('pending', '최종 코드 검토를 기다리고 있습니다.')
+  }
+}
+
+export function updateVerificationStep(
+  result: TaskVerificationResult,
+  key: VerificationStepKey,
+  status: VerificationStepStatus,
+  message: string,
+  timestamp = new Date().toISOString()
+): TaskVerificationResult {
+  const next = { status, message, updatedAt: timestamp }
+  if (key === 'test-design') return { ...result, testDesign: next }
+  if (key === 'project-tests') return { ...result, projectTests: next }
+  if (key === 'simulator-runtime') return { ...result, simulatorRuntime: next }
+  return { ...result, reviewer: next }
 }
 
 export function assertTransition(from: TaskStatus, to: TaskStatus): void {

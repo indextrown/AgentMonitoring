@@ -9,6 +9,7 @@ import {
   type TaskRecord,
   type TaskStatus
 } from '../../shared/types'
+import { createVerificationResult, updateVerificationStep } from '../../shared/domain'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const secondaryProjectId = '22222222-2222-4222-8222-222222222222'
@@ -338,6 +339,26 @@ function updateTask(
   return updated
 }
 
+function updateTaskVerification(
+  taskId: string,
+  key: Parameters<typeof updateVerificationStep>[1],
+  status: Parameters<typeof updateVerificationStep>[2],
+  message: string
+): void {
+  state = {
+    ...state,
+    tasks: state.tasks.map((task) => {
+      if (task.id !== taskId || !task.verificationPlan) return task
+      const current = task.verificationResult ?? createVerificationResult(task.verificationPlan)
+      return {
+        ...task,
+        verificationResult: updateVerificationStep(current, key, status, message),
+        updatedAt: new Date().toISOString()
+      }
+    })
+  }
+}
+
 export const demoBridge: AgentMonitoringBridge = {
   apiVersion: AGENT_MONITORING_BRIDGE_VERSION,
   getCodexAuth: async () => demoAuth,
@@ -405,7 +426,12 @@ export const demoBridge: AgentMonitoringBridge = {
           name: input.name,
           testCommand: input.testCommand,
           runtimeAdapter: input.runtimeAdapter,
-          runtimeConfigSource: input.runtimeAdapter ? 'detected' : null
+          runtimeConfigSource: input.runtimeAdapter
+            ? project.runtimeConfigSource === 'manifest' &&
+                JSON.stringify(project.runtimeAdapter) === JSON.stringify(input.runtimeAdapter)
+              ? 'manifest'
+              : 'detected'
+            : null
         }
         return updated
       })
@@ -546,6 +572,32 @@ export const demoBridge: AgentMonitoringBridge = {
       }
     }
   },
+  recommendVerificationPlan: async (input) => {
+    const project = state.projects.find((item) => item.id === input.projectId)
+    if (!project) throw new Error('프로젝트를 찾을 수 없습니다.')
+    const mode = project.runtimeAdapter && project.testCommand.trim()
+      ? 'both' as const
+      : project.runtimeAdapter
+        ? 'simulator-runtime' as const
+        : project.testCommand.trim()
+          ? 'project-tests' as const
+          : 'manual-review' as const
+    return {
+      summary: mode === 'both'
+        ? '로직 회귀와 실제 화면 동작을 함께 확인해야 해서 두 검증을 모두 추천합니다.'
+        : mode === 'simulator-runtime'
+          ? '화면 동작을 Simulator에서 직접 확인하는 검증을 추천합니다.'
+          : mode === 'project-tests'
+            ? '프로젝트 테스트로 요구사항과 회귀를 확인하는 방식을 추천합니다.'
+            : '자동 검증 연결이 없어 사람이 직접 확인하는 방식을 추천합니다.',
+      plan: {
+        version: 1 as const,
+        mode,
+        testDesign: mode === 'project-tests' || mode === 'both' ? 'automatic' as const : 'skip' as const,
+        runtimeSource: mode === 'simulator-runtime' || mode === 'both' ? 'task-scenario' as const : 'off' as const
+      }
+    }
+  },
   removeProject: async (projectIdToRemove) => {
     const projects = state.projects.filter((project) => project.id !== projectIdToRemove)
     state = {
@@ -576,6 +628,8 @@ export const demoBridge: AgentMonitoringBridge = {
       runtimeContract: input.runtimeContract ?? null,
       runtimeScenarioSummary: input.runtimeScenarioSummary ?? null,
       runtimeScenarioApprovedAt: input.runtimeContract ? now : null,
+      verificationPlan: input.verificationPlan,
+      verificationResult: createVerificationResult(input.verificationPlan, now),
       createdAt: now,
       updatedAt: now
     }
@@ -608,11 +662,23 @@ export const demoBridge: AgentMonitoringBridge = {
       worktreePath: `demo://worktrees/${taskId}`
     })
     emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
+    const plan = task.verificationPlan
+    if (plan && ['project-tests', 'both'].includes(plan.mode) && !['existing-tests', 'skip'].includes(plan.testDesign)) {
+      updateTaskVerification(taskId, 'test-design', 'running', '테스트 설계 중')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      updateTaskVerification(taskId, 'test-design', 'passed', '테스트 설계와 비평이 끝났습니다.')
+      emit(task, 'agent', 'test-designer', '테스트 설계 완료')
+    }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
-    emit(task, 'agent', 'test-designer', '테스트 설계 완료')
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
-    emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
-    updateTask(taskId, 'awaiting_approval')
+    if (!plan || ['project-tests', 'both'].includes(plan.mode)) {
+      updateTaskVerification(taskId, 'project-tests', 'passed', '프로젝트 테스트가 모두 통과했습니다.')
+      emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
+    }
+    if (plan && ['simulator-runtime', 'both'].includes(plan.mode)) {
+      updateTaskVerification(taskId, 'simulator-runtime', 'passed', 'Simulator 검증이 통과했습니다.')
+    }
+    updateTaskVerification(taskId, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
+    updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
     emit(task, 'agent', 'reviewer', '최종 검토가 끝났습니다. 승인을 기다립니다.')
   },
   stopTask: async (taskId) => {
