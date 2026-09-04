@@ -99,6 +99,25 @@ export type RuntimeUiAction =
       timeoutSeconds: number
     }
 
+export type RuntimePrivacyService =
+  | 'calendar'
+  | 'contacts-limited'
+  | 'contacts'
+  | 'location'
+  | 'location-always'
+  | 'photos-add'
+  | 'photos'
+  | 'media-library'
+  | 'microphone'
+  | 'motion'
+  | 'reminders'
+  | 'siri'
+
+export interface RuntimePrivacyPermission {
+  service: RuntimePrivacyService
+  state: 'granted' | 'denied' | 'reset'
+}
+
 export type RuntimeAcceptanceAssertion =
   | {
       kind: 'accessibility'
@@ -128,6 +147,7 @@ export type RuntimeAcceptanceAssertion =
     }
 
 export interface TaskRuntimeScenario {
+  permissions?: RuntimePrivacyPermission[]
   actions: RuntimeUiAction[]
   assertions: RuntimeAcceptanceAssertion[]
 }

@@ -14,12 +14,30 @@ import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
 import { projectCapabilityManifestSchema } from './project-capabilities'
+import { normalizeRuntimeScenarioEnvironment } from '../../src/shared/runtime-scenario-policy'
 
 const GENERATION_TIMEOUT_MS = 3 * 60_000
 
 const generatedScenarioSchema = z
   .object({
     summary: z.string().trim().min(1).max(500),
+    permissions: z.array(z.object({
+      service: z.enum([
+        'calendar',
+        'contacts-limited',
+        'contacts',
+        'location',
+        'location-always',
+        'photos-add',
+        'photos',
+        'media-library',
+        'microphone',
+        'motion',
+        'reminders',
+        'siri'
+      ]),
+      state: z.enum(['granted', 'denied', 'reset'])
+    }).strict()).max(12),
     actions: z.array(z.object({
       kind: z.enum(['tap', 'type-text']),
       identifier: z.string().trim().min(1).max(256),
@@ -58,9 +76,38 @@ const generatedScenarioSchema = z
 const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'actions', 'assertions'],
+  required: ['summary', 'permissions', 'actions', 'assertions'],
   properties: {
     summary: { type: 'string' },
+    permissions: {
+      type: 'array',
+      maxItems: 12,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['service', 'state'],
+        properties: {
+          service: {
+            type: 'string',
+            enum: [
+              'calendar',
+              'contacts-limited',
+              'contacts',
+              'location',
+              'location-always',
+              'photos-add',
+              'photos',
+              'media-library',
+              'microphone',
+              'motion',
+              'reminders',
+              'siri'
+            ]
+          },
+          state: { type: 'string', enum: ['granted', 'denied', 'reset'] }
+        }
+      }
+    },
     actions: {
       type: 'array',
       maxItems: 20,
@@ -134,7 +181,11 @@ export function buildApprovedRuntimeContract(
   adapter: IosRuntimeAdapterConfig,
   generated: z.infer<typeof generatedScenarioSchema>
 ): ApprovedRuntimeContract {
-  const actions = normalizeActions(generated.actions)
+  const normalizedEnvironment = normalizeRuntimeScenarioEnvironment({
+    permissions: generated.permissions,
+    actions: normalizeActions(generated.actions)
+  })
+  const actions = normalizedEnvironment.actions
   const contract: ApprovedRuntimeContract = {
     version: 1,
     adapter,
@@ -146,6 +197,7 @@ export function buildApprovedRuntimeContract(
       verify: ['test-command', 'runtime-scenario']
     },
     runtimeScenario: {
+      permissions: normalizedEnvironment.permissions,
       actions,
       assertions: normalizeAssertions(generated.assertions, actions.length > 0)
     }
@@ -181,6 +233,8 @@ export class RuntimeScenarioGenerator {
           : '이 작업에는 별도로 승인된 테크스펙이 없습니다.',
         `실행 대상: ${input.adapter.container} / ${input.adapter.scheme} / ${input.adapter.deviceFamily}`,
         '저장소를 읽기 전용으로 확인하고, 이 작업의 사용자 동작과 관찰 가능한 성공 조건만 JSON으로 설계하세요.',
+        'iOS 개인정보 권한은 시스템 팝업의 문구를 actions identifier로 사용하지 말고 permissions에 service와 원하는 state를 선언하세요.',
+        'permissions는 앱 실행 전에 Simulator 환경에 적용됩니다. 권한이 필요하지 않으면 빈 배열로 작성하세요.',
         '기존 화면의 accessibilityIdentifier는 코드에 있는 값을 사용하세요.',
         '새 화면이나 새 요소는 구현자가 그대로 추가할 수 있는 소문자 kebab-case identifier를 제안하세요.',
         'actions는 실제 사용자 순서대로 작성하세요. 단순 표시 확인 작업은 빈 배열이어도 됩니다.',

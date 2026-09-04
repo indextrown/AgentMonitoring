@@ -3,7 +3,11 @@ import { cp, lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { z } from 'zod'
 import type { ProjectCapabilityManifest } from './project-capabilities'
-import type { RuntimeSessionRecord, RuntimeSessionStatus } from '../../src/shared/types'
+import type {
+  RuntimePrivacyPermission,
+  RuntimeSessionRecord,
+  RuntimeSessionStatus
+} from '../../src/shared/types'
 import {
   IosDebugBridgeError,
   requestIosDebugBridge,
@@ -43,6 +47,7 @@ export interface IosSimulatorLaunchInput {
   captureScreen: boolean
   captureAccessibility: boolean
   captureState: boolean
+  privacyPermissions: RuntimePrivacyPermission[]
   uiActions: RuntimeUiAction[]
   debugBridge: RuntimeDebugBridgeContract | null
   debugFixture: RuntimeDebugFixture | null
@@ -789,6 +794,39 @@ export async function launchIosSimulatorRuntime(
     },
     'installing'
   )
+
+  if (input.privacyPermissions.length > 0) {
+    input.onProgress(
+      'preparing',
+      `${device.name}에 개인정보 권한 ${input.privacyPermissions.length.toLocaleString('ko-KR')}개를 준비하고 있습니다.`,
+      { deviceId: device.udid, deviceName: device.name, bundleIdentifier: product.bundleIdentifier }
+    )
+    for (const permission of input.privacyPermissions) {
+      const action = permission.state === 'granted'
+        ? 'grant'
+        : permission.state === 'denied'
+          ? 'revoke'
+          : 'reset'
+      await executeRequired(
+        input.execute,
+        {
+          command: XCRUN_COMMAND,
+          args: [
+            'simctl',
+            'privacy',
+            device.udid,
+            action,
+            permission.service,
+            product.bundleIdentifier
+          ],
+          cwd: worktreePath,
+          label: `Simulator ${permission.service} 권한 ${action}`,
+          timeoutMs: RUNTIME_TIMEOUTS.inspect
+        },
+        'preparing'
+      )
+    }
+  }
 
   input.onProgress(
     'launching',

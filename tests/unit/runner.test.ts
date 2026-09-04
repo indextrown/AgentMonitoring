@@ -4,7 +4,12 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentRunner, parseConfiguredCommand, parseReviewerFindings } from '../../electron/main/runner'
+import {
+  AgentRunner,
+  parseConfiguredCommand,
+  parseReviewerFindings,
+  runtimeIdentifierRepairContext
+} from '../../electron/main/runner'
 import {
   IosRuntimeStageError,
   type IosSimulatorRuntimeAdapter
@@ -255,6 +260,21 @@ async function createApprovalFixture(options: {
 }
 
 describe('AgentRunner', () => {
+  it('classifies only exact app identifier action failures as implementation-repairable', () => {
+    expect(runtimeIdentifierRepairContext(new IosRuntimeStageError(
+      'acting',
+      "UI action 1: identifier 'current-location-button' 요소를 찾지 못했습니다."
+    ))).toContain("앱 identifier 'current-location-button'")
+    expect(runtimeIdentifierRepairContext(new IosRuntimeStageError(
+      'acting',
+      'Accessibility observer Xcode build failed'
+    ))).toBeNull()
+    expect(runtimeIdentifierRepairContext(new IosRuntimeStageError(
+      'launching',
+      "UI action 1: identifier 'current-location-button' 요소를 찾지 못했습니다."
+    ))).toBeNull()
+  })
+
   it('parses deduplicated reviewer findings with explicit severities', () => {
     expect(
       parseReviewerFindings('[high] 인증 실패 경로 누락\n- [medium] 빈 입력 검증 부족\n[HIGH] 인증 실패 경로 누락')
@@ -1229,6 +1249,210 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 
     await fixture.runner.discard(task.id)
     expect(stoppedBundles).toEqual(['com.example.App', 'com.example.App'])
+    fixture.store.close()
+  })
+
+  it('returns a missing app identifier action to the implementer instead of failing immediately', async () => {
+    let launchCount = 0
+    let callsPath = ''
+    const runtimeContract: ApprovedRuntimeContract = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'App.xcodeproj',
+        scheme: 'App',
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
+      },
+      capabilities: {
+        build: true,
+        run: true,
+        observe: [],
+        act: ['ui'],
+        verify: ['runtime-scenario']
+      },
+      runtimeScenario: {
+        actions: [{ kind: 'tap', identifier: 'map-current-location-button', timeoutSeconds: 10 }],
+        assertions: []
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'identifier-repair-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      runtimeContract,
+      verificationPlan: {
+        version: 1,
+        mode: 'simulator-runtime',
+        testDesign: 'skip',
+        runtimeSource: 'task-scenario'
+      },
+      maxAttempts: 2,
+      runtimeAdapter: {
+        launch: async (input) => {
+          launchCount += 1
+          expect(input.privacyPermissions).toEqual([])
+          if (launchCount === 1) {
+            throw new IosRuntimeStageError(
+              'acting',
+              "Simulator identifier UI 조작 실패\nUI action 1: identifier 'map-current-location-button' 요소를 찾지 못했습니다."
+            )
+          }
+          const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')
+          await mkdir(evidenceDirectory, { recursive: true })
+          const actionPath = join(evidenceDirectory, 'ui-actions.json')
+          const actionContent = JSON.stringify({
+            schemaVersion: 1,
+            actionCount: 1,
+            results: [{ index: 0, kind: 'tap', identifier: 'map-current-location-button' }]
+          })
+          await writeFile(actionPath, actionContent)
+          return {
+            deviceId: 'IPHONE-UDID',
+            deviceName: 'iPhone 17 Pro',
+            bundleIdentifier: 'com.example.App',
+            processId: 4242,
+            appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+            screenEvidence: null,
+            accessibilityEvidence: null,
+            uiActionEvidence: {
+              path: actionPath,
+              mimeType: 'application/json',
+              sizeBytes: Buffer.byteLength(actionContent),
+              executedAt: new Date().toISOString(),
+              actionCount: 1,
+              content: actionContent
+            },
+            debugStateEvidence: null
+          }
+        },
+        stop: async () => undefined
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({
+      status: 'awaiting_approval',
+      attempt: 2
+    })
+    expect(launchCount).toBe(2)
+    const prompts = (await readFile(callsPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string)
+    expect(prompts.some((prompt) => (
+      prompt.includes("앱 identifier 'map-current-location-button'") &&
+      prompt.includes('직전 runtime acceptance 검증이 실패했습니다.')
+    ))).toBe(true)
+    expect(fixture.store.getSnapshot().events.some(
+      (event) => event.kind === 'runtime_repair_started'
+    )).toBe(true)
+    await fixture.runner.dispose()
+    fixture.store.close()
+  })
+
+  it('converts a legacy iOS location prompt action before implementation and runtime', async () => {
+    let receivedPermissions: unknown = null
+    let receivedActions: unknown = null
+    let callsPath = ''
+    const runtimeContract: ApprovedRuntimeContract = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'App.xcodeproj',
+        scheme: 'App',
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
+      },
+      capabilities: { build: true, run: true, observe: [], act: ['ui'], verify: [] },
+      runtimeScenario: {
+        actions: [
+          { kind: 'tap', identifier: '앱을 사용하는 동안 허용', timeoutSeconds: 10 },
+          { kind: 'tap', identifier: 'map-current-location-button', timeoutSeconds: 10 }
+        ],
+        assertions: []
+      }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'legacy-permission-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      runtimeContract,
+      verificationPlan: {
+        version: 1,
+        mode: 'simulator-runtime',
+        testDesign: 'skip',
+        runtimeSource: 'task-scenario'
+      },
+      runtimeAdapter: {
+        launch: async (input) => {
+          receivedPermissions = input.privacyPermissions
+          receivedActions = input.uiActions
+          const evidenceDirectory = join(input.runtimeRoot, input.taskId, 'evidence')
+          await mkdir(evidenceDirectory, { recursive: true })
+          const actionPath = join(evidenceDirectory, 'ui-actions.json')
+          const actionContent = JSON.stringify({
+            schemaVersion: 1,
+            actionCount: 1,
+            results: [{ index: 0, kind: 'tap', identifier: 'map-current-location-button' }]
+          })
+          await writeFile(actionPath, actionContent)
+          return {
+            deviceId: 'IPHONE-UDID',
+            deviceName: 'iPhone 17 Pro',
+            bundleIdentifier: 'com.example.App',
+            processId: 4242,
+            appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+            screenEvidence: null,
+            accessibilityEvidence: null,
+            uiActionEvidence: {
+              path: actionPath,
+              mimeType: 'application/json',
+              sizeBytes: Buffer.byteLength(actionContent),
+              executedAt: new Date().toISOString(),
+              actionCount: 1,
+              content: actionContent
+            },
+            debugStateEvidence: null
+          }
+        },
+        stop: async () => undefined
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const prompts = (await readFile(callsPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string)
+    const implementerPrompt = prompts.find((prompt) => prompt.includes('당신은 구현 담당자입니다.')) ?? ''
+    expect(receivedPermissions).toEqual([{ service: 'location', state: 'granted' }])
+    expect(receivedActions).toEqual([
+      { kind: 'tap', identifier: 'map-current-location-button', timeoutSeconds: 10 }
+    ])
+    expect(implementerPrompt).toContain('"permissions"')
+    expect(implementerPrompt).not.toContain('"identifier": "앱을 사용하는 동안 허용"')
+    expect(fixture.store.getTask(fixture.taskId).runtimeContract).toEqual(runtimeContract)
+    await fixture.runner.dispose()
     fixture.store.close()
   })
 

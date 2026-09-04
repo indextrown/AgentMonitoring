@@ -56,6 +56,7 @@ import {
   buildRuntimeTaskReport,
   isActiveTask
 } from '../../shared/domain'
+import { normalizeRuntimeScenarioEnvironment } from '../../shared/runtime-scenario-policy'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
   AgentMonitoringBridge,
@@ -76,6 +77,7 @@ import type {
   ProjectInspection,
   RuntimeEvidenceRecord,
   RuntimeAcceptanceAssertion,
+  RuntimePrivacyPermission,
   RuntimeSessionRecord,
   RuntimeSessionStatus,
   RuntimeUiAction,
@@ -175,6 +177,27 @@ const RUNTIME_SOURCE_LABELS: Record<RuntimeVerificationSource, string> = {
   'task-scenario': '이 작업 전용 시나리오',
   'project-default': '프로젝트 기본 시나리오',
   off: '사용 안 함'
+}
+
+const PRIVACY_SERVICE_LABELS: Record<RuntimePrivacyPermission['service'], string> = {
+  calendar: '캘린더',
+  'contacts-limited': '제한된 연락처',
+  contacts: '연락처',
+  location: '앱 사용 중 위치',
+  'location-always': '항상 위치',
+  'photos-add': '사진 추가',
+  photos: '사진',
+  'media-library': '미디어 보관함',
+  microphone: '마이크',
+  motion: '동작 및 피트니스',
+  reminders: '미리 알림',
+  siri: 'Siri'
+}
+
+const PRIVACY_STATE_LABELS: Record<RuntimePrivacyPermission['state'], string> = {
+  granted: '허용',
+  denied: '거부',
+  reset: '선택 전으로 초기화'
 }
 
 const VERIFICATION_STEP_STATUS_LABELS: Record<VerificationStepStatus, string> = {
@@ -2848,6 +2871,19 @@ function TaskModal({
       contract: { ...generated.contract, runtimeScenario: { ...generated.contract.runtimeScenario, actions } }
     })
   }
+  const updatePermission = (index: number, permission: RuntimePrivacyPermission): void => {
+    if (!generated) return
+    const permissions = (generated.contract.runtimeScenario.permissions ?? []).map(
+      (current, permissionIndex) => permissionIndex === index ? permission : current
+    )
+    setGenerated({
+      ...generated,
+      contract: {
+        ...generated.contract,
+        runtimeScenario: { ...generated.contract.runtimeScenario, permissions }
+      }
+    })
+  }
   const updateAssertion = (index: number, assertion: RuntimeAcceptanceAssertion): void => {
     if (!generated) return
     const assertions = generated.contract.runtimeScenario.assertions.map((current, assertionIndex) => assertionIndex === index ? assertion : current)
@@ -3089,6 +3125,37 @@ function TaskModal({
                   <button className="text-button" type="button" disabled={generating} onClick={() => void generate()}>다시 생성</button>
                 </header>
                 <div className="scenario-list">
+                  {(generated.contract.runtimeScenario.permissions?.length ?? 0) > 0 && (
+                    <>
+                      <p>Simulator 준비 조건</p>
+                      {generated.contract.runtimeScenario.permissions!.map((permission, index) => (
+                        <div className="scenario-row permission" key={`permission-${index}`}>
+                          <span>{index + 1}</span>
+                          <strong>개인정보 권한</strong>
+                          <select
+                            aria-label={`권한 ${index + 1} 서비스`}
+                            value={permission.service}
+                            onChange={(event) => updatePermission(index, {
+                              ...permission,
+                              service: event.target.value as RuntimePrivacyPermission['service']
+                            })}
+                          >
+                            {Object.entries(PRIVACY_SERVICE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                          </select>
+                          <select
+                            aria-label={`권한 ${index + 1} 상태`}
+                            value={permission.state}
+                            onChange={(event) => updatePermission(index, {
+                              ...permission,
+                              state: event.target.value as RuntimePrivacyPermission['state']
+                            })}
+                          >
+                            {Object.entries(PRIVACY_STATE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                          </select>
+                        </div>
+                      ))}
+                    </>
+                  )}
                   <p>사용자 조작 {generated.contract.runtimeScenario.actions.length}단계</p>
                   {generated.contract.runtimeScenario.actions.map((action, index) => (
                     <div className="scenario-row" key={`action-${index}`}>
@@ -3247,6 +3314,9 @@ function TaskDrawer({
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
+  const runtimeScenario = task.runtimeContract
+    ? normalizeRuntimeScenarioEnvironment(task.runtimeContract.runtimeScenario)
+    : null
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
@@ -3306,11 +3376,18 @@ function TaskDrawer({
             <div className="drawer-section-title"><strong>승인된 Simulator 검증</strong><span>조건 고정됨</span></div>
             <p>{task.runtimeScenarioSummary ?? '사용자가 승인한 작업별 검증 시나리오'}</p>
             <div>
-              <span><Play size={12} />조작 {task.runtimeContract.runtimeScenario.actions.length}단계</span>
+              {(runtimeScenario?.permissions.length ?? 0) > 0 && <span><ShieldCheck size={12} />권한 {runtimeScenario!.permissions.length}개</span>}
+              <span><Play size={12} />조작 {runtimeScenario?.actions.length ?? 0}단계</span>
               <span><CheckCircle2 size={12} />검증 {task.runtimeContract.runtimeScenario.assertions.length}개</span>
               <span><SquareTerminal size={12} />{task.runtimeContract.adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'}</span>
             </div>
-            <small><ShieldCheck size={11} />{task.runtimeScenarioApprovedAt ? `${timeAgo(task.runtimeScenarioApprovedAt)} 승인` : '등록 시 승인'} · 에이전트가 변경할 수 없는 스냅샷</small>
+            <small>
+              <ShieldCheck size={11} />
+              {task.runtimeScenarioApprovedAt ? `${timeAgo(task.runtimeScenarioApprovedAt)} 승인` : '등록 시 승인'} · 에이전트가 변경할 수 없는 스냅샷
+              {(runtimeScenario?.migratedSystemActionIdentifiers.length ?? 0) > 0
+                ? ` · 시스템 권한 조작 ${runtimeScenario!.migratedSystemActionIdentifiers.length}개를 실행 환경 준비로 자동 변환`
+                : ''}
+            </small>
           </section>
         )}
         {task.publication && (

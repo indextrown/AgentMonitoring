@@ -584,6 +584,34 @@ test('generates, reviews, and freezes a task-scoped Simulator scenario', async (
   await expect(drawer.getByText(/조건 고정/)).toBeVisible()
 })
 
+test('reviews Simulator privacy permissions separately from app UI actions', async ({ page }) => {
+  await page.goto('/?workspace=empty&contract=ios&device=iphone')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('현재 위치 버튼 추가')
+  await dialog
+    .getByLabel('목표와 완료 조건')
+    .fill('위치 권한을 준비하고 현재 위치 버튼을 누르면 지도 중심이 이동하게 해줘.')
+  await dialog.getByRole('button', { name: 'AI에게 추천받기' }).click()
+  await dialog.getByRole('button', { name: '검증 시나리오 만들기' }).click()
+
+  await expect(dialog.getByText('Simulator 준비 조건')).toBeVisible()
+  await expect(dialog.getByLabel('권한 1 서비스')).toHaveValue('location')
+  await expect(dialog.getByLabel('권한 1 상태')).toHaveValue('granted')
+  await expect(dialog.getByText('사용자 조작 1단계')).toBeVisible()
+  await expect(dialog.getByLabel('조작 1 식별자')).toHaveValue('map-current-location-button')
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.getByText('권한 1개', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('조작 1단계', { exact: true })).toBeVisible()
+})
+
 test('explains and confirms publishing an approved task through a PR', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

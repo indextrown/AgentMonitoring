@@ -133,6 +133,26 @@ const runtimeAcceptanceAssertionSchema = z.union([
     .strict()
 ])
 
+const runtimePrivacyPermissionSchema = z
+  .object({
+    service: z.enum([
+      'calendar',
+      'contacts-limited',
+      'contacts',
+      'location',
+      'location-always',
+      'photos-add',
+      'photos',
+      'media-library',
+      'microphone',
+      'motion',
+      'reminders',
+      'siri'
+    ]),
+    state: z.enum(['granted', 'denied', 'reset'])
+  })
+  .strict()
+
 export const iosRuntimeAdapterSchema = z
   .object({
     kind: z.literal('ios-simulator'),
@@ -165,6 +185,7 @@ export const projectCapabilityManifestSchema = z
       .optional(),
     runtimeScenario: z
       .object({
+        permissions: z.array(runtimePrivacyPermissionSchema).max(12).optional(),
         actions: z.array(runtimeUiActionSchema).max(20).default([]),
         fixture: runtimeFixtureSchema.optional(),
         assertions: z.array(runtimeAcceptanceAssertionSchema).max(50).default([])
@@ -174,6 +195,17 @@ export const projectCapabilityManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
+    const permissionServices = new Set<string>()
+    for (const [index, permission] of (manifest.runtimeScenario?.permissions ?? []).entries()) {
+      if (permissionServices.has(permission.service)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['runtimeScenario', 'permissions', index, 'service'],
+          message: `${permission.service} 개인정보 권한은 한 번만 설정할 수 있습니다.`
+        })
+      }
+      permissionServices.add(permission.service)
+    }
     if (manifest.capabilities.run && !manifest.capabilities.build) {
       context.addIssue({ code: 'custom', path: ['capabilities', 'run'], message: 'run에는 build가 필요합니다.' })
     }
