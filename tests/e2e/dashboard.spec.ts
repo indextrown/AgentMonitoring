@@ -22,13 +22,50 @@ test('matches the dense monitoring dashboard structure', async ({ page }) => {
 })
 
 test('opens search and task detail interactions', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/?environment=blocked')
   await page.locator('.search-trigger').click()
   await expect(page.getByPlaceholder('작업, 메모, 이벤트 검색')).toBeFocused()
   await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
   await page.locator('.search-results button').first().click()
-  await expect(page.locator('.task-drawer')).toBeVisible()
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer).toBeVisible()
   await expect(page.getByText('작업 계약')).toBeVisible()
+  await drawer.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+
+  const verificationReport = drawer.locator('.verification-report')
+  await expect(verificationReport).toHaveCSS('padding-left', '20px')
+  await expect(verificationReport).toHaveCSS('padding-right', '20px')
+
+  const drawerBox = await drawer.boundingBox()
+  const firstStepBox = await verificationReport.locator('.verification-step').first().boundingBox()
+  expect(drawerBox).not.toBeNull()
+  expect(firstStepBox).not.toBeNull()
+
+  const leftInset = firstStepBox!.x - drawerBox!.x
+  const rightInset = drawerBox!.x + drawerBox!.width - (firstStepBox!.x + firstStepBox!.width)
+  expect(leftInset).toBeGreaterThanOrEqual(20)
+  expect(rightInset).toBeGreaterThanOrEqual(20)
+})
+
+test('keeps verification steps inset in a compact task drawer', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 })
+  await page.goto('/?environment=blocked')
+  await page.locator('.search-trigger').click()
+  await page.getByPlaceholder('작업, 메모, 이벤트 검색').fill('프로필')
+  await page.locator('.search-results button').first().click()
+
+  const drawer = page.locator('.task-drawer')
+  const verificationReport = drawer.locator('.verification-report')
+  const firstStep = verificationReport.locator('.verification-step').first()
+  await expect(firstStep).toBeVisible()
+  await drawer.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+
+  const drawerBox = await drawer.boundingBox()
+  const stepBox = await firstStep.boundingBox()
+  expect(drawerBox).not.toBeNull()
+  expect(stepBox).not.toBeNull()
+  expect(stepBox!.x - drawerBox!.x).toBeGreaterThanOrEqual(20)
+  expect(drawerBox!.x + drawerBox!.width - (stepBox!.x + stepBox!.width)).toBeGreaterThanOrEqual(20)
 })
 
 test('opens the in-app guide with a real task example and pipeline', async ({ page }) => {
