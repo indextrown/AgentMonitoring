@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
@@ -13,10 +11,10 @@ import type {
   TaskTechSpecDraft
 } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
 import { projectCapabilityManifestSchema } from './project-capabilities'
 
-const execFileAsync = promisify(execFile)
 const GENERATION_TIMEOUT_MS = 3 * 60_000
 
 const generatedScenarioSchema = z
@@ -191,7 +189,7 @@ export class RuntimeScenarioGenerator {
         'tap action의 text는 null, type-text action의 text는 실제 입력 예시여야 합니다.',
         '코드를 수정하지 마세요. 저장소를 이해하기 위한 읽기 전용 명령만 사용할 수 있습니다.'
       ].join('\n\n')
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCodexFile(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),

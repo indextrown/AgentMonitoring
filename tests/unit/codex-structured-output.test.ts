@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  extractCodexFailureMessage,
   extractCodexFinalMessage,
   readCodexStructuredOutput
 } from '../../electron/main/codex-structured-output'
@@ -51,6 +52,35 @@ describe('Codex structured output', () => {
     ].join('\n')
 
     expect(extractCodexFinalMessage(stdout)).toBe('{"revision":2}')
+  })
+
+  it('falls back to an earlier valid agent message', async () => {
+    const stdout = [
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: '{"revision":1}' }
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'incomplete final message' }
+      })
+    ].join('\n')
+
+    await expect(
+      readCodexStructuredOutput('/missing/result.json', stdout, '테크스펙')
+    ).resolves.toEqual({ revision: 1 })
+  })
+
+  it('extracts the reason from a failed turn', async () => {
+    const stdout = JSON.stringify({
+      type: 'turn.failed',
+      error: { message: 'model context window exceeded' }
+    })
+
+    expect(extractCodexFailureMessage(stdout)).toBe('model context window exceeded')
+    await expect(
+      readCodexStructuredOutput('/missing/result.json', stdout, '테크스펙')
+    ).rejects.toThrow('model context window exceeded')
   })
 
   it('explains when Codex did not return a final response', async () => {

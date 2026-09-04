@@ -1,14 +1,12 @@
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { GeneratedTechSpec, TaskTechSpecDraft } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
 
-const execFileAsync = promisify(execFile)
 const GENERATION_TIMEOUT_MS = 3 * 60_000
 
 const generatedTechSpecSchema = z.object({
@@ -125,7 +123,7 @@ export class TechSpecGenerator {
     const outputPath = join(temporaryDirectory, 'tech-spec.json')
     try {
       await writeFile(schemaPath, JSON.stringify(OUTPUT_SCHEMA), { encoding: 'utf8', mode: 0o600 })
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execCodexFile(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
