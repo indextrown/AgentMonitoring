@@ -541,7 +541,7 @@ export interface RecommendVerificationPlanInput {
   prompt: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 6
+export const AGENT_MONITORING_BRIDGE_VERSION = 7
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -562,6 +562,8 @@ export interface AgentMonitoringBridge {
   setSourceControlIdentity: (input: SourceControlIdentityInput) => Promise<SourceControlStatus>
   commitSourceControlChanges: (input: SourceControlCommitInput) => Promise<SourceControlCommitResult>
   fetchSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
+  pushSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
+  syncSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   autoConfigureProjectRuntime: (projectId: string) => Promise<ProjectRecord>
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (

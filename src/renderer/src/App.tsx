@@ -113,6 +113,8 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'stageSourceControlPaths',
   'commitSourceControlChanges',
   'fetchSourceControlRemote',
+  'pushSourceControlRemote',
+  'syncSourceControlRemote',
   'refreshTaskPublication',
   'switchTaskPublicationToPullRequest'
 ]
@@ -304,6 +306,12 @@ function statusTone(status: TaskStatus): string {
 
 function isAwaitingLocalPublicationSync(task: TaskRecord): boolean {
   return task.publication?.status === 'awaiting_local_sync'
+}
+
+function directPublishLabel(task: TaskRecord): string {
+  return task.sourceBranch
+    ? `${task.sourceBranch} 브랜치에 직접 게시`
+    : '작업 시작 브랜치에 직접 게시'
 }
 
 export function App(): React.JSX.Element {
@@ -522,7 +530,7 @@ export function App(): React.JSX.Element {
         !window.confirm(
           task.status === 'awaiting_manual_validation'
             ? '이 작업은 자동 검증을 건너뛰었습니다. 변경을 직접 확인했나요? 원격이 최신이면 선택한 방식으로 게시하고, 원격이 바뀌었다면 최신 변경을 반영한 뒤 다시 검증합니다.'
-            : `원격 최신 상태를 확인한 뒤 ${(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '작업 브랜치를 올리고 PR을 만듭니다' : '기본 브랜치에 직접 게시합니다'}. 원격이 바뀌었다면 재검증 후 다시 승인을 요청합니다. 계속할까요?`
+            : `원격 최신 상태를 확인한 뒤 ${(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '작업 브랜치를 올리고 PR을 만듭니다' : `${task.sourceBranch ?? '작업 시작'} 브랜치에 직접 게시합니다`}. 원격이 바뀌었다면 재검증 후 다시 승인을 요청합니다. 계속할까요?`
         )
       ) return
       if (action === 'stop') await bridge.stopTask(task.id)
@@ -1671,7 +1679,7 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <div className="row-actions">
               {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
-              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
+              {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
               {(task.status === 'awaiting_merge' || isAwaitingLocalPublicationSync(task)) && <button title={isAwaitingLocalPublicationSync(task) ? '로컬 동기화 다시 시도' : 'PR 상태 확인'} onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
             </div>
           </div>
@@ -1816,11 +1824,13 @@ function SourceControlPage({
 
   const runStatusAction = async (
     key: string,
-    operation: () => Promise<SourceControlStatus>
+    operation: () => Promise<SourceControlStatus>,
+    successMessage?: string
   ): Promise<void> => {
     setBusyAction(key)
     try {
       updateStatus(await operation())
+      if (successMessage) setSuccess(successMessage)
     } catch (sourceError) {
       onError(String(sourceError))
     } finally {
@@ -1897,16 +1907,36 @@ function SourceControlPage({
         </div>
       </div>
 
-      <section className="panel source-remote-status">
+      <section className={`panel source-remote-status${status?.remote?.diverged ? ' attention' : ''}`}>
         <div>
           <strong>원격 저장소</strong>
           {status?.remote ? (
-            <p><code>{status.remote.name}</code> · {status.remote.upstream ?? 'upstream 미설정'} · 앞섬 {status.remote.ahead} / 뒤처짐 {status.remote.behind}</p>
+            <>
+              <p><code>{status.remote.name}</code> · {status.remote.upstream ?? 'upstream 미설정'} · 앞섬 {status.remote.ahead} / 뒤처짐 {status.remote.behind}</p>
+              {status.remote.diverged && <small>로컬과 원격에 서로 다른 커밋이 있습니다. 외부 IDE에서 merge 또는 rebase 방향을 결정하세요.</small>}
+            </>
           ) : <p>origin 원격 저장소가 설정되지 않았습니다.</p>}
         </div>
-        <button className="secondary-button" type="button" disabled={busy || !status?.remote} onClick={() => void runStatusAction('fetch', () => bridge.fetchSourceControlRemote(project.id))}>
-          {busyAction === 'fetch' ? <LoaderCircle className="spin" size={13} /> : <GitCompareArrows size={13} />} 원격 상태 가져오기
-        </button>
+        <div className="source-remote-actions">
+          <button className="secondary-button" type="button" disabled={busy || !status?.remote} onClick={() => void runStatusAction('fetch', () => bridge.fetchSourceControlRemote(project.id))}>
+            {busyAction === 'fetch' ? <LoaderCircle className="spin" size={13} /> : <GitCompareArrows size={13} />} 원격 상태 가져오기
+          </button>
+          {status?.remote && status.branch && !status.remote.diverged && !status.remote.upstream && (
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void runStatusAction('push', () => bridge.pushSourceControlRemote(project.id), `${status.branch} 브랜치를 origin에 연결하고 push했습니다.`)}>
+              {busyAction === 'push' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />} 브랜치 연결·Push
+            </button>
+          )}
+          {status?.remote && status.remote.ahead > 0 && status.remote.behind === 0 && !status.remote.diverged && (
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void runStatusAction('push', () => bridge.pushSourceControlRemote(project.id), `${status.remote!.ahead}개 로컬 커밋을 원격에 push했습니다.`)}>
+              {busyAction === 'push' ? <LoaderCircle className="spin" size={13} /> : <GitCommitHorizontal size={13} />} {status.remote.ahead}개 커밋 Push
+            </button>
+          )}
+          {status?.remote && status.remote.behind > 0 && status.remote.ahead === 0 && !status.remote.diverged && (
+            <button className="primary-button" type="button" disabled={busy || status.files.length > 0} onClick={() => void runStatusAction('sync', () => bridge.syncSourceControlRemote(project.id), `${status.remote!.behind}개 원격 커밋을 로컬에 동기화했습니다.`)}>
+              {busyAction === 'sync' ? <LoaderCircle className="spin" size={13} /> : <GitCompareArrows size={13} />} {status.remote.behind}개 커밋 동기화
+            </button>
+          )}
+        </div>
       </section>
 
       {status && !status.identity.complete && (
@@ -2114,7 +2144,7 @@ function ProjectsPage({
           <span>기본 결과 게시 방식</span>
           <select value={publishStrategy} onChange={(event) => setPublishStrategy(event.target.value as PublishStrategy)}>
             <option value="pull-request">브랜치를 올리고 PR 만들기 (권장)</option>
-            <option value="direct">기본 브랜치에 직접 올리기</option>
+            <option value="direct">작업 시작 브랜치에 직접 올리기</option>
           </select>
           <small>새 작업에 기본 적용됩니다. 작업을 등록할 때마다 바꿀 수 있습니다.</small>
         </label>
@@ -2214,7 +2244,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }): React.JSX.Element
     ['자가 수정', '실패하면 로그와 화면 증거를 전달해 남은 횟수만큼 다시 구현합니다.'],
     ['최종 검토', 'Reviewer가 diff, 테스트와 실행 증거를 읽고 문제를 보고합니다.'],
     ['사람 승인', '결과를 확인한 뒤 게시하거나 격리 변경을 폐기합니다.'],
-    ['원격 게시', '작업에서 선택한 방식에 따라 브랜치와 PR을 만들거나 기본 브랜치에 직접 게시합니다.'],
+    ['원격 게시', '작업에서 선택한 방식에 따라 브랜치와 PR을 만들거나 작업 시작 브랜치에 직접 게시합니다.'],
     ['로컬 동기화', '원격 반영이 끝나면 현재 로컬 브랜치를 fast-forward로 맞추고 완료 처리합니다.']
   ]
   const verificationModes = [
@@ -2684,7 +2714,7 @@ function TaskModal({
         <section className="publication-selector">
           <strong>검증이 끝난 변경을 어디에 게시할까요?</strong>
           <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'pull-request'} onChange={() => setPublishStrategy('pull-request')} /><span><b>브랜치를 올리고 PR 만들기</b><small>작업 브랜치를 origin에 올리고 기준 브랜치 대상 PR을 만듭니다. 권장 방식입니다.</small></span></label>
-          <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'direct'} onChange={() => setPublishStrategy('direct')} /><span><b>기본 브랜치에 직접 올리기</b><small>검증된 commit을 원격 기준 브랜치에 fast-forward push합니다. 강제 push는 하지 않습니다.</small></span></label>
+          <label><input type="radio" name="publish-strategy" checked={publishStrategy === 'direct'} onChange={() => setPublishStrategy('direct')} /><span><b>작업 시작 브랜치에 직접 올리기</b><small>작업을 시작한 브랜치에 검증된 commit을 fast-forward push합니다. 강제 push는 하지 않습니다.</small></span></label>
         </section>
         <div className="workflow-preview">
           {usesTests && !['existing-tests', 'skip'].includes(testDesign) && <><span><FileText size={13} />테스트 설계</span><i /></>}
@@ -2981,7 +3011,7 @@ function TaskDrawer({
           {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
           {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : '기본 브랜치에 직접 게시'}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}
           {task.status === 'awaiting_merge' && !awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
           {awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />로컬 동기화 다시 시도</button>}

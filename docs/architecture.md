@@ -167,7 +167,7 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 작업을 만들 때 현재 원본 브랜치와 기준 commit을 `tasks.source_branch`, `tasks.base_commit`에 기록한다. 사용자가 작업 도중 원본에서 새 커밋을 만들어도 어느 브랜치에서 시작한 작업인지 확인할 수 있다.
 
-Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref만 갱신한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
+Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
 
 소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
 
@@ -278,6 +278,6 @@ direct
 - 목표 프로젝트의 고정 인수 테스트를 암호학적으로 잠그지 않는다.
 - 앱 패키지 서명과 배포 채널은 구성하지 않았다.
 - 분기된 작업 브랜치의 충돌 해결은 자동화하지 않는다. 충돌이 나면 rebase를 취소하고 충돌 파일을 사용자에게 보여준다.
-- 소스 제어 화면은 hunk 단위 stage, 변경 폐기와 amend를 제공하지 않는다. 작업 승인 파이프라인의 원격 게시와 별개로 임의 브랜치 push UI는 제공하지 않는다.
+- 소스 제어 화면은 현재 checkout 브랜치와 `origin` upstream 사이의 일반 push·fast-forward 동기화만 제공한다. hunk 단위 stage, 변경 폐기, amend, 강제 push, 임의 refspec과 자동 merge·rebase는 제공하지 않는다.
 
 이 제한은 로컬 개인용 MVP에서 허용한다. 팀 사용이나 자동 merge를 추가하기 전에 복구 관리자, approval policy, 테스트 잠금, 서명된 감사 로그를 먼저 설계해야 한다.

@@ -3928,6 +3928,26 @@ kbd {
   margin-top: 6px;
 }
 
+.source-remote-status small {
+  display: block;
+  max-width: 720px;
+  margin-top: 7px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.source-remote-status.attention {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.source-remote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .publication-selector {
   border: 1px solid var(--border);
   border-radius: 10px;

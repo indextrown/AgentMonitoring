@@ -366,6 +366,14 @@ let demoSourceControlFiles: SourceControlFile[] = [
   }
 ]
 let demoSourceControlIdentity = { name: '김동현', email: 'developer@example.com', complete: true }
+let demoSourceControlRemote: NonNullable<SourceControlStatus['remote']> = {
+  name: 'origin',
+  url: 'git@github.com:example/AgentMonitoring.git',
+  upstream: searchParams.get('source-remote') === 'unconnected' ? null : 'origin/main',
+  ahead: ['ahead', 'diverged'].includes(searchParams.get('source-remote') ?? '') ? 2 : 0,
+  behind: ['behind', 'diverged'].includes(searchParams.get('source-remote') ?? '') ? 1 : 0,
+  diverged: searchParams.get('source-remote') === 'diverged'
+}
 const listeners = new Set<(event: EventRecord) => void>()
 const authListeners = new Set<(status: CodexAuthStatus) => void>()
 let demoAuth: CodexAuthStatus = searchParams.get('auth') === 'signed-out'
@@ -389,14 +397,7 @@ function sourceControlStatus(requestedProjectId: string): SourceControlStatus {
     stagedCount: files.filter((file) => file.staged).length,
     workingCount: files.filter((file) => file.working).length,
     conflictedCount: files.filter((file) => file.conflicted).length,
-    remote: {
-      name: 'origin',
-      url: 'git@github.com:example/AgentMonitoring.git',
-      upstream: 'origin/main',
-      ahead: 0,
-      behind: 0,
-      diverged: false
-    },
+    remote: demoSourceControlRemote,
     inspectedAt: new Date().toISOString()
   }
 }
@@ -421,7 +422,10 @@ function emit(task: TaskRecord | null, kind: EventKind, actor: string, message: 
 function updateTask(
   taskId: string,
   status: TaskStatus,
-  changes: Partial<Pick<TaskRecord, 'branchName' | 'worktreePath'>> = {}
+  changes: Partial<Pick<
+    TaskRecord,
+    'branchName' | 'worktreePath' | 'sourceBranch' | 'baseCommit' | 'verificationBaseCommit'
+  >> = {}
 ): TaskRecord {
   let updated: TaskRecord | undefined
   state = {
@@ -700,6 +704,19 @@ export const demoBridge: AgentMonitoringBridge = {
     }
   },
   fetchSourceControlRemote: async (requestedProjectId) => sourceControlStatus(requestedProjectId),
+  pushSourceControlRemote: async (requestedProjectId) => {
+    demoSourceControlRemote = {
+      ...demoSourceControlRemote,
+      upstream: demoSourceControlRemote.upstream ?? 'origin/main',
+      ahead: 0,
+      diverged: false
+    }
+    return sourceControlStatus(requestedProjectId)
+  },
+  syncSourceControlRemote: async (requestedProjectId) => {
+    demoSourceControlRemote = { ...demoSourceControlRemote, behind: 0, diverged: false }
+    return sourceControlStatus(requestedProjectId)
+  },
   generateRuntimeScenario: async (input) => {
     const project = state.projects.find((item) => item.id === input.projectId)
     if (!project?.runtimeAdapter) throw new Error('iOS 실행 설정이 없습니다.')
@@ -822,7 +839,10 @@ export const demoBridge: AgentMonitoringBridge = {
   runTask: async (taskId) => {
     const task = updateTask(taskId, 'running', {
       branchName: `agentmonitor/demo-${taskId.slice(0, 6)}`,
-      worktreePath: `demo://worktrees/${taskId}`
+      worktreePath: `demo://worktrees/${taskId}`,
+      sourceBranch: 'main',
+      baseCommit: '1111111111111111111111111111111111111111',
+      verificationBaseCommit: '1111111111111111111111111111111111111111'
     })
     emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
     const plan = task.verificationPlan

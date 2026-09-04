@@ -368,6 +368,25 @@ test('stages selected files and commits them from source control', async ({ page
   })
 })
 
+test('pushes local commits and fast-forwards remote commits from source control', async ({ page }) => {
+  await page.goto('/?workspace=empty&source-remote=ahead')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '소스 제어' }).click()
+
+  await expect(page.getByText('앞섬 2 / 뒤처짐 0')).toBeVisible()
+  await page.getByRole('button', { name: '2개 커밋 Push' }).click()
+  await expect(page.getByText('2개 로컬 커밋을 원격에 push했습니다.')).toBeVisible()
+  await expect(page.getByText('앞섬 0 / 뒤처짐 0')).toBeVisible()
+
+  await page.goto('/?workspace=empty&source-remote=behind')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '소스 제어' }).click()
+  await expect(page.getByText('앞섬 0 / 뒤처짐 1')).toBeVisible()
+  await page.getByRole('button', { name: '1개 커밋 동기화' }).click()
+  await expect(page.getByText('1개 원격 커밋을 로컬에 동기화했습니다.')).toBeVisible()
+  await expect(page.getByText('앞섬 0 / 뒤처짐 0')).toBeVisible()
+})
+
 test('distinguishes supported iOS runtime capabilities from planned access', async ({ page }) => {
   await page.goto('/?workspace=empty&contract=ios')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
@@ -452,14 +471,14 @@ test('lets each task publish directly to the remote base branch', async ({ page 
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('작업 제목').fill('직접 게시 확인')
   await dialog.getByLabel('목표와 완료 조건').fill('검증된 변경을 원격 main에 직접 게시하고 로컬을 동기화한다.')
-  await dialog.getByText('기본 브랜치에 직접 올리기', { exact: true }).click()
+  await dialog.getByText('작업 시작 브랜치에 직접 올리기', { exact: true }).click()
   await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
 
   const drawer = page.locator('.task-drawer')
   await drawer.getByRole('button', { name: '실행' }).click()
-  await expect(drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' })).toBeVisible()
+  await expect(drawer.getByRole('button', { name: 'main 브랜치에 직접 게시' })).toBeVisible()
   page.once('dialog', (confirmDialog) => confirmDialog.accept())
-  await drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' }).click()
+  await drawer.getByRole('button', { name: 'main 브랜치에 직접 게시' }).click()
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })
 
@@ -471,7 +490,7 @@ test('retries only the local sync after the remote publication already succeeded
   const drawer = page.locator('.task-drawer')
   await expect(drawer.getByText('원격 origin/main 게시 완료 · 로컬 동기화 대기')).toBeVisible()
   await expect(drawer.getByRole('button', { name: '로컬 동기화 다시 시도' })).toBeVisible()
-  await expect(drawer.getByRole('button', { name: '기본 브랜치에 직접 게시' })).toHaveCount(0)
+  await expect(drawer.getByRole('button', { name: 'main 브랜치에 직접 게시' })).toHaveCount(0)
   await drawer.getByRole('button', { name: '로컬 동기화 다시 시도' }).click()
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })

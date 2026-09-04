@@ -382,6 +382,16 @@ function registerIpc(): void {
     return requireSourceControl().fetch(requireStore().getProject(validProjectId))
   })
 
+  ipcMain.handle('source-control:push', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().push(requireStore().getProject(validProjectId))
+  })
+
+  ipcMain.handle('source-control:sync', (_event, projectId: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    return requireSourceControl().sync(requireStore().getProject(validProjectId))
+  })
+
   ipcMain.handle('project:auto-configure-runtime', async (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     const project = requireStore().getProject(validProjectId)

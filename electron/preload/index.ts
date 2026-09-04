@@ -35,6 +35,8 @@ const bridge: AgentMonitoringBridge = {
   commitSourceControlChanges: (input: SourceControlCommitInput) =>
     ipcRenderer.invoke('source-control:commit', input),
   fetchSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:fetch', projectId),
+  pushSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:push', projectId),
+  syncSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:sync', projectId),
   autoConfigureProjectRuntime: (projectId: string) =>
     ipcRenderer.invoke('project:auto-configure-runtime', projectId),
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
