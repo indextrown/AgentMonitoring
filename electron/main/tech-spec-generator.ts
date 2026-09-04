@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { GeneratedTechSpec, TaskTechSpecDraft } from '../../src/shared/types'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { readCodexStructuredOutput } from './codex-structured-output'
 
 const execFileAsync = promisify(execFile)
 const GENERATION_TIMEOUT_MS = 3 * 60_000
@@ -124,7 +125,7 @@ export class TechSpecGenerator {
     const outputPath = join(temporaryDirectory, 'tech-spec.json')
     try {
       await writeFile(schemaPath, JSON.stringify(OUTPUT_SCHEMA), { encoding: 'utf8', mode: 0o600 })
-      await execFileAsync(
+      const { stdout } = await execFileAsync(
         this.codexCommand,
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
@@ -132,6 +133,7 @@ export class TechSpecGenerator {
           '--ephemeral',
           '--sandbox',
           'read-only',
+          '--json',
           '--cd',
           input.projectPath,
           '--output-schema',
@@ -146,11 +148,13 @@ export class TechSpecGenerator {
             ? buildCodexEnvironment(this.codexHome, this.codexCommand)
             : process.env,
           encoding: 'utf8',
-          maxBuffer: 4_000_000,
+          maxBuffer: 16_000_000,
           timeout: GENERATION_TIMEOUT_MS
         }
       )
-      const payload = generatedTechSpecSchema.parse(JSON.parse(await readFile(outputPath, 'utf8')))
+      const payload = generatedTechSpecSchema.parse(
+        await readCodexStructuredOutput(outputPath, stdout, '테크스펙')
+      )
       return buildGeneratedTechSpec(payload, input.revision)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {

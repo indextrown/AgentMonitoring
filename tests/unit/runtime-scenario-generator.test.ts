@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -11,7 +11,10 @@ import {
   selectAppSchemeCandidates,
   selectXcodeContainer
 } from '../../electron/main/project-runtime-config'
-import { buildApprovedRuntimeContract } from '../../electron/main/runtime-scenario-generator'
+import {
+  buildApprovedRuntimeContract,
+  RuntimeScenarioGenerator
+} from '../../electron/main/runtime-scenario-generator'
 
 const adapter = {
   kind: 'ios-simulator' as const,
@@ -22,6 +25,56 @@ const adapter = {
 }
 
 describe('runtime scenario generation', () => {
+  it('recovers a generated scenario from Codex JSON events when the result file is missing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-fallback-'))
+    const fakeCodex = join(root, 'fake-codex.mjs')
+    try {
+      const payload = {
+        summary: '저장 버튼을 누른 뒤 완료 화면을 확인합니다.',
+        actions: [{
+          kind: 'tap',
+          identifier: 'save-profile',
+          text: null,
+          timeoutSeconds: 10
+        }],
+        assertions: [{
+          name: '완료 화면 표시',
+          identifier: 'profile-complete-screen',
+          property: 'exists',
+          expected: true
+        }]
+      }
+      await writeFile(fakeCodex, [
+        '#!/usr/bin/env node',
+        "if (!process.argv.includes('--json')) process.exit(2)",
+        `console.log(${JSON.stringify(JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: JSON.stringify(payload) }
+        }))})`
+      ].join('\n'), 'utf8')
+      await chmod(fakeCodex, 0o700)
+
+      const generated = await new RuntimeScenarioGenerator(fakeCodex).generate({
+        projectPath: root,
+        title: '프로필 저장',
+        prompt: '저장 후 완료 화면을 표시합니다.',
+        adapter
+      })
+
+      expect(generated.summary).toBe(payload.summary)
+      expect(generated.contract.runtimeScenario.actions).toEqual([
+        { kind: 'tap', identifier: 'save-profile', timeoutSeconds: 10 }
+      ])
+      expect(generated.contract.runtimeScenario.assertions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ identifier: 'profile-complete-screen', expected: true })
+        ])
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('prefers a tracked workspace and ignores the project-internal workspace', () => {
     expect(findTrackedXcodeContainers([
       'Demo.xcodeproj/project.pbxproj',
