@@ -29,11 +29,12 @@ function demoSimulatorSession(requestedProjectId: string): ProjectSimulatorSessi
       branchName: null
     },
     status: 'idle',
+    destinationKind: null,
     deviceId: null,
     deviceName: null,
     bundleIdentifier: null,
     processId: null,
-    message: 'Simulator에서 앱을 실행할 준비가 되었습니다.',
+    message: '실행할 Simulator 또는 실기기를 선택하세요.',
     error: null,
     updatedAt: new Date().toISOString()
   }
@@ -820,23 +821,73 @@ export const demoBridge: AgentMonitoringBridge = {
     return sourceControlStatus(requestedProjectId)
   },
   getProjectSimulatorStatus: async (requestedProjectId) => demoSimulatorSession(requestedProjectId),
-  launchProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
-    source: {
-      kind: 'project',
-      taskId: null,
-      branchName: null
-    },
-    status: 'running',
-    deviceId: 'DEMO-IPHONE-UDID',
-    deviceName: 'iPhone 16 Pro',
-    bundleIdentifier: 'com.example.Demo',
-    processId: 4242,
-    message: 'iPhone 16 Pro에서 앱을 실행하고 있습니다.',
-    error: null
-  }),
-  launchTaskSimulator: async (taskId) => {
+  listProjectRunDestinations: async (requestedProjectId) => {
+    const project = state.projects.find((item) => item.id === requestedProjectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    return [
+      {
+        id: `simulator:DEMO-${family.toUpperCase()}-UDID`,
+        name: family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch',
+        kind: 'simulator' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.4',
+        available: true,
+        statusLabel: '사용 가능',
+        detail: 'Simulator · iOS 26.4 · 종료됨'
+      },
+      {
+        id: `physical:DEMO-PHYSICAL-${family.toUpperCase()}-UDID`,
+        name: `테스트 ${familyLabel}`,
+        kind: 'physical' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.3',
+        available: true,
+        statusLabel: '연결됨',
+        detail: '실기기 · iOS 26.3 · 연결됨'
+      },
+      {
+        id: `physical:DEMO-OFFLINE-${family.toUpperCase()}-UDID`,
+        name: `오프라인 ${familyLabel}`,
+        kind: 'physical' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.2',
+        available: false,
+        statusLabel: '연결 안 됨',
+        detail: '실기기 · iOS 26.2 · 연결 안 됨'
+      }
+    ]
+  },
+  launchProjectSimulator: async (requestedProjectId, destinationId) => {
+    const project = state.projects.find((item) => item.id === requestedProjectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    const physical = destinationId?.startsWith('physical:') ?? false
+    const deviceName = physical ? `테스트 ${familyLabel}` : family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch'
+    return updateDemoSimulator(requestedProjectId, {
+      source: {
+        kind: 'project',
+        taskId: null,
+        branchName: null
+      },
+      status: 'running',
+      destinationKind: physical ? 'physical' : 'simulator',
+      deviceId: physical ? `DEMO-PHYSICAL-${family.toUpperCase()}-UDID` : `DEMO-${family.toUpperCase()}-UDID`,
+      deviceName,
+      bundleIdentifier: 'com.example.Demo',
+      processId: 4242,
+      message: `${deviceName}에서 앱을 실행하고 있습니다.`,
+      error: null
+    })
+  },
+  launchTaskSimulator: async (taskId, destinationId) => {
     const task = state.tasks.find((item) => item.id === taskId)
     if (!task?.worktreePath) throw new Error('이 작업의 격리 작업공간이 없습니다.')
+    const project = state.projects.find((item) => item.id === task.projectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    const physical = destinationId?.startsWith('physical:') ?? false
+    const deviceName = physical ? `테스트 ${familyLabel}` : family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch'
     return updateDemoSimulator(task.projectId, {
       source: {
         kind: 'task-worktree',
@@ -844,24 +895,25 @@ export const demoBridge: AgentMonitoringBridge = {
         branchName: task.branchName
       },
       status: 'running',
-      deviceId: 'DEMO-IPHONE-UDID',
-      deviceName: 'iPhone 16 Pro',
+      destinationKind: physical ? 'physical' : 'simulator',
+      deviceId: physical ? `DEMO-PHYSICAL-${family.toUpperCase()}-UDID` : `DEMO-${family.toUpperCase()}-UDID`,
+      deviceName,
       bundleIdentifier: 'com.example.Demo',
       processId: 4242,
-      message: '작업 브랜치 앱을 iPhone 16 Pro에서 실행하고 있습니다.',
+      message: `작업 브랜치 앱을 ${deviceName}에서 실행하고 있습니다.`,
       error: null
     })
   },
   restartProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
     status: 'running',
     processId: 4243,
-    message: 'iPhone 16 Pro에서 앱을 다시 실행했습니다.',
+    message: `${demoSimulatorSession(requestedProjectId).deviceName ?? 'iOS 기기'}에서 앱을 다시 실행했습니다.`,
     error: null
   }),
   stopProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
     status: 'stopped',
     processId: null,
-    message: 'iPhone 16 Pro에서 앱을 종료했습니다.',
+    message: `${demoSimulatorSession(requestedProjectId).deviceName ?? 'iOS 기기'}에서 앱을 종료했습니다.`,
     error: null
   }),
   generateTechSpec: async (input) => ({

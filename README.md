@@ -162,7 +162,7 @@ AgentMonitoring은 내장 코드 편집기나 사람 승인 없는 자동 merge�
 | 프로젝트 연결 | ChatGPT 로그인, 로컬 Git 저장소 등록, 브랜치·변경 파일·언어·빌드 도구 검사, 환경 준비·검증 명령 설정 |
 | 작업 관리 | 새 작업 등록, 선택형 테크스펙 생성·수정·승인, 실시간 상태와 역할별 로그, 중단·재실행, 검색, 버그·메모·활동 기록 |
 | 에이전트 실행 | 승인된 테크스펙 전달, AI 검증 계획 추천, 작업별 조건부 파이프라인, Test Designer·Critic·Implementer·Reviewer 역할 분리, 작업별 worktree |
-| Swift 앱 실행·검증 | Xcode 프로젝트·Scheme 자동 감지, iPhone·iPad Simulator 앱 빌드·실행·재실행·종료, 암호화한 로컬 환경값 주입, 독립된 작업별 검증 케이스 |
+| Swift 앱 실행·검증 | Xcode 프로젝트·Scheme 자동 감지, iPhone·iPad Simulator 선택, Xcode에 페어링된 USB·네트워크 실기기 실행, 앱 빌드·실행·재실행·종료, 암호화한 로컬 환경값 주입, 독립된 작업별 검증 케이스 |
 | 결과와 자가 수정 | 단계별 통과·실패·건너뜀 표시, 환경·계약 오류 사전 차단, 프로젝트 테스트, 실패 시점 화면·접근성·조작 증거 수집, 제품 코드 실패만 제한적으로 재시도 |
 | 소스 제어 | 원본 저장소의 변경 파일과 diff 확인, 파일별 스테이징·해제, staged 파일만 커밋, 모든 변경 한 번에 커밋, origin fetch·일반 push·fast-forward 동기화와 ahead·behind 확인 |
 | 검토와 게시 | 변경 파일·Git patch·Reviewer finding·시도별 증거 확인, 최신 원격 반영·재검증, 작업 브랜치 push·GitHub PR 생성 또는 작업 시작 브랜치 직접 push, 로컬 fast-forward 동기화 |
@@ -177,6 +177,7 @@ AgentMonitoring은 내장 코드 편집기나 사람 승인 없는 자동 merge�
 - Codex CLI
 - GitHub PR 방식을 사용한다면 로그인된 GitHub CLI(`gh`)
 - Swift 앱을 검증한다면 Xcode와 iPhone 또는 iPad Simulator
+- 실기기에서 개발 앱을 실행한다면 Xcode에 페어링하고 Developer Mode를 켠 iPhone 또는 iPad
 
 터미널에서 `codex` 명령을 실행할 수 있어야 해요. OpenAI API 키는 필요하지 않아요.
 
@@ -286,17 +287,19 @@ AI 작업이 진행되는 동안 원본에서 새 커밋을 만들어도 작업�
 
 ## Swift 앱을 바로 실행하려면
 
-iOS 실행 영역이 연결된 실제 프로젝트에는 대시보드에 **iPhone에서 앱 바로 실행** 또는 **iPad에서 앱 바로 실행** 패널이 나타나요. AI 작업을 만들지 않고도 현재 원본 checkout의 앱을 Simulator에서 확인할 수 있어요.
+iOS 실행 영역이 연결된 실제 프로젝트에는 대시보드에 **iPhone 앱 바로 실행** 또는 **iPad 앱 바로 실행** 패널이 나타나요. AI 작업을 만들지 않고도 현재 원본 checkout이나 승인 대기 중인 작업 브랜치의 앱을 Simulator 또는 실기기에서 확인할 수 있어요.
 
-1. **빌드·실행**을 누르면 프로젝트에 저장된 container, Scheme과 Debug 설정으로 앱을 빌드해요.
-2. 설정한 종류의 Simulator를 준비하고 앱을 설치한 뒤 실행해요.
-3. **재실행**은 다시 빌드하지 않고 설치된 앱 프로세스만 종료한 뒤 바로 실행해요.
-4. **종료**는 앱 프로세스만 종료해요. Simulator 기기와 창은 다른 개발 작업을 위해 그대로 둬요.
-5. 코드를 바꾼 뒤 새 결과를 보려면 **다시 빌드·실행**을 누르세요.
+1. 실행할 Simulator 또는 Xcode에 페어링된 실기기를 목록에서 선택해요.
+2. **빌드·실행**을 누르면 프로젝트에 저장된 container, Scheme과 Debug 설정으로 해당 기기용 앱을 빌드해요.
+3. 선택한 기기에 앱을 설치하고 실행해요.
+4. 같은 네트워크의 실기기가 보이지 않으면 Xcode에서 페어링·Developer Mode·잠금 해제를 확인한 뒤 기기 목록을 새로고침해요.
+5. **재실행**은 다시 빌드하지 않고 설치된 앱 프로세스만 종료한 뒤 바로 실행해요.
+6. **종료**는 앱 프로세스만 종료해요. Simulator 기기와 창은 다른 개발 작업을 위해 그대로 둬요.
+7. 코드를 바꾼 뒤 새 결과를 보려면 **다시 빌드·실행**을 누르세요.
 
-패널에는 준비, 부팅, 빌드, 설치와 실행 상태가 실시간으로 표시돼요. 선택된 기기, Scheme과 bundle identifier도 함께 확인할 수 있어요. 개발 실행에 사용한 전용 DerivedData는 앱 설치가 끝나면 바로 삭제하며, 설치된 앱 정보만 재실행과 종료를 위해 현재 AgentMonitoring 실행 중에 보관해요. AgentMonitoring을 종료하면 추적 중인 앱 프로세스를 정리하지만 Simulator 자체는 종료하지 않아요.
+패널에는 준비, 부팅, 빌드, 설치와 실행 상태가 실시간으로 표시돼요. 현재 Mac의 사용 가능한 Simulator와 Xcode가 알고 있는 실기기를 함께 보여주며, 연결이 끊긴 실기기는 상태를 설명하되 선택할 수 없게 표시해요. 선택된 기기, Scheme과 bundle identifier도 함께 확인할 수 있어요. 개발 실행에 사용한 전용 DerivedData는 앱 설치가 끝나면 바로 삭제하며, 설치된 앱 정보만 재실행과 종료를 위해 현재 AgentMonitoring 실행 중에 보관해요. AgentMonitoring을 종료하면 추적 중인 앱 프로세스를 정리하지만 Simulator 기기 자체는 종료하지 않아요.
 
-AgentMonitoring은 긴 빌드를 시작하기 전에 선택한 Scheme이 Simulator에 설치할 수 있는 iOS 앱인지 확인해요. Framework나 테스트 Scheme을 선택했다면 바로 중단하고 프로젝트 설정에서 실행 설정을 다시 찾도록 안내해요.
+AgentMonitoring은 긴 빌드를 시작하기 전에 선택한 Scheme이 선택한 iOS 기기에 설치할 수 있는 앱인지 확인해요. Framework나 테스트 Scheme을 선택했다면 바로 중단하고 프로젝트 설정에서 실행 설정을 다시 찾도록 안내해요. 실기기 실행은 프로젝트의 기존 코드 서명 설정을 그대로 사용하므로, 서명이 준비되지 않았다면 Xcode에서 Team과 Signing 설정을 먼저 완료해야 해요.
 
 이 기능은 사람이 현재 앱을 빠르게 확인하는 개발 도구예요. AI 작업의 Simulator 검증은 별도 worktree에서 실행되고 화면·접근성·조작 증거까지 수집하므로 서로 대체하지 않아요.
 

@@ -411,10 +411,24 @@ export interface ProjectSimulatorSource {
   branchName: string | null
 }
 
+export type ProjectRunDestinationKind = 'simulator' | 'physical'
+
+export interface ProjectRunDestination {
+  id: string
+  name: string
+  kind: ProjectRunDestinationKind
+  deviceFamily: 'iphone' | 'ipad'
+  osVersion: string | null
+  available: boolean
+  statusLabel: string
+  detail: string
+}
+
 export interface ProjectSimulatorSession {
   projectId: string
   source: ProjectSimulatorSource
   status: ProjectSimulatorStatus
+  destinationKind: ProjectRunDestinationKind | null
   deviceId: string | null
   deviceName: string | null
   bundleIdentifier: string | null
@@ -730,7 +744,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 13
+export const AGENT_MONITORING_BRIDGE_VERSION = 14
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -761,8 +775,9 @@ export interface AgentMonitoringBridge {
   pushSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   syncSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   getProjectSimulatorStatus: (projectId: string) => Promise<ProjectSimulatorSession>
-  launchProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
-  launchTaskSimulator: (taskId: string) => Promise<ProjectSimulatorSession>
+  listProjectRunDestinations: (projectId: string, refresh?: boolean) => Promise<ProjectRunDestination[]>
+  launchProjectSimulator: (projectId: string, destinationId?: string) => Promise<ProjectSimulatorSession>
+  launchTaskSimulator: (taskId: string, destinationId?: string) => Promise<ProjectSimulatorSession>
   restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>

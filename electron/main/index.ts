@@ -496,13 +496,29 @@ function registerIpc(): void {
     return requireProjectSimulator().getStatus(requireStore().getProject(validProjectId))
   })
 
-  ipcMain.handle('project-simulator:launch', (_event, projectId: string) => {
+  ipcMain.handle('project-simulator:destinations', (_event, projectId: string, refresh = false) => {
     const validProjectId = z.string().uuid().parse(projectId)
-    return requireProjectSimulator().launch(requireStore().getProject(validProjectId))
+    const validRefresh = z.boolean().parse(refresh)
+    return requireProjectSimulator().listDestinations(requireStore().getProject(validProjectId), validRefresh)
   })
 
-  ipcMain.handle('project-simulator:launch-task', (_event, taskId: string) => {
+  ipcMain.handle('project-simulator:launch', (_event, projectId: string, destinationId?: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    const validDestinationId = destinationId === undefined
+      ? undefined
+      : z.string().trim().min(1).max(512).parse(destinationId)
+    return requireProjectSimulator().launch(
+      requireStore().getProject(validProjectId),
+      undefined,
+      validDestinationId
+    )
+  })
+
+  ipcMain.handle('project-simulator:launch-task', (_event, taskId: string, destinationId?: string) => {
     const validTaskId = z.string().uuid().parse(taskId)
+    const validDestinationId = destinationId === undefined
+      ? undefined
+      : z.string().trim().min(1).max(512).parse(destinationId)
     const store = requireStore()
     const task = store.getTask(validTaskId)
     if (!task.worktreePath) {
@@ -519,7 +535,7 @@ function registerIpc(): void {
         taskId: task.id,
         branchName: task.branchName
       }
-    })
+    }, validDestinationId)
   })
 
   ipcMain.handle('project-simulator:restart', (_event, projectId: string) => {

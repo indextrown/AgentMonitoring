@@ -71,6 +71,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  ProjectRunDestination,
   ProjectRuntimeEnvironmentEntry,
   ProjectRuntimeDiscovery,
   ProjectSimulatorSession,
@@ -129,6 +130,7 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'pushSourceControlRemote',
   'syncSourceControlRemote',
   'getProjectSimulatorStatus',
+  'listProjectRunDestinations',
   'launchProjectSimulator',
   'launchTaskSimulator',
   'restartProjectSimulator',
@@ -571,14 +573,14 @@ export function App(): React.JSX.Element {
     void load(task.projectId)
   }
 
-  const launchTaskSimulator = (task: TaskRecord): void => {
+  const launchTaskSimulator = (task: TaskRecord, destinationId: string): void => {
     setError(null)
     setNotice(`${task.branchName ?? '작업 브랜치'}에서 앱을 빌드하고 있습니다.`)
     setSelectedTask(null)
     setPage('dashboard')
-    void bridge.launchTaskSimulator(task.id)
+    void bridge.launchTaskSimulator(task.id, destinationId)
       .then((session) => {
-        setNotice(`${session.source.branchName ?? '작업 브랜치'} 앱을 Simulator에서 실행했습니다.`)
+        setNotice(`${session.source.branchName ?? '작업 브랜치'} 앱을 ${session.deviceName ?? '선택한 iOS 기기'}에서 실행했습니다.`)
       })
       .catch((launchError) => setError(String(launchError)))
   }
@@ -1370,7 +1372,7 @@ function ProjectCapabilitySummary({
 const PROJECT_SIMULATOR_STATUS_LABELS: Record<ProjectSimulatorSession['status'], string> = {
   idle: '실행 준비',
   preparing: '기기 확인 중',
-  booting: 'Simulator 준비 중',
+  booting: '기기 준비 중',
   building: '앱 빌드 중',
   installing: '앱 설치 중',
   running: '실행 중',
@@ -1389,29 +1391,87 @@ const PROJECT_SIMULATOR_BUSY = new Set<ProjectSimulatorSession['status']>([
   'stopping'
 ])
 
+function sessionDestinationId(session: ProjectSimulatorSession | null): string | null {
+  return session?.destinationKind && session.deviceId
+    ? `${session.destinationKind}:${session.deviceId}`
+    : null
+}
+
+function initialRunDestination(
+  destinations: ProjectRunDestination[],
+  preferredId: string | null = null
+): string {
+  if (preferredId && destinations.some((destination) => destination.id === preferredId && destination.available)) {
+    return preferredId
+  }
+  return destinations.find((destination) => destination.available && destination.kind === 'simulator')?.id
+    ?? destinations.find((destination) => destination.available)?.id
+    ?? ''
+}
+
 function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.JSX.Element {
   const [session, setSession] = useState<ProjectSimulatorSession | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [destinations, setDestinations] = useState<ProjectRunDestination[]>([])
+  const [selectedDestinationId, setSelectedDestinationId] = useState('')
+  const [destinationsLoading, setDestinationsLoading] = useState(true)
 
   useEffect(() => {
     let active = true
     setSession(null)
     setError(null)
+    setDestinations([])
+    setSelectedDestinationId('')
+    setDestinationsLoading(true)
     void bridge.getProjectSimulatorStatus(project.id)
       .then((next) => {
-        if (active) setSession(next)
+        if (active) {
+          setSession(next)
+          const runningDestinationId = sessionDestinationId(next)
+          if (runningDestinationId) setSelectedDestinationId(runningDestinationId)
+        }
       })
       .catch((statusError) => {
         if (active) setError(String(statusError))
       })
     const unsubscribe = bridge.onProjectSimulatorChanged((next) => {
-      if (active && next.projectId === project.id) setSession(next)
+      if (active && next.projectId === project.id) {
+        setSession(next)
+        const runningDestinationId = sessionDestinationId(next)
+        if (runningDestinationId) setSelectedDestinationId(runningDestinationId)
+      }
     })
+    void bridge.listProjectRunDestinations(project.id)
+      .then((next) => {
+        if (!active) return
+        setDestinations(next)
+        setSelectedDestinationId((current) => initialRunDestination(next, current))
+      })
+      .catch((destinationError) => {
+        if (active) setError(String(destinationError))
+      })
+      .finally(() => {
+        if (active) setDestinationsLoading(false)
+      })
     return () => {
       active = false
       unsubscribe()
     }
   }, [project.id])
+
+  const refreshDestinations = async (): Promise<void> => {
+    setDestinationsLoading(true)
+    setError(null)
+    try {
+      const next = await bridge.listProjectRunDestinations(project.id, true)
+      setDestinations(next)
+      setSelectedDestinationId((current) => initialRunDestination(next, current))
+    } catch (destinationError) {
+      setError(String(destinationError))
+    } finally {
+      setDestinationsLoading(false)
+    }
+  }
 
   const run = async (operation: () => Promise<ProjectSimulatorSession>): Promise<void> => {
     setError(null)
@@ -1424,6 +1484,7 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
 
   const busy = session ? PROJECT_SIMULATOR_BUSY.has(session.status) : true
   const installed = Boolean(session?.deviceId && session.bundleIdentifier)
+  const canStop = installed && (session?.destinationKind !== 'physical' || Boolean(session.processId))
   const adapter = project.runtimeAdapter!
   const family = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
   const taskSource = session?.source.kind === 'task-worktree' && session.source.taskId
@@ -1436,12 +1497,39 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         {busy ? <LoaderCircle className="spin" size={18} /> : <SquareTerminal size={18} />}
       </div>
       <div className="project-simulator-copy">
-        <p className="eyebrow">DEVELOPMENT SIMULATOR</p>
+        <p className="eyebrow">DEVELOPMENT DEVICE</p>
         <div className="project-simulator-title">
-          <h3>{family}에서 앱 바로 실행</h3>
+          <h3>{family} 앱 바로 실행</h3>
           <span>{session ? PROJECT_SIMULATOR_STATUS_LABELS[session.status] : '상태 확인 중'}</span>
         </div>
         <p>{session?.message ?? `${adapter.scheme} 실행 상태를 확인하고 있습니다.`}</p>
+        <div className="project-simulator-target">
+          <select
+            aria-label="앱 실행 기기"
+            disabled={busy || destinationsLoading}
+            value={selectedDestinationId}
+            onChange={(event) => setSelectedDestinationId(event.target.value)}
+          >
+            {destinations.length === 0 && <option value="">{destinationsLoading ? '기기 찾는 중' : '사용 가능한 기기 없음'}</option>}
+            {destinations.map((destination) => (
+              <option disabled={!destination.available} key={destination.id} value={destination.id}>
+                {destination.name} · {destination.kind === 'simulator' ? 'Simulator' : '실기기'} · {destination.statusLabel}
+              </option>
+            ))}
+          </select>
+          <button
+            aria-label="실행 기기 새로고침"
+            className="icon-button"
+            disabled={busy || destinationsLoading}
+            type="button"
+            onClick={() => void refreshDestinations()}
+          >
+            {destinationsLoading ? <LoaderCircle className="spin" size={12} /> : <RotateCcw size={12} />}
+          </button>
+        </div>
+        <small className="project-simulator-hint">
+          Xcode에 페어링된 같은 네트워크 또는 USB 실기기도 표시합니다. 연결 상태가 바뀌면 새로고침하세요.
+        </small>
         <div className="project-simulator-meta">
           <code className={taskSource ? 'task-source' : undefined}>
             <GitBranch size={10} />
@@ -1459,10 +1547,10 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         <button
           className="primary-button"
           type="button"
-          disabled={busy}
+          disabled={busy || !selectedDestinationId}
           onClick={() => void run(() => taskSource
-            ? bridge.launchTaskSimulator(taskSource.taskId!)
-            : bridge.launchProjectSimulator(project.id))}
+            ? bridge.launchTaskSimulator(taskSource.taskId!, selectedDestinationId)
+            : bridge.launchProjectSimulator(project.id, selectedDestinationId))}
         >
           {busy && ['preparing', 'booting', 'building', 'installing'].includes(session?.status ?? '')
             ? <LoaderCircle className="spin" size={13} />
@@ -1473,8 +1561,8 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
           <button
             className="secondary-button"
             type="button"
-            disabled={busy}
-            onClick={() => void run(() => bridge.launchProjectSimulator(project.id))}
+            disabled={busy || !selectedDestinationId}
+            onClick={() => void run(() => bridge.launchProjectSimulator(project.id, selectedDestinationId))}
           >
             <GitBranch size={13} /> 원본으로 실행
           </button>
@@ -1490,7 +1578,7 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         <button
           className="secondary-button danger"
           type="button"
-          disabled={busy || !installed || session?.status === 'stopped'}
+          disabled={busy || !canStop || session?.status === 'stopped'}
           onClick={() => void run(() => bridge.stopProjectSimulator(project.id))}
         >
           <Square size={12} /> 종료
@@ -3584,7 +3672,7 @@ function TaskDrawer({
   onRetryVerification: (task: TaskRecord) => void
   onRegenerateRuntimeScenario: (task: TaskRecord) => void
   canLaunchSimulator: boolean
-  onLaunchSimulator: (task: TaskRecord) => void
+  onLaunchSimulator: (task: TaskRecord, destinationId: string) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
@@ -3603,6 +3691,48 @@ function TaskDrawer({
     ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
     : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
+  const canLaunchTaskApp = canLaunchSimulator && Boolean(task.worktreePath) && !['queued', 'running', 'testing'].includes(task.status)
+  const [taskDestinations, setTaskDestinations] = useState<ProjectRunDestination[]>([])
+  const [taskDestinationId, setTaskDestinationId] = useState('')
+  const [taskDestinationsLoading, setTaskDestinationsLoading] = useState(canLaunchTaskApp)
+  const [taskDestinationError, setTaskDestinationError] = useState(false)
+  useEffect(() => {
+    let active = true
+    setTaskDestinations([])
+    setTaskDestinationId('')
+    setTaskDestinationsLoading(canLaunchTaskApp)
+    setTaskDestinationError(false)
+    if (canLaunchTaskApp) {
+      void bridge.listProjectRunDestinations(task.projectId)
+        .then((destinations) => {
+          if (!active) return
+          setTaskDestinations(destinations)
+          setTaskDestinationId(initialRunDestination(destinations))
+        })
+        .catch(() => {
+          if (active) setTaskDestinationError(true)
+        })
+        .finally(() => {
+          if (active) setTaskDestinationsLoading(false)
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [canLaunchTaskApp, task.id, task.projectId])
+  const refreshTaskDestinations = async (): Promise<void> => {
+    setTaskDestinationsLoading(true)
+    setTaskDestinationError(false)
+    try {
+      const destinations = await bridge.listProjectRunDestinations(task.projectId, true)
+      setTaskDestinations(destinations)
+      setTaskDestinationId((current) => initialRunDestination(destinations, current))
+    } catch {
+      setTaskDestinationError(true)
+    } finally {
+      setTaskDestinationsLoading(false)
+    }
+  }
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
     : runtimeReport
@@ -3814,7 +3944,32 @@ function TaskDrawer({
         )}
         </div>
         <footer>
-          {canLaunchSimulator && task.worktreePath && !['queued', 'running', 'testing'].includes(task.status) && <button className="secondary-button" onClick={() => onLaunchSimulator(task)}><SquareTerminal size={14} />작업 브랜치 앱 실행</button>}
+          {canLaunchTaskApp && (
+            <div className="task-device-launch">
+              <select
+                aria-label="작업 브랜치 앱 실행 기기"
+                disabled={taskDestinationsLoading}
+                value={taskDestinationId}
+                onChange={(event) => setTaskDestinationId(event.target.value)}
+              >
+                {taskDestinations.length === 0 && <option value="">{taskDestinationsLoading ? '기기 찾는 중' : taskDestinationError ? '기기 조회 실패' : '사용 가능한 기기 없음'}</option>}
+                {taskDestinations.map((destination) => (
+                  <option disabled={!destination.available} key={destination.id} value={destination.id}>
+                    {destination.name} · {destination.kind === 'simulator' ? 'Simulator' : '실기기'} · {destination.statusLabel}
+                  </option>
+                ))}
+              </select>
+              <button
+                aria-label="작업 실행 기기 새로고침"
+                className="icon-button"
+                disabled={taskDestinationsLoading}
+                onClick={() => void refreshTaskDestinations()}
+              >
+                {taskDestinationsLoading ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+              </button>
+              <button className="secondary-button" disabled={!taskDestinationId || taskDestinationsLoading} onClick={() => onLaunchSimulator(task, taskDestinationId)}><SquareTerminal size={14} />작업본 실행</button>
+            </div>
+          )}
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
           {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}

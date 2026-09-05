@@ -234,9 +234,11 @@ test('launches, restarts, and stops a connected iOS app from the dashboard', asy
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
 
   const simulator = page.locator('.project-simulator')
-  await expect(simulator.getByRole('heading', { name: 'iPhone에서 앱 바로 실행' })).toBeVisible()
+  await expect(simulator.getByRole('heading', { name: 'iPhone 앱 바로 실행' })).toBeVisible()
   await expect(simulator.getByText('실행 준비', { exact: true })).toBeVisible()
   await expect(simulator.getByText('원본 저장소', { exact: true })).toBeVisible()
+  await expect(simulator.getByLabel('앱 실행 기기')).toHaveValue('simulator:DEMO-IPHONE-UDID')
+  await expect(simulator.getByRole('option', { name: /오프라인 iPhone.*연결 안 됨/ })).toBeDisabled()
 
   await simulator.getByRole('button', { name: '빌드·실행' }).click()
   await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()
@@ -258,18 +260,22 @@ test('launches a verified task worktree and keeps that branch as the rebuild sou
 
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('작업 제목').fill('작업 브랜치 실행 확인')
-  await dialog.getByLabel('목표와 완료 조건').fill('격리 작업공간에서 변경한 앱을 원본과 섞지 않고 Simulator에서 실행한다.')
+  await dialog.getByLabel('목표와 완료 조건').fill('격리 작업공간에서 변경한 앱을 원본과 섞지 않고 선택한 iOS 기기에서 실행한다.')
   await dialog.getByLabel('검증 조합').selectOption('manual-review')
   await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
 
   const drawer = page.locator('.task-drawer')
   await drawer.getByRole('button', { name: '실행' }).click()
   await expect(drawer.getByText('수동 검증 필요', { exact: true })).toBeVisible()
-  await drawer.getByRole('button', { name: '작업 브랜치 앱 실행' }).click()
+  await drawer.getByLabel('작업 브랜치 앱 실행 기기').selectOption('physical:DEMO-PHYSICAL-IPHONE-UDID')
+  await drawer.getByRole('button', { name: '작업본 실행' }).click()
 
   const simulator = page.locator('.project-simulator')
+  await expect(page.getByText(/작업 브랜치.*앱을 테스트 iPhone에서 실행했습니다/)).toBeVisible()
   await expect(simulator.getByText(/agentmonitor\/demo-.*· 작업본/)).toBeVisible()
   await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()
+  await expect(simulator.getByLabel('앱 실행 기기')).toHaveValue('physical:DEMO-PHYSICAL-IPHONE-UDID')
+  await expect(simulator.getByText('테스트 iPhone', { exact: true })).toBeVisible()
   await expect(simulator.getByRole('button', { name: '다시 빌드·실행' })).toBeVisible()
   await expect(simulator.getByRole('button', { name: '원본으로 실행' })).toBeVisible()
 

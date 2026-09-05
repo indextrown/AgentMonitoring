@@ -1233,6 +1233,49 @@ kbd {
   font-size: 8px;
 }
 
+.project-simulator-target {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.project-simulator-hint {
+  display: block;
+  margin-top: 5px;
+  color: #6f797f;
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.project-simulator-target select,
+.task-device-launch select {
+  min-width: 0;
+  height: 27px;
+  border: 1px solid #303941;
+  border-radius: 5px;
+  outline: none;
+  color: #aab4bd;
+  background: #0c1114;
+  font-size: 7px;
+}
+
+.project-simulator-target select {
+  width: min(290px, 100%);
+  padding: 0 24px 0 8px;
+}
+
+.project-simulator-target .icon-button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid #303941;
+  border-radius: 5px;
+  color: #84909b;
+  background: #11171b;
+}
+
 .project-simulator-meta {
   display: flex;
   flex-wrap: wrap;
@@ -4443,12 +4486,29 @@ kbd {
 .task-drawer > footer {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 7px;
   padding: 13px 20px 18px;
   border-top: 1px solid #292f34;
   background: #0e1215;
   box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.task-device-launch {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-device-launch select {
+  flex: 1 1 130px;
+  padding: 0 22px 0 7px;
+}
+
+.task-device-launch button {
+  flex: 0 0 auto;
 }
 
 .approval-notice {
