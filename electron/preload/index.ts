@@ -9,6 +9,7 @@ import type {
   EventRecord,
   GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
+  MoveTaskRevisionRequestInput,
   ProjectSimulatorSession,
   RecommendVerificationPlanInput,
   RefineTechSpecInput,
@@ -16,7 +17,10 @@ import type {
   SourceControlDiffInput,
   SourceControlIdentityInput,
   SourceControlPathsInput,
+  SetTaskRevisionQueuePausedInput,
+  TaskRevisionRequestInput,
   UpdateProjectInput,
+  UpdateTaskRevisionRequestInput,
   UpsertProjectRuntimeEnvironmentInput
 } from '../../src/shared/types'
 
@@ -75,6 +79,15 @@ const bridge: AgentMonitoringBridge = {
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),
   runTask: (taskId: string) => ipcRenderer.invoke('task:run', taskId),
   continueTask: (input: ContinueTaskInput) => ipcRenderer.invoke('task:continue', input),
+  updateTaskRevisionRequest: (input: UpdateTaskRevisionRequestInput) =>
+    ipcRenderer.invoke('task:revision-update', input),
+  cancelTaskRevisionRequest: (input: TaskRevisionRequestInput) =>
+    ipcRenderer.invoke('task:revision-cancel', input),
+  moveTaskRevisionRequest: (input: MoveTaskRevisionRequestInput) =>
+    ipcRenderer.invoke('task:revision-move', input),
+  setTaskRevisionQueuePaused: (input: SetTaskRevisionQueuePausedInput) =>
+    ipcRenderer.invoke('task:revision-queue-pause', input),
+  runNextTaskRevision: (taskId: string) => ipcRenderer.invoke('task:revision-run-next', taskId),
   retryTaskVerification: (taskId: string) => ipcRenderer.invoke('task:retry-verification', taskId),
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),

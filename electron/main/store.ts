@@ -63,6 +63,7 @@ const taskColumns = `
   verification_plan_json AS verificationPlanJson,
   verification_result_json AS verificationResultJson,
   revision_requests_json AS revisionRequestsJson,
+  revision_queue_paused AS revisionQueuePaused,
   created_at AS createdAt,
   updated_at AS updatedAt
 `
@@ -210,10 +211,16 @@ function taskFromRow(row: Row): TaskRecord {
           id: String(request.id),
           instruction: String(request.instruction),
           createdAt: String(request.createdAt),
+          updatedAt: request.updatedAt ? String(request.updatedAt) : String(request.createdAt),
           startedAt: request.startedAt ? String(request.startedAt) : null,
-          appliedAt: request.appliedAt ? String(request.appliedAt) : null
+          appliedAt: request.appliedAt ? String(request.appliedAt) : null,
+          cancelledAt: request.cancelledAt ? String(request.cancelledAt) : null,
+          lastFailureAt: request.lastFailureAt ? String(request.lastFailureAt) : null,
+          lastFailureMessage: request.lastFailureMessage ? String(request.lastFailureMessage) : null,
+          resultSummary: request.resultSummary ? String(request.resultSummary) : null
         }))
       : [],
+    revisionQueuePaused: Boolean(row.revisionQueuePaused),
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt)
   }
@@ -340,6 +347,7 @@ export class AppStore {
         verification_plan_json TEXT,
         verification_result_json TEXT,
         revision_requests_json TEXT NOT NULL DEFAULT '[]',
+        revision_queue_paused INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -490,6 +498,9 @@ export class AppStore {
     }
     if (!taskColumnNames.has('revision_requests_json')) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN revision_requests_json TEXT NOT NULL DEFAULT '[]'")
+    }
+    if (!taskColumnNames.has('revision_queue_paused')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN revision_queue_paused INTEGER NOT NULL DEFAULT 0')
     }
 
     const runtimeEvidenceColumnNames = new Set(
@@ -769,6 +780,7 @@ export class AppStore {
       verificationPlan,
       verificationResult: verificationPlan ? createVerificationResult(verificationPlan, now) : null,
       revisionRequests: [],
+      revisionQueuePaused: false,
       createdAt: now,
       updatedAt: now
     }
@@ -780,13 +792,13 @@ export class AppStore {
           publish_strategy, publication_json,
           runtime_contract_json, runtime_scenario_summary,
           runtime_scenario_approved_at, tech_spec_json, verification_plan_json, verification_result_json,
-          revision_requests_json,
+          revision_requests_json, revision_queue_paused,
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
           NULL, NULL, NULL, NULL, NULL, $publishStrategy, NULL, $runtimeContract, $runtimeScenarioSummary,
           $runtimeScenarioApprovedAt, $techSpec, $verificationPlan, $verificationResult,
-          '[]',
+          '[]', 0,
           $createdAt, $updatedAt
         )
       `)
@@ -889,11 +901,24 @@ export class AppStore {
       throw new Error('추가 수정 요청은 5자 이상 5,000자 이하로 작성하세요.')
     }
     const requests = task.revisionRequests ?? []
-    const duplicate = requests.at(-1)?.instruction === normalized && !requests.at(-1)?.appliedAt
+    const duplicate = requests.at(-1)?.instruction === normalized &&
+      !requests.at(-1)?.appliedAt &&
+      !requests.at(-1)?.cancelledAt
     const now = new Date().toISOString()
     const nextRequests: TaskRevisionRequest[] = duplicate
       ? requests
-      : [...requests, { id: randomUUID(), instruction: normalized, createdAt: now, startedAt: null, appliedAt: null }]
+      : [...requests, {
+          id: randomUUID(),
+          instruction: normalized,
+          createdAt: now,
+          updatedAt: now,
+          startedAt: null,
+          appliedAt: null,
+          cancelledAt: null,
+          lastFailureAt: null,
+          lastFailureMessage: null,
+          resultSummary: null
+        }]
     this.database
       .prepare(`
         UPDATE tasks
@@ -917,7 +942,14 @@ export class AppStore {
     const task = this.getTask(taskId)
     const now = new Date().toISOString()
     const requests = (task.revisionRequests ?? []).map((request) => request.id === requestId
-      ? { ...request, startedAt: now }
+      ? {
+          ...request,
+          updatedAt: now,
+          startedAt: now,
+          lastFailureAt: null,
+          lastFailureMessage: null,
+          resultSummary: null
+        }
       : request)
     this.database
       .prepare('UPDATE tasks SET revision_requests_json = ?, updated_at = ? WHERE id = ?')
@@ -930,12 +962,120 @@ export class AppStore {
     if (requestIds.length === 0) return task
     const now = new Date().toISOString()
     const appliedIds = new Set(requestIds)
-    const requests = (task.revisionRequests ?? []).map((request) => request.appliedAt || !appliedIds.has(request.id)
+    const requests = (task.revisionRequests ?? []).map((request) => request.appliedAt || request.cancelledAt || !appliedIds.has(request.id)
       ? request
-      : { ...request, appliedAt: now })
+      : {
+          ...request,
+          updatedAt: now,
+          appliedAt: now,
+          lastFailureAt: null,
+          lastFailureMessage: null,
+          resultSummary: '구현과 선택된 검증을 완료했습니다.'
+        })
+    const hasPendingRequests = requests.some((request) => !request.appliedAt && !request.cancelledAt)
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, revision_queue_paused = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), hasPendingRequests && task.revisionQueuePaused ? 1 : 0, now, taskId)
+    return this.getTask(taskId)
+  }
+
+  markTaskRevisionRequestFailed(taskId: string, requestId: string, message: string): TaskRecord {
+    const task = this.getTask(taskId)
+    const now = new Date().toISOString()
+    const summary = message.trim().slice(0, 500) || '추가 수정 실행에 실패했습니다.'
+    const requests = (task.revisionRequests ?? []).map((request) => request.id === requestId && !request.appliedAt && !request.cancelledAt
+      ? {
+          ...request,
+          updatedAt: now,
+          lastFailureAt: now,
+          lastFailureMessage: summary,
+          resultSummary: null
+        }
+      : request)
     this.database
       .prepare('UPDATE tasks SET revision_requests_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(requests), now, taskId)
+    return this.getTask(taskId)
+  }
+
+  updateTaskRevisionRequest(taskId: string, requestId: string, instruction: string): TaskRecord {
+    const task = this.getTask(taskId)
+    const normalized = instruction.trim()
+    if (normalized.length < 5 || normalized.length > 5_000) {
+      throw new Error('추가 수정 요청은 5자 이상 5,000자 이하로 작성하세요.')
+    }
+    const request = (task.revisionRequests ?? []).find((item) => item.id === requestId)
+    if (!request) throw new Error('수정할 추가 요청을 찾을 수 없습니다.')
+    if (request.appliedAt || request.cancelledAt) throw new Error('완료되거나 취소된 요청은 수정할 수 없습니다.')
+    const now = new Date().toISOString()
+    const requests = (task.revisionRequests ?? []).map((item) => item.id === requestId
+      ? { ...item, instruction: normalized, updatedAt: now }
+      : item)
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, publication_json = NULL, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), now, taskId)
+    this.addEvent(task.projectId, taskId, 'task_revision_updated', 'human', `추가 수정 요청 변경: ${normalized}`)
+    return this.getTask(taskId)
+  }
+
+  cancelTaskRevisionRequest(taskId: string, requestId: string): TaskRecord {
+    const task = this.getTask(taskId)
+    const request = (task.revisionRequests ?? []).find((item) => item.id === requestId)
+    if (!request) throw new Error('취소할 추가 요청을 찾을 수 없습니다.')
+    if (request.appliedAt || request.cancelledAt) throw new Error('완료되거나 취소된 요청은 다시 취소할 수 없습니다.')
+    const now = new Date().toISOString()
+    const requests = (task.revisionRequests ?? []).map((item) => item.id === requestId
+      ? { ...item, updatedAt: now, cancelledAt: now, resultSummary: '사용자가 추가 실행을 취소했습니다.' }
+      : item)
+    const hasPendingRequests = requests.some((item) => !item.appliedAt && !item.cancelledAt)
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, revision_queue_paused = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), hasPendingRequests && task.revisionQueuePaused ? 1 : 0, now, taskId)
+    this.addEvent(task.projectId, taskId, 'task_revision_cancelled', 'human', `추가 수정 요청 취소: ${request.instruction}`)
+    return this.getTask(taskId)
+  }
+
+  moveTaskRevisionRequest(
+    taskId: string,
+    requestId: string,
+    direction: 'up' | 'down',
+    lockedRequestId?: string
+  ): TaskRecord {
+    const task = this.getTask(taskId)
+    const requests = [...(task.revisionRequests ?? [])]
+    const movableIndexes = requests
+      .map((request, index) => ({ request, index }))
+      .filter(({ request }) => !request.appliedAt && !request.cancelledAt && request.id !== lockedRequestId)
+    const position = movableIndexes.findIndex(({ request }) => request.id === requestId)
+    if (position < 0) throw new Error('이동할 대기 요청을 찾을 수 없습니다.')
+    const targetPosition = direction === 'up' ? position - 1 : position + 1
+    if (targetPosition < 0 || targetPosition >= movableIndexes.length) return task
+    const sourceIndex = movableIndexes[position].index
+    const targetIndex = movableIndexes[targetPosition].index
+    ;[requests[sourceIndex], requests[targetIndex]] = [requests[targetIndex], requests[sourceIndex]]
+    const now = new Date().toISOString()
+    requests[sourceIndex] = { ...requests[sourceIndex], updatedAt: now }
+    requests[targetIndex] = { ...requests[targetIndex], updatedAt: now }
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), now, taskId)
+    this.addEvent(task.projectId, taskId, 'task_revision_reordered', 'human', '추가 수정 큐 실행 순서 변경')
+    return this.getTask(taskId)
+  }
+
+  setTaskRevisionQueuePaused(taskId: string, paused: boolean): TaskRecord {
+    const task = this.getTask(taskId)
+    const now = new Date().toISOString()
+    this.database
+      .prepare('UPDATE tasks SET revision_queue_paused = ?, updated_at = ? WHERE id = ?')
+      .run(paused ? 1 : 0, now, taskId)
+    this.addEvent(
+      task.projectId,
+      taskId,
+      paused ? 'task_revision_queue_paused' : 'task_revision_queue_resumed',
+      'human',
+      paused ? '추가 수정 큐 자동 실행 일시정지' : '추가 수정 큐 자동 실행 재개'
+    )
     return this.getTask(taskId)
   }
 

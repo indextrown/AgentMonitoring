@@ -716,6 +716,57 @@ test('queues follow-up feedback while the same task is running', async ({ page }
   await expect(drawer.locator('.drawer-events')).toContainText('추가 수정 큐 등록:')
 })
 
+test('lets people pause and manage queued follow-up feedback before it runs', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('추가 수정 큐 관리')
+  await dialog.getByLabel('목표와 완료 조건').fill('추가 수정 요청을 일시정지하고 순서와 내용을 검토한 뒤 실행한다.')
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await drawer.getByRole('button', { name: '실행', exact: true }).click()
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  await drawer.getByLabel('추가로 수정할 내용').fill('첫 번째 경고를 수정하고 기존 검증을 다시 실행해 주세요.')
+  await drawer.getByRole('button', { name: '요청하고 작업 이어가기' }).click()
+  await expect(drawer.getByText('구현 중', { exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: '현재 요청 후 일시정지' }).click()
+
+  const secondRequest = '두 번째 요청은 문구를 고친 뒤 실행해 주세요.'
+  const editedSecondRequest = '두 번째 요청은 접근성 문구까지 고친 뒤 실행해 주세요.'
+  const thirdRequest = '세 번째 요청은 두 번째 요청보다 먼저 실행해 주세요.'
+  await drawer.getByLabel('추가로 수정할 내용').fill(secondRequest)
+  await drawer.getByRole('button', { name: /큐에 추가|요청하고 작업 이어가기/ }).click()
+  await drawer.getByLabel('추가로 수정할 내용').fill(thirdRequest)
+  await drawer.getByRole('button', { name: /큐에 추가|요청하고 작업 이어가기/ }).click()
+
+  await drawer.getByText('추가 수정 내역 3개').click()
+  const secondItem = drawer.locator('.task-revision-request li').filter({ hasText: secondRequest })
+  await secondItem.getByRole('button', { name: /수정$/ }).click()
+  const requestEditor = drawer.locator('.revision-request-editor')
+  await requestEditor.getByRole('textbox').fill(editedSecondRequest)
+  await requestEditor.getByRole('button', { name: /저장$/ }).click()
+
+  const thirdItem = drawer.locator('.task-revision-request li').filter({ hasText: thirdRequest })
+  await thirdItem.getByRole('button', { name: /위로 이동$/ }).click()
+
+  page.once('dialog', (confirmation) => confirmation.accept())
+  const editedSecondItem = drawer.locator('.task-revision-request li').filter({ hasText: editedSecondRequest })
+  await editedSecondItem.getByRole('button', { name: /취소$/ }).click()
+
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('추가 수정 요청 1개가 남았습니다')).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '브랜치 올리고 PR 만들기' })).toHaveCount(0)
+  await drawer.getByRole('button', { name: '다음 요청 하나 실행' }).click()
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('검증 완료')).toHaveCount(2)
+  await expect(drawer.getByText(/취소됨$/)).toBeVisible()
+  await expect(drawer.getByRole('button', { name: '브랜치 올리고 PR 만들기' })).toBeVisible()
+})
+
 test('lets each task publish directly to the remote base branch', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

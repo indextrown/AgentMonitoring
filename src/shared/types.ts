@@ -30,6 +30,11 @@ export type EventKind =
   | 'note_deleted'
   | 'task_completed'
   | 'task_revision_requested'
+  | 'task_revision_updated'
+  | 'task_revision_cancelled'
+  | 'task_revision_reordered'
+  | 'task_revision_queue_paused'
+  | 'task_revision_queue_resumed'
   | 'task_stopped'
   | 'task_timed_out'
   | 'task_recovered'
@@ -547,8 +552,13 @@ export interface TaskRevisionRequest {
   id: string
   instruction: string
   createdAt: string
+  updatedAt: string
   startedAt: string | null
   appliedAt: string | null
+  cancelledAt: string | null
+  lastFailureAt: string | null
+  lastFailureMessage: string | null
+  resultSummary: string | null
 }
 
 export interface TaskRecord {
@@ -574,6 +584,7 @@ export interface TaskRecord {
   verificationPlan?: TaskVerificationPlan | null
   verificationResult?: TaskVerificationResult | null
   revisionRequests?: TaskRevisionRequest[]
+  revisionQueuePaused?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -725,6 +736,24 @@ export interface ContinueTaskInput {
   instruction: string
 }
 
+export interface UpdateTaskRevisionRequestInput extends ContinueTaskInput {
+  requestId: string
+}
+
+export interface TaskRevisionRequestInput {
+  taskId: string
+  requestId: string
+}
+
+export interface MoveTaskRevisionRequestInput extends TaskRevisionRequestInput {
+  direction: 'up' | 'down'
+}
+
+export interface SetTaskRevisionQueuePausedInput {
+  taskId: string
+  paused: boolean
+}
+
 export interface UpdateProjectInput {
   projectId: string
   name: string
@@ -759,7 +788,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 17
+export const AGENT_MONITORING_BRIDGE_VERSION = 18
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -808,6 +837,11 @@ export interface AgentMonitoringBridge {
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
   continueTask: (input: ContinueTaskInput) => Promise<void>
+  updateTaskRevisionRequest: (input: UpdateTaskRevisionRequestInput) => Promise<TaskRecord>
+  cancelTaskRevisionRequest: (input: TaskRevisionRequestInput) => Promise<TaskRecord>
+  moveTaskRevisionRequest: (input: MoveTaskRevisionRequestInput) => Promise<TaskRecord>
+  setTaskRevisionQueuePaused: (input: SetTaskRevisionQueuePausedInput) => Promise<TaskRecord>
+  runNextTaskRevision: (taskId: string) => Promise<void>
   retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<TaskApprovalResult>

@@ -220,6 +220,54 @@ describe('AppStore', () => {
     reopened.close()
   })
 
+  it('manages and persists queued revision requests without changing completed history', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Revision queue project', join(directory, 'revision-queue-project'))
+    const task = store.createTask(
+      project.id,
+      '추가 수정 큐 관리',
+      '승인 대기 중인 작업의 추가 수정 요청을 안전하게 관리한다.',
+      2
+    )
+    store.setTaskWorkspace(task.id, 'agentmonitor/revision-queue', join(directory, 'worktree'), 'main')
+    store.transitionTask(task.id, 'running', 1)
+    store.transitionTask(task.id, 'awaiting_approval')
+
+    const first = store.addTaskRevisionRequest(task.id, '첫 번째 수정 요청을 구현하고 검증해 주세요.')
+    const firstId = first.revisionRequests![0].id
+    store.markTaskRevisionRequestStarted(task.id, firstId)
+    store.markTaskRevisionRequestsApplied(task.id, [firstId])
+    const second = store.addTaskRevisionRequest(task.id, '두 번째 수정 요청을 대기열에 추가해 주세요.')
+    const secondId = second.revisionRequests![1].id
+    const third = store.addTaskRevisionRequest(task.id, '세 번째 수정 요청을 먼저 검토해 주세요.')
+    const thirdId = third.revisionRequests![2].id
+
+    store.updateTaskRevisionRequest(task.id, thirdId, '세 번째 수정 요청의 변경된 내용을 먼저 검토해 주세요.')
+    store.moveTaskRevisionRequest(task.id, thirdId, 'up')
+    store.cancelTaskRevisionRequest(task.id, secondId)
+    store.setTaskRevisionQueuePaused(task.id, true)
+    store.markTaskRevisionRequestFailed(task.id, thirdId, '검증 환경을 준비하지 못했습니다.')
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    const persisted = reopened.getTask(task.id)
+    expect(persisted.revisionQueuePaused).toBe(true)
+    expect(persisted.revisionRequests?.map((request) => request.id)).toEqual([firstId, thirdId, secondId])
+    expect(persisted.revisionRequests?.[0]).toMatchObject({ appliedAt: expect.any(String) })
+    expect(persisted.revisionRequests?.[1]).toMatchObject({
+      instruction: '세 번째 수정 요청의 변경된 내용을 먼저 검토해 주세요.',
+      lastFailureMessage: '검증 환경을 준비하지 못했습니다.'
+    })
+    expect(persisted.revisionRequests?.[2]).toMatchObject({ cancelledAt: expect.any(String) })
+    expect(() => reopened.updateTaskRevisionRequest(task.id, firstId, '완료 이력을 바꾸면 안 됩니다.')).toThrow(
+      '완료되거나 취소된 요청은 수정할 수 없습니다.'
+    )
+    reopened.close()
+  })
+
   it('recovers interrupted tasks and manages findings, notes, and project records', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
     temporaryDirectories.push(directory)

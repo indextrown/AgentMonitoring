@@ -1,6 +1,8 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   Bot,
   Bug,
   Check,
@@ -29,6 +31,7 @@ import {
   NotebookPen,
   Octagon,
   Pencil,
+  Pause,
   Play,
   Plus,
   RotateCcw,
@@ -37,6 +40,7 @@ import {
   ShieldCheck,
   Square,
   SquareTerminal,
+  StepForward,
   Trash2,
   X
 } from 'lucide-react'
@@ -120,6 +124,11 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'recommendVerificationPlan',
   'retryTaskVerification',
   'continueTask',
+  'updateTaskRevisionRequest',
+  'cancelTaskRevisionRequest',
+  'moveTaskRevisionRequest',
+  'setTaskRevisionQueuePaused',
+  'runNextTaskRevision',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage',
@@ -326,8 +335,16 @@ function duration(task: TaskRecord): string {
   return `${hours}시간 ${minutes % 60}분`
 }
 
+function shortElapsed(startedAt: string | null, finishedAt: string): string | null {
+  if (!startedAt) return null
+  const seconds = Math.max(1, Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1_000))
+  if (seconds < 60) return `${seconds}초`
+  const minutes = Math.round(seconds / 60)
+  return minutes < 60 ? `${minutes}분` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
+}
+
 function eventIcon(kind: EventKind): typeof Activity {
-  if (kind === 'task_revision_requested') return MessageSquare
+  if (kind.includes('task_revision')) return MessageSquare
   if (kind.includes('finding')) return Bug
   if (kind.includes('note')) return NotebookPen
   if (kind.includes('test')) return kind === 'test_failed' ? AlertTriangle : CheckCircle2
@@ -588,6 +605,65 @@ export function App(): React.JSX.Element {
     } catch (continueError) {
       setError(String(continueError))
       throw continueError
+    }
+  }
+
+  const updateTaskRevisionRequest = async (task: TaskRecord, requestId: string, instruction: string): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.updateTaskRevisionRequest({ taskId: task.id, requestId, instruction })
+      setNotice('대기 중인 추가 수정 요청을 변경했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const cancelTaskRevisionRequest = async (task: TaskRecord, requestId: string): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.cancelTaskRevisionRequest({ taskId: task.id, requestId })
+      setNotice('추가 수정 요청을 취소했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const moveTaskRevisionRequest = async (task: TaskRecord, requestId: string, direction: 'up' | 'down'): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.moveTaskRevisionRequest({ taskId: task.id, requestId, direction })
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const setTaskRevisionQueuePaused = async (task: TaskRecord, paused: boolean): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.setTaskRevisionQueuePaused({ taskId: task.id, paused })
+      setNotice(paused ? '현재 요청이 끝나면 추가 수정 큐를 일시정지합니다.' : '추가 수정 큐 자동 실행을 재개했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const runNextTaskRevision = async (task: TaskRecord): Promise<void> => {
+    setError(null)
+    setNotice('다음 추가 수정 요청 하나를 실행합니다.')
+    try {
+      await bridge.runNextTaskRevision(task.id)
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
     }
   }
 
@@ -969,6 +1045,11 @@ export function App(): React.JSX.Element {
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
           onContinue={continueTask}
+          onUpdateRevision={updateTaskRevisionRequest}
+          onCancelRevision={cancelTaskRevisionRequest}
+          onMoveRevision={moveTaskRevisionRequest}
+          onSetRevisionQueuePaused={setTaskRevisionQueuePaused}
+          onRunNextRevision={runNextTaskRevision}
           onRetryVerification={retryTaskVerification}
           onRegenerateRuntimeScenario={(task) => void regenerateTaskRuntimeScenario(task)}
           canLaunchSimulator={selectedProject?.id === selectedTask.projectId && selectedProject.runtimeAdapter?.kind === 'ios-simulator'}
@@ -3675,6 +3756,11 @@ function TaskDrawer({
   onClose,
   onRun,
   onContinue,
+  onUpdateRevision,
+  onCancelRevision,
+  onMoveRevision,
+  onSetRevisionQueuePaused,
+  onRunNextRevision,
   onRetryVerification,
   onRegenerateRuntimeScenario,
   canLaunchSimulator,
@@ -3692,6 +3778,11 @@ function TaskDrawer({
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onContinue: (task: TaskRecord, instruction: string) => Promise<void>
+  onUpdateRevision: (task: TaskRecord, requestId: string, instruction: string) => Promise<void>
+  onCancelRevision: (task: TaskRecord, requestId: string) => Promise<void>
+  onMoveRevision: (task: TaskRecord, requestId: string, direction: 'up' | 'down') => Promise<void>
+  onSetRevisionQueuePaused: (task: TaskRecord, paused: boolean) => Promise<void>
+  onRunNextRevision: (task: TaskRecord) => Promise<void>
   onRetryVerification: (task: TaskRecord) => void
   onRegenerateRuntimeScenario: (task: TaskRecord) => void
   canLaunchSimulator: boolean
@@ -3715,17 +3806,22 @@ function TaskDrawer({
     ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
     : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
-  const pendingRevisionRequests = (task.revisionRequests ?? []).filter((request) => !request.appliedAt)
+  const pendingRevisionRequests = (task.revisionRequests ?? []).filter((request) => !request.appliedAt && !request.cancelledAt)
   const hasPendingRevisionRequest = pendingRevisionRequests.length > 0
   const processingRevisionRequestId = isActiveTask(task)
     ? pendingRevisionRequests.find((request) => request.startedAt)?.id ?? null
     : null
   const queuedRevisionCount = pendingRevisionRequests.filter((request) => request.id !== processingRevisionRequestId).length
+  const mutableRevisionRequests = pendingRevisionRequests.filter((request) => request.id !== processingRevisionRequestId)
+  const mutableRevisionRequestIds = mutableRevisionRequests.map((request) => request.id)
   const canContinueTask = (isActiveTask(task) || ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) &&
     Boolean(task.worktreePath) &&
     !awaitingLocalPublicationSync
   const [revisionInstruction, setRevisionInstruction] = useState('')
   const [revisionSubmitting, setRevisionSubmitting] = useState(false)
+  const [editingRevisionId, setEditingRevisionId] = useState<string | null>(null)
+  const [editingRevisionInstruction, setEditingRevisionInstruction] = useState('')
+  const [revisionActionBusy, setRevisionActionBusy] = useState<string | null>(null)
   const canLaunchTaskApp = canLaunchSimulator && Boolean(task.worktreePath) && !['queued', 'running', 'testing'].includes(task.status)
   const [taskDestinations, setTaskDestinations] = useState<ProjectRunDestination[]>([])
   const [taskDestinationId, setTaskDestinationId] = useState('')
@@ -3755,6 +3851,11 @@ function TaskDrawer({
       active = false
     }
   }, [canLaunchTaskApp, task.id, task.projectId])
+  useEffect(() => {
+    setEditingRevisionId(null)
+    setEditingRevisionInstruction('')
+    setRevisionActionBusy(null)
+  }, [task.id])
   const refreshTaskDestinations = async (): Promise<void> => {
     setTaskDestinationsLoading(true)
     setTaskDestinationError(false)
@@ -3787,6 +3888,58 @@ function TaskDrawer({
       setRevisionSubmitting(false)
     }
   }
+  const updateRevisionRequest = async (requestId: string): Promise<void> => {
+    const instruction = editingRevisionInstruction.trim()
+    if (instruction.length < 5 || revisionActionBusy) return
+    setRevisionActionBusy(`update:${requestId}`)
+    try {
+      await onUpdateRevision(task, requestId, instruction)
+      setEditingRevisionId(null)
+      setEditingRevisionInstruction('')
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const cancelRevisionRequest = async (requestId: string, instruction: string): Promise<void> => {
+    if (revisionActionBusy || !window.confirm(`다음 추가 수정 요청을 취소할까요?\n\n${instruction}`)) return
+    setRevisionActionBusy(`cancel:${requestId}`)
+    try {
+      await onCancelRevision(task, requestId)
+      if (editingRevisionId === requestId) {
+        setEditingRevisionId(null)
+        setEditingRevisionInstruction('')
+      }
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const moveRevisionRequest = async (requestId: string, direction: 'up' | 'down'): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy(`move:${requestId}`)
+    try {
+      await onMoveRevision(task, requestId, direction)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const setRevisionQueuePaused = async (paused: boolean): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy('pause')
+    try {
+      await onSetRevisionQueuePaused(task, paused)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const runNextRevisionRequest = async (): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy('run-next')
+    try {
+      await onRunNextRevision(task)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
@@ -3798,6 +3951,7 @@ function TaskDrawer({
             <div className="drawer-section-title">
               <strong>추가 수정 큐</strong>
               <span>
+                {task.revisionQueuePaused && hasPendingRevisionRequest ? '자동 실행 일시정지 · ' : ''}
                 {processingRevisionRequestId ? '반영 중 1 · ' : ''}
                 {queuedRevisionCount > 0 ? `대기 ${queuedRevisionCount}` : processingRevisionRequestId ? '다음 요청 없음' : '같은 작업에서 계속'}
               </span>
@@ -3809,24 +3963,88 @@ function TaskDrawer({
                 : hasPendingRevisionRequest
                   ? '실행이 멈춰 미완료 요청을 보존했습니다. 환경이나 실패 원인을 해결한 뒤 실행하면 선두 요청부터 이어갑니다.'
                   : '이 작업에서 반영하고 검증한 추가 수정 내역입니다.'}</p>
+            {hasPendingRevisionRequest && (
+              <div className="revision-queue-toolbar">
+                {task.revisionQueuePaused ? (
+                  <>
+                    {!isActiveTask(task) && (
+                      <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void runNextRevisionRequest()}>
+                        <StepForward size={12} />다음 요청 하나 실행
+                      </button>
+                    )}
+                    <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void setRevisionQueuePaused(false)}>
+                      <Play size={12} />자동 실행 재개
+                    </button>
+                  </>
+                ) : (
+                  <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void setRevisionQueuePaused(true)}>
+                    <Pause size={12} />{isActiveTask(task) ? '현재 요청 후 일시정지' : '자동 실행 일시정지'}
+                  </button>
+                )}
+              </div>
+            )}
             {(task.revisionRequests?.length ?? 0) > 0 && (
               <details>
                 <summary>추가 수정 내역 {task.revisionRequests!.length}개</summary>
                 <ol>
-                  {task.revisionRequests!.map((request) => (
-                    <li key={request.id}>
-                      <span>{request.instruction}</span>
-                      <time className={request.id === processingRevisionRequestId ? 'is-processing' : !request.appliedAt ? 'is-queued' : ''}>
-                        {request.appliedAt
-                          ? `${timeAgo(request.appliedAt)} 검증 완료`
-                          : request.id === processingRevisionRequestId
-                            ? '현재 반영 중'
-                            : request.startedAt
-                              ? '재개 대기'
-                              : '큐 대기'}
-                      </time>
-                    </li>
-                  ))}
+                  {task.revisionRequests!.map((request, index) => {
+                    const isProcessing = request.id === processingRevisionRequestId
+                    const isMutable = !request.appliedAt && !request.cancelledAt && !isProcessing
+                    const mutableIndex = mutableRevisionRequestIds.indexOf(request.id)
+                    const elapsed = request.appliedAt ? shortElapsed(request.startedAt, request.appliedAt) : null
+                    return (
+                      <li className={request.cancelledAt ? 'is-cancelled' : ''} key={request.id}>
+                        {editingRevisionId === request.id ? (
+                          <div className="revision-request-editor">
+                            <textarea
+                              aria-label={`추가 수정 요청 ${index + 1} 내용`}
+                              maxLength={5_000}
+                              rows={3}
+                              value={editingRevisionInstruction}
+                              onChange={(event) => setEditingRevisionInstruction(event.target.value)}
+                            />
+                            <div>
+                              <button aria-label={`추가 수정 요청 ${index + 1} 수정 취소`} className="icon-button" onClick={() => setEditingRevisionId(null)}><X size={11} /></button>
+                              <button aria-label={`추가 수정 요청 ${index + 1} 저장`} className="icon-button" disabled={editingRevisionInstruction.trim().length < 5 || Boolean(revisionActionBusy)} onClick={() => void updateRevisionRequest(request.id)}><Check size={11} /></button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="revision-request-row">
+                            <span>{request.instruction}</span>
+                            {isMutable && (
+                              <div className="revision-request-actions">
+                                <button aria-label={`추가 수정 요청 ${index + 1} 위로 이동`} className="icon-button" disabled={mutableIndex <= 0 || Boolean(revisionActionBusy)} onClick={() => void moveRevisionRequest(request.id, 'up')}><ArrowUp size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 아래로 이동`} className="icon-button" disabled={mutableIndex < 0 || mutableIndex >= mutableRevisionRequestIds.length - 1 || Boolean(revisionActionBusy)} onClick={() => void moveRevisionRequest(request.id, 'down')}><ArrowDown size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 수정`} className="icon-button" disabled={Boolean(revisionActionBusy)} onClick={() => {
+                                  setEditingRevisionId(request.id)
+                                  setEditingRevisionInstruction(request.instruction)
+                                }}><Pencil size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 취소`} className="icon-button danger" disabled={Boolean(revisionActionBusy)} onClick={() => void cancelRevisionRequest(request.id, request.instruction)}><Trash2 size={11} /></button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <time className={isProcessing ? 'is-processing' : !request.appliedAt && !request.cancelledAt ? 'is-queued' : ''}>
+                          {request.cancelledAt
+                            ? `${timeAgo(request.cancelledAt)} 취소됨`
+                            : request.appliedAt
+                              ? `${timeAgo(request.appliedAt)} 검증 완료${elapsed ? ` · ${elapsed}` : ''}`
+                              : isProcessing
+                                ? '현재 반영 중'
+                                : request.lastFailureAt
+                                  ? '실패 후 재개 대기'
+                                  : request.startedAt
+                                    ? '재개 대기'
+                                    : '큐 대기'}
+                        </time>
+                        {(request.resultSummary || request.lastFailureMessage) && (
+                          <small className={request.lastFailureMessage ? 'revision-request-failure' : 'revision-request-result'}>
+                            {request.lastFailureMessage ?? request.resultSummary}
+                          </small>
+                        )}
+                      </li>
+                    )
+                  })}
                 </ol>
               </details>
             )}
@@ -4021,9 +4239,20 @@ function TaskDrawer({
         )}
         <section className="drawer-events"><div className="drawer-section-title"><strong>실시간 로그</strong><span>{events.length}개</span></div>{events.length === 0 && <p className="empty-copy">아직 실행 로그가 없습니다.</p>}{events.map((event) => { const Icon = eventIcon(event.kind); return <div key={event.id}><span><Icon size={12} /></span><p><strong>{event.actor}</strong>{event.message}</p><time>{timeAgo(event.createdAt)}</time></div> })}</section>
         {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && (
-          <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}`}>
-            <ShieldCheck size={14} />
-            <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 원격 게시'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 게시하거나 폐기하세요.' : '원격 최신 상태를 반영하고 fast-forward 가능한 경우에만 게시합니다.'}</p>
+          <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}${hasPendingRevisionRequest ? ' revision-pending' : ''}`}>
+            {hasPendingRevisionRequest ? <AlertTriangle size={14} /> : <ShieldCheck size={14} />}
+            <p>
+              <strong>{hasPendingRevisionRequest
+                ? `추가 수정 요청 ${pendingRevisionRequests.length}개가 남았습니다`
+                : task.status === 'awaiting_manual_validation'
+                  ? '사람의 직접 검증이 필요합니다'
+                  : '안전한 원격 게시'}</strong>
+              {hasPendingRevisionRequest
+                ? '대기 요청을 실행하거나 취소한 뒤 게시할 수 있습니다. 위의 추가 수정 큐에서 순서와 자동 실행 상태를 확인하세요.'
+                : task.status === 'awaiting_manual_validation'
+                  ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 게시하거나 폐기하세요.'
+                  : '원격 최신 상태를 반영하고 fast-forward 가능한 경우에만 게시합니다.'}
+            </p>
           </div>
         )}
         {task.status === 'blocked_environment' && (

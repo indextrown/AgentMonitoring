@@ -514,7 +514,14 @@ async function executeDemoTask(taskId: string, revisionRequestId?: string): Prom
         ? {
             ...task,
             revisionRequests: (task.revisionRequests ?? []).map((request) => request.id === revisionRequestId
-              ? { ...request, startedAt }
+              ? {
+                  ...request,
+                  updatedAt: startedAt,
+                  startedAt,
+                  lastFailureAt: null,
+                  lastFailureMessage: null,
+                  resultSummary: null
+                }
               : request),
             updatedAt: startedAt
           }
@@ -557,15 +564,25 @@ async function executeDemoTask(taskId: string, revisionRequestId?: string): Prom
       const appliedAt = new Date().toISOString()
       state = {
         ...state,
-        tasks: state.tasks.map((item) => item.id === taskId
-          ? {
-              ...item,
-              revisionRequests: (item.revisionRequests ?? []).map((request) => request.id === revisionRequestId
-                ? { ...request, appliedAt }
-                : request),
-              updatedAt: appliedAt
-            }
-          : item)
+        tasks: state.tasks.map((item) => {
+          if (item.id !== taskId) return item
+          const revisionRequests = (item.revisionRequests ?? []).map((request) => request.id === revisionRequestId
+            ? {
+                ...request,
+                updatedAt: appliedAt,
+                appliedAt,
+                resultSummary: '구현과 선택된 검증을 완료했습니다.'
+              }
+            : request)
+          return {
+            ...item,
+            revisionRequests,
+            revisionQueuePaused: revisionRequests.some((request) => !request.appliedAt && !request.cancelledAt)
+              ? item.revisionQueuePaused
+              : false,
+            updatedAt: appliedAt
+          }
+        })
       }
     }
     updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
@@ -580,7 +597,8 @@ function scheduleDemoRevisionQueue(taskId: string): void {
   if (demoActiveTaskIds.has(taskId) || demoRevisionQueueDrains.has(taskId)) return
   const task = state.tasks.find((item) => item.id === taskId)
   if (!task || !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return
-  if (!(task?.revisionRequests ?? []).some((request) => !request.appliedAt)) return
+  if (task.revisionQueuePaused) return
+  if (!(task?.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) return
   demoRevisionQueueDrains.add(taskId)
   void drainDemoRevisionQueue(taskId).then((shouldRecheck) => {
     demoRevisionQueueDrains.delete(taskId)
@@ -591,7 +609,8 @@ function scheduleDemoRevisionQueue(taskId: string): void {
 async function drainDemoRevisionQueue(taskId: string): Promise<boolean> {
   while (true) {
     const task = state.tasks.find((item) => item.id === taskId)
-    const nextRequest = task?.revisionRequests?.find((request) => !request.appliedAt)
+    if (task?.revisionQueuePaused) return false
+    const nextRequest = task?.revisionRequests?.find((request) => !request.appliedAt && !request.cancelledAt)
     if (!nextRequest) return true
     if (!task || !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return false
     await executeDemoTask(taskId, nextRequest.id)
@@ -1225,9 +1244,21 @@ export const demoBridge: AgentMonitoringBridge = {
     if (!current.worktreePath) throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
     const instruction = input.instruction.trim()
     const requests = current.revisionRequests ?? []
-    const nextRequests = requests.at(-1)?.instruction === instruction && !requests.at(-1)?.appliedAt
+    const now = new Date().toISOString()
+    const nextRequests = requests.at(-1)?.instruction === instruction && !requests.at(-1)?.appliedAt && !requests.at(-1)?.cancelledAt
       ? requests
-      : [...requests, { id: crypto.randomUUID(), instruction, createdAt: new Date().toISOString(), startedAt: null, appliedAt: null }]
+      : [...requests, {
+          id: crypto.randomUUID(),
+          instruction,
+          createdAt: now,
+          updatedAt: now,
+          startedAt: null,
+          appliedAt: null,
+          cancelledAt: null,
+          lastFailureAt: null,
+          lastFailureMessage: null,
+          resultSummary: null
+        }]
     const updated: TaskRecord = {
       ...current,
       publication: null,
@@ -1239,6 +1270,88 @@ export const demoBridge: AgentMonitoringBridge = {
       emit(updated, 'task_revision_requested', 'human', `추가 수정 큐 등록: ${instruction}`)
     }
     scheduleDemoRevisionQueue(input.taskId)
+  },
+  updateTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const request = current.revisionRequests?.find((item) => item.id === input.requestId)
+    if (!request || request.appliedAt || request.cancelledAt) throw new Error('대기 중인 추가 요청만 수정할 수 있습니다.')
+    const activeRequest = current.revisionRequests?.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === request.id) throw new Error('현재 반영 중인 요청은 수정할 수 없습니다.')
+    const now = new Date().toISOString()
+    const updated = {
+      ...current,
+      revisionRequests: current.revisionRequests?.map((item) => item.id === input.requestId
+        ? { ...item, instruction: input.instruction.trim(), updatedAt: now }
+        : item),
+      updatedAt: now
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_updated', 'human', `추가 수정 요청 변경: ${input.instruction.trim()}`)
+    return updated
+  },
+  cancelTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const request = current.revisionRequests?.find((item) => item.id === input.requestId)
+    if (!request || request.appliedAt || request.cancelledAt) throw new Error('대기 중인 추가 요청만 취소할 수 있습니다.')
+    const activeRequest = current.revisionRequests?.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === request.id) throw new Error('현재 반영 중인 요청은 취소할 수 없습니다.')
+    const now = new Date().toISOString()
+    const revisionRequests = current.revisionRequests?.map((item) => item.id === input.requestId
+      ? { ...item, updatedAt: now, cancelledAt: now, resultSummary: '사용자가 추가 실행을 취소했습니다.' }
+      : item)
+    const updated = {
+      ...current,
+      revisionRequests,
+      revisionQueuePaused: revisionRequests?.some((item) => !item.appliedAt && !item.cancelledAt)
+        ? current.revisionQueuePaused
+        : false,
+      updatedAt: now
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_cancelled', 'human', `추가 수정 요청 취소: ${request.instruction}`)
+    scheduleDemoRevisionQueue(current.id)
+    return updated
+  },
+  moveTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const requests = [...(current.revisionRequests ?? [])]
+    const activeRequest = requests.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === input.requestId) throw new Error('현재 반영 중인 요청은 이동할 수 없습니다.')
+    const movableIndexes = requests.map((request, index) => ({ request, index }))
+      .filter(({ request }) => !request.appliedAt && !request.cancelledAt && request.id !== (demoActiveTaskIds.has(current.id) ? activeRequest?.id : null))
+    const position = movableIndexes.findIndex(({ request }) => request.id === input.requestId)
+    if (position < 0) throw new Error('이동할 대기 요청을 찾을 수 없습니다.')
+    const targetPosition = input.direction === 'up' ? position - 1 : position + 1
+    if (targetPosition >= 0 && targetPosition < movableIndexes.length) {
+      const sourceIndex = movableIndexes[position].index
+      const targetIndex = movableIndexes[targetPosition].index
+      ;[requests[sourceIndex], requests[targetIndex]] = [requests[targetIndex], requests[sourceIndex]]
+    }
+    const updated = { ...current, revisionRequests: requests, updatedAt: new Date().toISOString() }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_reordered', 'human', '추가 수정 큐 실행 순서 변경')
+    return updated
+  },
+  setTaskRevisionQueuePaused: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const updated = { ...current, revisionQueuePaused: input.paused, updatedAt: new Date().toISOString() }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, input.paused ? 'task_revision_queue_paused' : 'task_revision_queue_resumed', 'human', input.paused ? '추가 수정 큐 자동 실행 일시정지' : '추가 수정 큐 자동 실행 재개')
+    if (!input.paused) scheduleDemoRevisionQueue(current.id)
+    return updated
+  },
+  runNextTaskRevision: async (taskId) => {
+    const current = state.tasks.find((task) => task.id === taskId)
+    const nextRequest = current?.revisionRequests?.find((request) => !request.appliedAt && !request.cancelledAt)
+    if (!current || !nextRequest) throw new Error('실행할 추가 수정 요청이 없습니다.')
+    if (!current.revisionQueuePaused) {
+      throw new Error('추가 수정 큐를 일시정지한 뒤 한 건만 실행할 수 있습니다.')
+    }
+    await executeDemoTask(taskId, nextRequest.id)
   },
   retryTaskVerification: async (taskId) => {
     const task = updateTask(taskId, 'running')
@@ -1259,7 +1372,7 @@ export const demoBridge: AgentMonitoringBridge = {
   approveTask: async (taskId) => {
     const current = state.tasks.find((task) => task.id === taskId)
     if (!current) throw new Error('작업을 찾을 수 없습니다.')
-    if ((current.revisionRequests ?? []).some((request) => !request.appliedAt)) {
+    if ((current.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
       throw new Error('큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.')
     }
     if ((current.publishStrategy ?? 'pull-request') === 'pull-request') {

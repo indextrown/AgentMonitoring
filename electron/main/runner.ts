@@ -429,7 +429,7 @@ export function buildTaskRevisionRequestContext(
   activeRequestIds?: ReadonlySet<string>
 ): string {
   const requests = (task.revisionRequests ?? []).filter((request) =>
-    request.appliedAt || !activeRequestIds || activeRequestIds.has(request.id)
+    !request.cancelledAt && (request.appliedAt || !activeRequestIds || activeRequestIds.has(request.id))
   )
   if (requests.length === 0) return ''
   return [
@@ -624,7 +624,7 @@ export class AgentRunner {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
     let task = this.store.getTask(taskId)
-    const activeRevisionRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt)
+    const activeRevisionRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)
     const activeRevisionRequestIds = new Set(activeRevisionRequest ? [activeRevisionRequest.id] : [])
     if (activeRevisionRequest) {
       task = this.store.markTaskRevisionRequestStarted(taskId, activeRevisionRequest.id)
@@ -706,7 +706,7 @@ export class AgentRunner {
           'agent',
           'orchestrator',
           hasPendingHumanRevision
-            ? `사용자의 추가 수정 요청을 같은 작업공간에서 반영합니다. · 큐 대기 ${Math.max(0, (task.revisionRequests ?? []).filter((request) => !request.appliedAt).length - 1)}개`
+            ? `사용자의 추가 수정 요청을 같은 작업공간에서 반영합니다. · 큐 대기 ${Math.max(0, (task.revisionRequests ?? []).filter((request) => !request.appliedAt && !request.cancelledAt).length - 1)}개`
             : previousReviewerFindings.length > 0
               ? `미해결 Reviewer finding ${previousReviewerFindings.length}개를 복원해 첫 구현 시도부터 수정합니다.`
               : '직전 자동 검증 실패 진단을 복원해 첫 구현 시도부터 이어갑니다.'
@@ -1039,6 +1039,13 @@ export class AgentRunner {
       if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
         this.store.addFinding(task.projectId, task.id, `${task.title} 자동 검증이 최대 구현 시도 횟수를 초과했습니다.`, 'high')
+        if (activeRevisionRequest) {
+          this.store.markTaskRevisionRequestFailed(
+            taskId,
+            activeRevisionRequest.id,
+            '자동 검증이 최대 구현 시도 횟수를 초과했습니다.'
+          )
+        }
         return
       }
 
@@ -1082,11 +1089,70 @@ export class AgentRunner {
     this.scheduleTaskRevisionQueue(taskId)
   }
 
+  updateTaskRevisionRequest(taskId: string, requestId: string, instruction: string): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    return this.store.updateTaskRevisionRequest(taskId, requestId, instruction)
+  }
+
+  cancelTaskRevisionRequest(taskId: string, requestId: string): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    const task = this.store.cancelTaskRevisionRequest(taskId, requestId)
+    this.scheduleTaskRevisionQueue(taskId)
+    return task
+  }
+
+  moveTaskRevisionRequest(taskId: string, requestId: string, direction: 'up' | 'down'): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    const task = this.store.getTask(taskId)
+    const activeRequestId = this.activeRuns.has(taskId)
+      ? (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)?.id
+      : undefined
+    return this.store.moveTaskRevisionRequest(taskId, requestId, direction, activeRequestId)
+  }
+
+  setTaskRevisionQueuePaused(taskId: string, paused: boolean): TaskRecord {
+    const task = this.store.getTask(taskId)
+    if (!task.worktreePath || ['completed', 'discarded', 'awaiting_merge'].includes(task.status)) {
+      throw new Error('진행 중이거나 승인을 기다리는 작업의 추가 수정 큐만 제어할 수 있습니다.')
+    }
+    const updated = this.store.setTaskRevisionQueuePaused(taskId, paused)
+    if (!paused) this.scheduleTaskRevisionQueue(taskId)
+    return updated
+  }
+
+  async runNextTaskRevision(taskId: string): Promise<void> {
+    if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
+    const task = this.store.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('승인을 기다리는 작업에서만 다음 추가 수정 요청을 실행할 수 있습니다.')
+    }
+    if (!task.revisionQueuePaused) {
+      throw new Error('추가 수정 큐를 일시정지한 뒤 한 건만 실행할 수 있습니다.')
+    }
+    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
+      throw new Error('실행할 추가 수정 요청이 없습니다.')
+    }
+    await this.run(taskId)
+  }
+
+  private assertRevisionRequestMutable(taskId: string, requestId: string): void {
+    const task = this.store.getTask(taskId)
+    const request = (task.revisionRequests ?? []).find((item) => item.id === requestId)
+    if (!request || request.appliedAt || request.cancelledAt) {
+      throw new Error('대기 중이거나 재개를 기다리는 추가 요청만 변경할 수 있습니다.')
+    }
+    const activeRequest = (task.revisionRequests ?? []).find((item) => !item.appliedAt && !item.cancelledAt)
+    if (this.activeRuns.has(taskId) && activeRequest?.id === requestId) {
+      throw new Error('현재 반영 중인 요청은 변경할 수 없습니다. 실행이 끝난 뒤 다시 시도하세요.')
+    }
+  }
+
   private scheduleTaskRevisionQueue(taskId: string): void {
     if (this.activeRuns.has(taskId) || this.revisionQueueDrains.has(taskId)) return
     const task = this.store.getTask(taskId)
     if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return
-    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt)) return
+    if (task.revisionQueuePaused) return
+    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) return
     this.revisionQueueDrains.add(taskId)
     void this.drainTaskRevisionQueue(taskId).then((shouldRecheck) => {
       this.revisionQueueDrains.delete(taskId)
@@ -1097,7 +1163,8 @@ export class AgentRunner {
   private async drainTaskRevisionQueue(taskId: string): Promise<boolean> {
     while (true) {
       const task = this.store.getTask(taskId)
-      const nextRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt)
+      if (task.revisionQueuePaused) return false
+      const nextRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)
       if (!nextRequest) return true
       if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return false
       try {
@@ -1123,7 +1190,7 @@ export class AgentRunner {
     ].includes(task.status)) {
       throw new Error('중단되었거나 사람의 확인을 기다리는 작업만 구현 없이 다시 검증할 수 있습니다.')
     }
-    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt)) {
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
       throw new Error('아직 구현하지 않은 추가 수정 요청이 있습니다. 실행을 눌러 수정부터 이어가세요.')
     }
     if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
@@ -1451,7 +1518,7 @@ export class AgentRunner {
       throw new Error('검증 후 사람의 확인을 기다리는 작업만 원격에 게시할 수 있습니다.')
     }
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
-    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt)) {
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
       throw new Error('큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.')
     }
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
@@ -1823,12 +1890,12 @@ export class AgentRunner {
       '## Summary',
       '',
       task.prompt,
-      ...(task.revisionRequests?.length
+      ...(task.revisionRequests?.some((request) => !request.cancelledAt)
         ? [
             '',
             '### Approval feedback',
             '',
-            ...task.revisionRequests.map((request) => `- ${request.instruction}`)
+            ...task.revisionRequests.filter((request) => !request.cancelledAt).map((request) => `- ${request.instruction}`)
           ]
         : []),
       '',
@@ -2581,6 +2648,12 @@ export class AgentRunner {
       if (isActiveTask(current)) this.store.transitionTask(taskId, 'stopped')
       this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
       return
+    }
+    const activeRevisionRequest = (current.revisionRequests ?? []).find((request) =>
+      request.startedAt && !request.appliedAt && !request.cancelledAt
+    )
+    if (activeRevisionRequest) {
+      this.store.markTaskRevisionRequestFailed(taskId, activeRevisionRequest.id, redact(String(error)))
     }
     if (error instanceof EnvironmentPreparationError) {
       const { plan } = resolveTaskVerificationPlan(current)

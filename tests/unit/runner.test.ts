@@ -555,6 +555,46 @@ if (prompt.includes(${JSON.stringify(feedback)})) {
     fixture.store.close()
   })
 
+  it('pauses the revision queue after the current item and can run one item before resuming', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+    fixture.runner.setTaskRevisionQueuePaused(fixture.taskId, true)
+    await fixture.runner.continueTask(fixture.taskId, '첫 번째 후속 요청만 먼저 구현하고 검증해 주세요.')
+    await fixture.runner.continueTask(fixture.taskId, '두 번째 후속 요청은 확인할 때까지 대기해 주세요.')
+
+    const paused = fixture.store.getTask(fixture.taskId)
+    expect(paused.status).toBe('awaiting_approval')
+    expect(paused.revisionQueuePaused).toBe(true)
+    expect(paused.revisionRequests?.every((request) => request.startedAt === null)).toBe(true)
+
+    await fixture.runner.runNextTaskRevision(fixture.taskId)
+    const afterOne = fixture.store.getTask(fixture.taskId)
+    expect(afterOne.revisionQueuePaused).toBe(true)
+    expect(afterOne.revisionRequests?.[0].appliedAt).toBeTruthy()
+    expect(afterOne.revisionRequests?.[1].appliedAt).toBeNull()
+
+    fixture.runner.setTaskRevisionQueuePaused(fixture.taskId, false)
+    await waitForCondition(() => fixture.store.getTask(fixture.taskId).revisionRequests?.every((request) => Boolean(request.appliedAt)) ?? false)
+    const completed = fixture.store.getTask(fixture.taskId)
+    expect(completed.revisionQueuePaused).toBe(false)
+    expect(completed.status).toBe('awaiting_approval')
+    fixture.store.close()
+  })
+
   it('pauses on a Codex usage limit without consuming an implementation attempt', async () => {
     const fixture = await createExecutionFixture({
       codexSource: () => `#!/usr/bin/env node

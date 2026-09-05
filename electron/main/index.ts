@@ -13,6 +13,7 @@ import type {
   GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
   DeleteProjectRuntimeEnvironmentInput,
+  MoveTaskRevisionRequestInput,
   ProjectSimulatorSession,
   RecommendVerificationPlanInput,
   RefineTechSpecInput,
@@ -20,10 +21,13 @@ import type {
   SourceControlDiffInput,
   SourceControlIdentityInput,
   SourceControlPathsInput,
+  SetTaskRevisionQueuePausedInput,
   StorageCleanupInput,
   StoragePolicy,
+  TaskRevisionRequestInput,
   UpsertProjectRuntimeEnvironmentInput,
-  UpdateProjectInput
+  UpdateProjectInput,
+  UpdateTaskRevisionRequestInput
 } from '../../src/shared/types'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
@@ -95,6 +99,24 @@ const createTaskSchema = z.object({
 const continueTaskSchema = z.object({
   taskId: z.string().uuid(),
   instruction: z.string().trim().min(5).max(5_000)
+}).strict()
+
+const taskRevisionRequestSchema = z.object({
+  taskId: z.string().uuid(),
+  requestId: z.string().uuid()
+}).strict()
+
+const updateTaskRevisionRequestSchema = taskRevisionRequestSchema.extend({
+  instruction: z.string().trim().min(5).max(5_000)
+}).strict()
+
+const moveTaskRevisionRequestSchema = taskRevisionRequestSchema.extend({
+  direction: z.enum(['up', 'down'])
+}).strict()
+
+const setTaskRevisionQueuePausedSchema = z.object({
+  taskId: z.string().uuid(),
+  paused: z.boolean()
 }).strict()
 
 const updateProjectSchema = z.object({
@@ -729,6 +751,33 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
     await requireRunner().continueTask(input.taskId, input.instruction)
+  })
+
+  ipcMain.handle('task:revision-update', (_event, rawInput: UpdateTaskRevisionRequestInput) => {
+    const input = updateTaskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().updateTaskRevisionRequest(input.taskId, input.requestId, input.instruction)
+  })
+
+  ipcMain.handle('task:revision-cancel', (_event, rawInput: TaskRevisionRequestInput) => {
+    const input = taskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().cancelTaskRevisionRequest(input.taskId, input.requestId)
+  })
+
+  ipcMain.handle('task:revision-move', (_event, rawInput: MoveTaskRevisionRequestInput) => {
+    const input = moveTaskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().moveTaskRevisionRequest(input.taskId, input.requestId, input.direction)
+  })
+
+  ipcMain.handle('task:revision-queue-pause', (_event, rawInput: SetTaskRevisionQueuePausedInput) => {
+    const input = setTaskRevisionQueuePausedSchema.parse(rawInput)
+    return requireRunner().setTaskRevisionQueuePaused(input.taskId, input.paused)
+  })
+
+  ipcMain.handle('task:revision-run-next', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
+    await requireRunner().runNextTaskRevision(taskId)
   })
 
   ipcMain.handle('task:retry-verification', async (_event, taskId: string) => {

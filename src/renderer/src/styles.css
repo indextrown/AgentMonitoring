@@ -4552,6 +4552,19 @@ kbd {
   line-height: 1.55;
 }
 
+.revision-queue-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: -2px 0 10px;
+}
+
+.revision-queue-toolbar .secondary-button {
+  min-height: 27px;
+  padding: 0 9px;
+  font-size: 7px;
+}
+
 .task-revision-request details {
   margin-bottom: 11px;
   border: 1px solid #293239;
@@ -4580,6 +4593,52 @@ kbd {
   line-height: 1.5;
 }
 
+.task-revision-request li.is-cancelled {
+  opacity: 0.62;
+}
+
+.task-revision-request li.is-cancelled .revision-request-row > span {
+  text-decoration: line-through;
+}
+
+.revision-request-row,
+.revision-request-editor {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.revision-request-row > span,
+.revision-request-editor > textarea {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.revision-request-actions,
+.revision-request-editor > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.revision-request-actions .icon-button,
+.revision-request-editor .icon-button {
+  width: 23px;
+  height: 23px;
+  min-height: 23px;
+  padding: 0;
+}
+
+.revision-request-actions .icon-button.danger {
+  color: #c67a80;
+}
+
+.revision-request-editor textarea {
+  min-height: 56px;
+  resize: vertical;
+}
+
 .task-revision-request li span,
 .task-revision-request li time {
   display: block;
@@ -4597,6 +4656,18 @@ kbd {
 
 .task-revision-request li time.is-queued {
   color: #c19a58;
+}
+
+.task-revision-request li > small {
+  display: block;
+  margin-top: 4px;
+  color: #64717a;
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.task-revision-request li > small.revision-request-failure {
+  color: #c77a80;
 }
 
 .task-revision-request form,
@@ -4645,6 +4716,16 @@ kbd {
 
 .task-revision-request form button {
   flex: 0 0 auto;
+}
+
+.approval-notice.revision-pending {
+  border-color: #614e2f;
+  color: #c39c5e;
+  background: #1b1710;
+}
+
+.approval-notice.revision-pending strong {
+  color: #d2ae71;
 }
 
 .source-control-page {
