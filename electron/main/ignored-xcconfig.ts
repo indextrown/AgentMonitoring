@@ -53,6 +53,7 @@ async function listIgnoredXcconfigPaths(repositoryRoot: string): Promise<string[
   return String(result.stdout)
     .split('\0')
     .filter(Boolean)
+    .filter((path) => path.endsWith('.xcconfig'))
     .sort((left, right) => left.localeCompare(right))
 }
 

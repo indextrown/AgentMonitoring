@@ -34,6 +34,20 @@ async function createFixture(): Promise<{ repository: string; worktree: string }
 }
 
 describe('ignored xcconfig synchronization', () => {
+  it('ignores dependency checkout directories returned by Git', async () => {
+    const fixture = await createFixture()
+    const checkout = join(fixture.repository, 'Tuist', '.build', 'checkouts', 'mapbox-common-ios')
+    await writeFile(join(fixture.repository, '.git', 'info', 'exclude'), 'Tuist/.build/\n')
+    await mkdir(checkout, { recursive: true })
+    await execFileAsync('git', ['init'], { cwd: checkout })
+
+    const result = await syncIgnoredXcconfigFiles(fixture.repository, fixture.worktree)
+
+    expect(result.paths).toEqual(['Config/Secrets.xcconfig'])
+    expect(await readFile(join(fixture.worktree, 'Config', 'Secrets.xcconfig'), 'utf8'))
+      .toBe('MAPBOX_ACCESS_TOKEN = fixture-token\n')
+  })
+
   it('copies ignored xcconfig files into the same worktree path and refreshes them', async () => {
     const fixture = await createFixture()
 
