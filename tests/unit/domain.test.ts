@@ -85,6 +85,24 @@ describe('activity aggregation', () => {
 })
 
 describe('runtime report aggregation', () => {
+  it('shows a project test failure as failed evidence, not merely captured evidence', () => {
+    const failure: RuntimeEvidenceRecord = {
+      id: 'project-test-failure', projectId: 'project', taskId: 'task', runId: 'run-1', attempt: 1,
+      kind: 'project-test', outcome: 'failed', summary: '프로젝트 테스트 실패 당시 활동·접근성 증거',
+      path: '/tmp/project-test-failure.json', mimeType: 'application/json', sizeBytes: 100,
+      createdAt: '2026-09-01T00:00:00.000Z'
+    }
+    expect(buildRuntimeTaskReport([failure], [])).toMatchObject({
+      latestOutcome: 'failed', failedCount: 1,
+      attempts: [{ outcome: 'failed', summary: failure.summary }]
+    })
+    const passed: RuntimeEvidenceRecord = {
+      ...failure, id: 'runtime-passed', kind: 'runtime-verification', outcome: 'passed', summary: '모두 통과',
+      createdAt: '2026-09-01T00:01:00.000Z'
+    }
+    expect(buildRuntimeTaskReport([failure, passed], [])).toMatchObject({ latestOutcome: 'passed' })
+  })
+
   it('groups evidence by execution and attempt while preserving repair outcomes', () => {
     const evidence = (
       [

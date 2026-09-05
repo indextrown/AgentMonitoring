@@ -231,7 +231,7 @@ export function buildRuntimeTaskReport(
       )
       const verification = orderedEvidence.find(
         (item) => item.kind === 'runtime-verification'
-      )
+      ) ?? orderedEvidence.find((item) => item.kind === 'project-test')
       attempts.push({
         runId: run.runId,
         executionNumber,

@@ -681,7 +681,7 @@ export interface RuntimeEvidenceRecord {
   projectId: string
   runId: string
   attempt: number
-  kind: 'screen' | 'accessibility' | 'ui-actions' | 'debug-state' | 'runtime-verification'
+  kind: 'screen' | 'accessibility' | 'ui-actions' | 'debug-state' | 'runtime-verification' | 'project-test'
   outcome: 'captured' | 'passed' | 'failed'
   summary: string | null
   path: string

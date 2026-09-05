@@ -91,6 +91,7 @@ async function createExecutionFixture(options: {
   setupCommand?: string | null
   testCommand?: string | null
   runtimePreparer?: ConstructorParameters<typeof AgentRunner>[10]
+  projectTestEvidenceCollector?: ConstructorParameters<typeof AgentRunner>[11]
 }): Promise<{
   directory: string
   repository: string
@@ -211,7 +212,8 @@ async function createExecutionFixture(options: {
     undefined,
     'gh',
     undefined,
-    options.runtimePreparer ?? (async () => ({ containerGenerated: false, simulatorRecovered: false }))
+    options.runtimePreparer ?? (async () => ({ containerGenerated: false, simulatorRecovered: false })),
+    options.projectTestEvidenceCollector ?? (async () => null)
   )
   activeRunners.push(runner)
   return { directory, repository, store, runner, taskId: task.id }
@@ -290,6 +292,51 @@ async function createApprovalFixture(options: {
 }
 
 describe('AgentRunner', () => {
+  it.skipIf(process.platform !== 'darwin')('feeds project test evidence to repair, detects repeated failures and restores full evidence on restart', async () => {
+    let callsPath = ''
+    let collections = 0
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'evidence-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv) + '\\n')
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'stage complete' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      // The console diagnostic exceeds the event's 8 KB cap; its evidence link must survive.
+      makefile: `test:\n\t@echo "XCTAssertTrue failed ${'diagnostic '.repeat(1300)}"; false\n`,
+      maxAttempts: 3,
+      verificationPlan: { version: 1, mode: 'project-tests', testDesign: 'existing-tests', runtimeSource: 'off' },
+      projectTestEvidenceCollector: async (input) => {
+        collections += 1
+        await mkdir(input.evidenceDirectory, { recursive: true })
+        const artifactPath = join(input.evidenceDirectory, 'project-test-failure.json')
+        const image = join(input.evidenceDirectory, 'failure.png')
+        await writeFile(image, 'fixture image')
+        const result = { context: 'Other identifier: location-button\nButton identifier: location.fill\n' + 'detail '.repeat(1500) + 'FULL_EVIDENCE_END', fingerprint: 'same-failure', imagePaths: [image], artifactPath, bundlePath: '/fixture.xcresult' }
+        await writeFile(artifactPath, JSON.stringify(result))
+        return result
+      }
+    })
+    const project = fixture.store.getProject(fixture.store.getTask(fixture.taskId).projectId)
+    fixture.store.updateProject({ projectId: project.id, name: project.name, testCommand: 'make test', setupCommand: '', runtimeAdapter: { kind: 'ios-simulator', container: 'App.xcodeproj', scheme: 'App', configuration: 'Debug', deviceFamily: 'iphone' } })
+    await fixture.runner.run(fixture.taskId)
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('failed')
+    expect(collections).toBe(3)
+    expect(fixture.store.listRuntimeEvidence().filter((item) => item.kind === 'project-test')).toHaveLength(3)
+    await fixture.runner.run(fixture.taskId)
+    expect(collections).toBe(6) // Prior persisted evidence is restored without an extra extraction.
+    const calls = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[])
+    const implementerCalls = calls.filter((args) => args.at(-1)?.includes('당신은 구현 담당자'))
+    expect(implementerCalls[1].at(-1)).toContain('Other identifier: location-button')
+    expect(implementerCalls[1]).toContain('--image')
+    expect(implementerCalls[2].at(-1)).toContain('같은 테스트 실패가 반복됐습니다')
+    expect(implementerCalls[3].at(-1)).toContain('FULL_EVIDENCE_END')
+    fixture.store.close()
+  })
+
   it('reads structured Codex errors without rendering object placeholders', () => {
     expect(eventMessage({
       type: 'turn.failed',
