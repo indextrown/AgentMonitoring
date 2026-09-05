@@ -79,6 +79,7 @@ const bridge: AgentMonitoringBridge = {
   refreshTaskPublication: (taskId: string) => ipcRenderer.invoke('task:refresh-publication', taskId),
   switchTaskPublicationToPullRequest: (taskId: string) => ipcRenderer.invoke('task:switch-publication-to-pr', taskId),
   discardTask: (taskId: string) => ipcRenderer.invoke('task:discard', taskId),
+  openTaskInXcode: (taskId: string) => ipcRenderer.invoke('task:open-in-xcode', taskId),
   getStorageOverview: () => ipcRenderer.invoke('storage:overview'),
   setStoragePolicy: (policy) => ipcRenderer.invoke('storage:set-policy', policy),
   cleanupStorage: (input) => ipcRenderer.invoke('storage:cleanup', input),

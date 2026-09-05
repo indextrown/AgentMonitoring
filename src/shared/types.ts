@@ -744,7 +744,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 14
+export const AGENT_MONITORING_BRIDGE_VERSION = 15
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -798,6 +798,7 @@ export interface AgentMonitoringBridge {
   refreshTaskPublication: (taskId: string) => Promise<TaskApprovalResult>
   switchTaskPublicationToPullRequest: (taskId: string) => Promise<TaskRecord>
   discardTask: (taskId: string) => Promise<void>
+  openTaskInXcode: (taskId: string) => Promise<void>
   getStorageOverview: () => Promise<StorageOverview>
   setStoragePolicy: (policy: StoragePolicy) => Promise<StorageOverview>
   cleanupStorage: (input: StorageCleanupInput) => Promise<StorageCleanupResult>

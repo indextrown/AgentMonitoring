@@ -1300,6 +1300,7 @@ export const demoBridge: AgentMonitoringBridge = {
     state = { ...state, notes: state.notes.filter((item) => item.id !== noteId) }
     emit(null, 'note_deleted', 'human', `${note.title} 메모 삭제`)
   },
+  openTaskInXcode: async () => undefined,
   openPath: async () => undefined,
   openExternalUrl: async () => undefined,
   openFeedback: async () => undefined,

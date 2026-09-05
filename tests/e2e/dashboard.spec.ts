@@ -267,6 +267,8 @@ test('launches a verified task worktree and keeps that branch as the rebuild sou
   const drawer = page.locator('.task-drawer')
   await drawer.getByRole('button', { name: '실행' }).click()
   await expect(drawer.getByText('수동 검증 필요', { exact: true })).toBeVisible()
+  await expect(drawer.getByRole('button', { name: 'Xcode로 열기' })).toBeVisible()
+  await drawer.getByRole('button', { name: 'Xcode로 열기' }).click()
   await drawer.getByLabel('작업 브랜치 앱 실행 기기').selectOption('physical:DEMO-PHYSICAL-IPHONE-UDID')
   await drawer.getByRole('button', { name: '작업본 실행' }).click()
 

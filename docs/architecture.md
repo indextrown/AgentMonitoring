@@ -178,6 +178,8 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 환경 준비 명령, Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 원본 checkout의 `.build`나 다른 무시 파일을 worktree에 복사하거나 심볼릭 링크하지 않는다. 각 작업공간에서 선언된 준비 명령으로 필요한 외부 의존성을 복원한다.
 
+작업 상세의 Xcode 열기 요청은 renderer에서 파일 경로를 받지 않고 task UUID만 IPC로 전달한다. 메인 프로세스가 저장된 task와 project를 조회하고, 프로젝트에 설정된 `.xcworkspace` 또는 `.xcodeproj`가 task worktree 실경로 안의 일반 디렉터리인지와 필수 marker 파일을 다시 검증한다. 검증된 container만 `/usr/bin/open -a Xcode`로 열기 때문에 원본 checkout이나 worktree 밖의 경로를 작업 화면에서 임의로 열 수 없다.
+
 작업을 만들 때 현재 원본 브랜치와 기준 commit을 `tasks.source_branch`, `tasks.base_commit`에 기록한다. 사용자가 작업 도중 원본에서 새 커밋을 만들어도 어느 브랜치에서 시작한 작업인지 확인할 수 있다.
 
 Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.

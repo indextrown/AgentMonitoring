@@ -44,6 +44,7 @@ import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
 import { ProjectRuntimeEnvironmentService } from './runtime-environment'
+import { openTaskInXcode } from './task-xcode'
 
 const execFileAsync = promisify(execFile)
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
@@ -752,6 +753,13 @@ function registerIpc(): void {
   ipcMain.handle('task:discard', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     await requireRunner().discard(taskId)
+  })
+
+  ipcMain.handle('task:open-in-xcode', async (_event, taskId: string) => {
+    const validTaskId = z.string().uuid().parse(taskId)
+    const store = requireStore()
+    const task = store.getTask(validTaskId)
+    await openTaskInXcode(store.getProject(task.projectId), task)
   })
 
   ipcMain.handle('storage:overview', () => requireRunner().getStorageOverview())

@@ -133,6 +133,7 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'listProjectRunDestinations',
   'launchProjectSimulator',
   'launchTaskSimulator',
+  'openTaskInXcode',
   'restartProjectSimulator',
   'stopProjectSimulator',
   'onProjectSimulatorChanged',
@@ -956,6 +957,7 @@ export function App(): React.JSX.Element {
           onLaunchSimulator={launchTaskSimulator}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
+          onOpenXcode={() => void bridge.openTaskInXcode(selectedTask.id).catch((openError) => setError(String(openError)))}
           onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
         />
       )}
@@ -3660,6 +3662,7 @@ function TaskDrawer({
   onLaunchSimulator,
   onAction,
   onOpenPath,
+  onOpenXcode,
   onOpenEvidence
 }: {
   task: TaskRecord
@@ -3675,6 +3678,7 @@ function TaskDrawer({
   onLaunchSimulator: (task: TaskRecord, destinationId: string) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
+  onOpenXcode: () => void
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
@@ -3971,6 +3975,7 @@ function TaskDrawer({
             </div>
           )}
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
+          {canLaunchSimulator && task.worktreePath && <button className="secondary-button" onClick={onOpenXcode}><SquareTerminal size={14} />Xcode로 열기</button>}
           {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
           {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}
           {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
