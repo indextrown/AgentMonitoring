@@ -20,7 +20,12 @@ const ENVIRONMENT_FAILURE_PATTERNS = [
   /package resolution failed/i,
   /could not resolve host/i,
   /authentication failed for .*?(?:repository|https?:\/\/|git@)/i,
-  /permission denied.*(?:cache|keychain|deriveddata|\.build)/i
+  /permission denied.*(?:cache|keychain|deriveddata|\.build)/i,
+  /CoreSimulatorService connection became invalid/i,
+  /not connected to CoreSimulatorService/i,
+  /failed to initialize simulator device set/i,
+  /Simulator services will no longer be available/i,
+  /is not a workspace file/i
 ]
 
 async function pathExists(path: string): Promise<boolean> {
@@ -46,6 +51,12 @@ export function isEnvironmentFailureOutput(output: string): boolean {
 }
 
 export function environmentFailureMessage(output: string): string {
+  if (/CoreSimulatorService|simulator device set|Simulator services/i.test(output)) {
+    return 'iOS Simulator 서비스 연결이 끊겼습니다. IDE가 Simulator를 다시 연 뒤 환경을 재확인합니다.'
+  }
+  if (/is not a workspace file/i.test(output)) {
+    return 'Simulator 검증에 필요한 Xcode workspace가 없거나 손상됐습니다. Tuist 생성 상태를 확인하세요.'
+  }
   if (/tuist install|external dependenc/i.test(output)) {
     return 'Tuist 외부 의존성이 준비되지 않았습니다. 환경 준비 명령을 확인한 뒤 다시 검증하세요.'
   }

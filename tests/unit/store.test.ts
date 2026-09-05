@@ -12,6 +12,48 @@ afterEach(async () => {
 })
 
 describe('AppStore', () => {
+  it('persists project model profiles and immutable task model plans', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-model-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Model fixture', join(directory, 'model-fixture'))
+    const modelProfile = {
+      version: 1 as const,
+      mode: 'role-based' as const,
+      executionMode: 'root-subagents' as const,
+      selection: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+      roleSelections: { reviewer: { model: 'gpt-review', reasoningEffort: 'high' as const } }
+    }
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: '',
+      testCommand: '',
+      modelProfile
+    })
+    const modelPlan = {
+      version: 1 as const,
+      source: 'project' as const,
+      executionMode: 'root-subagents' as const,
+      resolvedAt: '2026-09-05T00:00:00.000Z',
+      roles: {
+        planning: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        'test-designer': { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        critic: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        implementer: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        reviewer: { model: 'gpt-review', reasoningEffort: 'high' as const }
+      }
+    }
+    const task = store.createTask(project.id, '모델 고정', '선택한 모델을 작업에 고정해서 실행한다.', 1, null, null, null, undefined, null, modelPlan)
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getProject(project.id).modelProfile).toEqual(modelProfile)
+    expect(reopened.getTask(task.id).modelPlan).toEqual(modelPlan)
+    reopened.close()
+  })
+
   it('starts with an empty workspace and persists user records', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
     temporaryDirectories.push(directory)
@@ -156,6 +198,115 @@ describe('AppStore', () => {
       status: 'skipped',
       message: '환경 준비 단계가 추가되기 전에 생성된 작업입니다.'
     })
+    reopened.close()
+  })
+
+  it('persists approval feedback without replacing the original task contract', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Revision project', join(directory, 'revision-project'))
+    const task = store.createTask(
+      project.id,
+      '메인 스레드 경고 수정',
+      '기존 기능을 구현하고 승인된 검증 조건을 모두 통과한다.',
+      2
+    )
+    store.setTaskWorkspace(task.id, 'agentmonitor/revision', join(directory, 'worktree'), 'main')
+    store.transitionTask(task.id, 'running', 1)
+    store.transitionTask(task.id, 'awaiting_approval')
+
+    const updated = store.addTaskRevisionRequest(
+      task.id,
+      '메인 스레드 경고의 원인을 제거하고 기존 검증을 다시 실행해 주세요.'
+    )
+
+    expect(updated.prompt).toBe(task.prompt)
+    expect(updated.revisionRequests).toHaveLength(1)
+    expect(updated.revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
+    expect(store.getSnapshot(project.id).events.some((event) => event.kind === 'task_revision_requested')).toBe(true)
+    const firstRequestId = updated.revisionRequests![0].id
+    expect(store.markTaskRevisionRequestStarted(task.id, firstRequestId).revisionRequests?.[0].startedAt).toBeTruthy()
+    expect(store.markTaskRevisionRequestsApplied(task.id, [firstRequestId]).revisionRequests?.[0].appliedAt).toBeTruthy()
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getTask(task.id).revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
+    expect(reopened.getTask(task.id).revisionRequests?.[0].appliedAt).toBeTruthy()
+    const second = reopened.addTaskRevisionRequest(task.id, '두 번째 수정 요청도 같은 작업에 누적합니다.')
+    const secondRequestId = second.revisionRequests![1].id
+    reopened.transitionTask(task.id, 'running', 1)
+    const queued = reopened.addTaskRevisionRequest(task.id, '실행 중에 세 번째 요청을 미리 큐에 추가합니다.')
+    expect(queued.revisionRequests?.map((request) => request.instruction)).toHaveLength(3)
+    reopened.markTaskRevisionRequestStarted(task.id, secondRequestId)
+    const partiallyApplied = reopened.markTaskRevisionRequestsApplied(task.id, [secondRequestId])
+    expect(partiallyApplied.revisionRequests?.[1].appliedAt).toBeTruthy()
+    expect(partiallyApplied.revisionRequests?.[2].appliedAt).toBeNull()
+    reopened.transitionTask(task.id, 'awaiting_approval')
+    reopened.setTaskPublication(task.id, {
+      strategy: 'direct',
+      status: 'awaiting_local_sync',
+      remoteName: 'origin',
+      baseBranch: 'main',
+      remoteBranch: 'main',
+      pullRequestUrl: null,
+      publishedCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      mergeCommit: null,
+      message: '원격 반영 후 로컬 동기화 대기',
+      updatedAt: new Date().toISOString()
+    })
+    expect(() => reopened.addTaskRevisionRequest(task.id, '원격 반영 뒤에는 받을 수 없는 요청입니다.')).toThrow(
+      '원격 반영이 끝난 작업은 추가로 수정할 수 없습니다.'
+    )
+    reopened.close()
+  })
+
+  it('manages and persists queued revision requests without changing completed history', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Revision queue project', join(directory, 'revision-queue-project'))
+    const task = store.createTask(
+      project.id,
+      '추가 수정 큐 관리',
+      '승인 대기 중인 작업의 추가 수정 요청을 안전하게 관리한다.',
+      2
+    )
+    store.setTaskWorkspace(task.id, 'agentmonitor/revision-queue', join(directory, 'worktree'), 'main')
+    store.transitionTask(task.id, 'running', 1)
+    store.transitionTask(task.id, 'awaiting_approval')
+
+    const first = store.addTaskRevisionRequest(task.id, '첫 번째 수정 요청을 구현하고 검증해 주세요.')
+    const firstId = first.revisionRequests![0].id
+    store.markTaskRevisionRequestStarted(task.id, firstId)
+    store.markTaskRevisionRequestsApplied(task.id, [firstId])
+    const second = store.addTaskRevisionRequest(task.id, '두 번째 수정 요청을 대기열에 추가해 주세요.')
+    const secondId = second.revisionRequests![1].id
+    const third = store.addTaskRevisionRequest(task.id, '세 번째 수정 요청을 먼저 검토해 주세요.')
+    const thirdId = third.revisionRequests![2].id
+
+    store.updateTaskRevisionRequest(task.id, thirdId, '세 번째 수정 요청의 변경된 내용을 먼저 검토해 주세요.')
+    store.moveTaskRevisionRequest(task.id, thirdId, 'up')
+    store.cancelTaskRevisionRequest(task.id, secondId)
+    store.setTaskRevisionQueuePaused(task.id, true)
+    store.markTaskRevisionRequestFailed(task.id, thirdId, '검증 환경을 준비하지 못했습니다.')
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    const persisted = reopened.getTask(task.id)
+    expect(persisted.revisionQueuePaused).toBe(true)
+    expect(persisted.revisionRequests?.map((request) => request.id)).toEqual([firstId, thirdId, secondId])
+    expect(persisted.revisionRequests?.[0]).toMatchObject({ appliedAt: expect.any(String) })
+    expect(persisted.revisionRequests?.[1]).toMatchObject({
+      instruction: '세 번째 수정 요청의 변경된 내용을 먼저 검토해 주세요.',
+      lastFailureMessage: '검증 환경을 준비하지 못했습니다.'
+    })
+    expect(persisted.revisionRequests?.[2]).toMatchObject({ cancelledAt: expect.any(String) })
+    expect(() => reopened.updateTaskRevisionRequest(task.id, firstId, '완료 이력을 바꾸면 안 됩니다.')).toThrow(
+      '완료되거나 취소된 요청은 수정할 수 없습니다.'
+    )
     reopened.close()
   })
 

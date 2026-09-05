@@ -6,6 +6,7 @@ export type TaskStatus =
   | 'awaiting_manual_validation'
   | 'awaiting_merge'
   | 'blocked_environment'
+  | 'blocked_agent'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -28,6 +29,12 @@ export type EventKind =
   | 'note_updated'
   | 'note_deleted'
   | 'task_completed'
+  | 'task_revision_requested'
+  | 'task_revision_updated'
+  | 'task_revision_cancelled'
+  | 'task_revision_reordered'
+  | 'task_revision_queue_paused'
+  | 'task_revision_queue_resumed'
   | 'task_stopped'
   | 'task_timed_out'
   | 'task_recovered'
@@ -52,6 +59,63 @@ export interface CodexAuthStatus {
   email: string | null
   planType: string | null
   message?: string
+}
+
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+
+export type CodexModelRole =
+  | 'planning'
+  | 'test-designer'
+  | 'critic'
+  | 'implementer'
+  | 'reviewer'
+
+export interface CodexModelSelection {
+  model: string
+  reasoningEffort: CodexReasoningEffort
+}
+
+export type CodexModelProfileMode = 'recommended' | 'single' | 'role-based'
+export type CodexExecutionMode = 'independent' | 'root-subagents'
+
+export interface CodexModelProfile {
+  version: 1
+  mode: CodexModelProfileMode
+  /** 이전 버전에서 저장한 프로필은 역할별 독립 실행으로 해석합니다. */
+  executionMode?: CodexExecutionMode
+  selection: CodexModelSelection | null
+  roleSelections: Partial<Record<CodexModelRole, CodexModelSelection>>
+}
+
+export interface CodexResolvedModelPlan {
+  version: 1
+  source: 'codex-recommended' | 'project' | 'task'
+  /** 이전 버전에서 생성한 작업은 역할별 독립 실행으로 해석합니다. */
+  executionMode?: CodexExecutionMode
+  roles: Record<CodexModelRole, CodexModelSelection>
+  resolvedAt: string
+}
+
+export interface CodexModelReasoningEffortOption {
+  reasoningEffort: CodexReasoningEffort
+  description: string
+}
+
+export interface CodexModelOption {
+  id: string
+  displayName: string
+  description: string
+  supportedReasoningEfforts: CodexModelReasoningEffortOption[]
+  defaultReasoningEffort: CodexReasoningEffort
+  inputModalities: Array<'text' | 'image'>
+  isDefault: boolean
+  upgrade: string | null
+}
+
+export interface CodexModelCatalog {
+  models: CodexModelOption[]
+  defaultModelId: string
+  loadedAt: string
 }
 
 export type IosDeviceFamily = 'iphone' | 'ipad'
@@ -188,6 +252,7 @@ export interface RuntimeEnvironmentRequirement {
 export interface RuntimeScenarioPreconditions {
   permissions?: RuntimePrivacyPermission[]
   requiredEnvironmentKeys?: string[]
+  launchVariables?: Record<string, string>
   resetAppData?: boolean
 }
 
@@ -330,6 +395,7 @@ export interface ProjectRecord {
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   runtimeConfigSource?: ProjectRuntimeConfigSource | null
   publishStrategy?: PublishStrategy
+  modelProfile?: CodexModelProfile | null
   isDemo: boolean
   createdAt: string
 }
@@ -403,9 +469,30 @@ export type ProjectSimulatorStatus =
   | 'stopped'
   | 'failed'
 
+export interface ProjectSimulatorSource {
+  kind: 'project' | 'task-worktree'
+  taskId: string | null
+  branchName: string | null
+}
+
+export type ProjectRunDestinationKind = 'simulator' | 'physical'
+
+export interface ProjectRunDestination {
+  id: string
+  name: string
+  kind: ProjectRunDestinationKind
+  deviceFamily: 'iphone' | 'ipad'
+  osVersion: string | null
+  available: boolean
+  statusLabel: string
+  detail: string
+}
+
 export interface ProjectSimulatorSession {
   projectId: string
+  source: ProjectSimulatorSource
   status: ProjectSimulatorStatus
+  destinationKind: ProjectRunDestinationKind | null
   deviceId: string | null
   deviceName: string | null
   bundleIdentifier: string | null
@@ -519,6 +606,19 @@ export interface TaskPublication {
   updatedAt: string | null
 }
 
+export interface TaskRevisionRequest {
+  id: string
+  instruction: string
+  createdAt: string
+  updatedAt: string
+  startedAt: string | null
+  appliedAt: string | null
+  cancelledAt: string | null
+  lastFailureAt: string | null
+  lastFailureMessage: string | null
+  resultSummary: string | null
+}
+
 export interface TaskRecord {
   id: string
   projectId: string
@@ -526,6 +626,7 @@ export interface TaskRecord {
   prompt: string
   status: TaskStatus
   provider: 'codex'
+  modelPlan?: CodexResolvedModelPlan | null
   maxAttempts: number
   attempt: number
   branchName: string | null
@@ -541,6 +642,8 @@ export interface TaskRecord {
   techSpec?: TaskTechSpec | null
   verificationPlan?: TaskVerificationPlan | null
   verificationResult?: TaskVerificationResult | null
+  revisionRequests?: TaskRevisionRequest[]
+  revisionQueuePaused?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -685,6 +788,30 @@ export interface CreateTaskInput {
   techSpec?: TaskTechSpecDraft | null
   verificationPlan: TaskVerificationPlan
   publishStrategy: PublishStrategy
+  modelProfile?: CodexModelProfile
+}
+
+export interface ContinueTaskInput {
+  taskId: string
+  instruction: string
+}
+
+export interface UpdateTaskRevisionRequestInput extends ContinueTaskInput {
+  requestId: string
+}
+
+export interface TaskRevisionRequestInput {
+  taskId: string
+  requestId: string
+}
+
+export interface MoveTaskRevisionRequestInput extends TaskRevisionRequestInput {
+  direction: 'up' | 'down'
+}
+
+export interface SetTaskRevisionQueuePausedInput {
+  taskId: string
+  paused: boolean
 }
 
 export interface UpdateProjectInput {
@@ -694,6 +821,7 @@ export interface UpdateProjectInput {
   setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   publishStrategy?: PublishStrategy
+  modelProfile?: CodexModelProfile | null
 }
 
 export interface GenerateRuntimeScenarioInput {
@@ -701,6 +829,7 @@ export interface GenerateRuntimeScenarioInput {
   title: string
   prompt: string
   techSpec?: TaskTechSpecDraft | null
+  modelProfile?: CodexModelProfile
 }
 
 export interface RecommendVerificationPlanInput {
@@ -708,12 +837,14 @@ export interface RecommendVerificationPlanInput {
   title: string
   prompt: string
   techSpec?: TaskTechSpecDraft | null
+  modelProfile?: CodexModelProfile
 }
 
 export interface GenerateTechSpecInput {
   projectId: string
   title: string
   prompt: string
+  modelProfile?: CodexModelProfile
 }
 
 export interface RefineTechSpecInput extends GenerateTechSpecInput {
@@ -721,7 +852,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 11
+export const AGENT_MONITORING_BRIDGE_VERSION = 20
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -729,6 +860,7 @@ export interface AgentMonitoringBridge {
   loginCodex: () => Promise<CodexAuthStatus>
   cancelCodexLogin: () => Promise<CodexAuthStatus>
   logoutCodex: () => Promise<CodexAuthStatus>
+  listCodexModels: (refresh?: boolean) => Promise<CodexModelCatalog>
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>
@@ -752,7 +884,9 @@ export interface AgentMonitoringBridge {
   pushSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   syncSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   getProjectSimulatorStatus: (projectId: string) => Promise<ProjectSimulatorSession>
-  launchProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
+  listProjectRunDestinations: (projectId: string, refresh?: boolean) => Promise<ProjectRunDestination[]>
+  launchProjectSimulator: (projectId: string, destinationId?: string) => Promise<ProjectSimulatorSession>
+  launchTaskSimulator: (taskId: string, destinationId?: string) => Promise<ProjectSimulatorSession>
   restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>
@@ -764,14 +898,22 @@ export interface AgentMonitoringBridge {
   ) => Promise<VerificationPlanRecommendation>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
+  regenerateTaskRuntimeScenario: (taskId: string) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
+  continueTask: (input: ContinueTaskInput) => Promise<void>
+  updateTaskRevisionRequest: (input: UpdateTaskRevisionRequestInput) => Promise<TaskRecord>
+  cancelTaskRevisionRequest: (input: TaskRevisionRequestInput) => Promise<TaskRecord>
+  moveTaskRevisionRequest: (input: MoveTaskRevisionRequestInput) => Promise<TaskRecord>
+  setTaskRevisionQueuePaused: (input: SetTaskRevisionQueuePausedInput) => Promise<TaskRecord>
+  runNextTaskRevision: (taskId: string) => Promise<void>
   retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<TaskApprovalResult>
   refreshTaskPublication: (taskId: string) => Promise<TaskApprovalResult>
   switchTaskPublicationToPullRequest: (taskId: string) => Promise<TaskRecord>
   discardTask: (taskId: string) => Promise<void>
+  openTaskInXcode: (taskId: string) => Promise<void>
   getStorageOverview: () => Promise<StorageOverview>
   setStoragePolicy: (policy: StoragePolicy) => Promise<StorageOverview>
   cleanupStorage: (input: StorageCleanupInput) => Promise<StorageCleanupResult>

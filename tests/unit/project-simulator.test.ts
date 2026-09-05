@@ -1,8 +1,12 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ProjectSimulatorService } from '../../electron/main/project-simulator'
+import {
+  explainPhysicalDeviceFailure,
+  parsePhysicalRunDestinations,
+  ProjectSimulatorService
+} from '../../electron/main/project-simulator'
 import type { ProjectRecord } from '../../src/shared/types'
 import type { RuntimeCommandRequest } from '../../electron/main/ios-simulator-runtime'
 
@@ -45,6 +49,54 @@ function projectRecord(path: string, container = 'Demo.xcodeproj'): ProjectRecor
   }
 }
 
+function physicalDevicesJson(tunnelState = 'connected'): string {
+  return JSON.stringify({
+    info: { outcome: 'success' },
+    result: {
+      devices: [
+        {
+          identifier: 'CORE-DEVICE-ID',
+          visibilityClass: 'default',
+          deviceProperties: {
+            name: 'Test iPhone',
+            osVersionNumber: '26.3',
+            developerModeStatus: 'enabled',
+            ddiServicesAvailable: tunnelState === 'connected'
+          },
+          hardwareProperties: {
+            platform: 'iOS',
+            deviceType: 'iPhone',
+            marketingName: 'iPhone',
+            udid: 'PHYSICAL-IPHONE-UDID'
+          },
+          connectionProperties: {
+            pairingState: 'paired',
+            tunnelState
+          }
+        },
+        {
+          identifier: 'CORE-IPAD-ID',
+          deviceProperties: {
+            name: 'Test iPad',
+            osVersionNumber: '26.3',
+            developerModeStatus: 'enabled',
+            ddiServicesAvailable: true
+          },
+          hardwareProperties: {
+            platform: 'iOS',
+            deviceType: 'iPad',
+            udid: 'PHYSICAL-IPAD-UDID'
+          },
+          connectionProperties: {
+            pairingState: 'paired',
+            tunnelState: 'connected'
+          }
+        }
+      ]
+    }
+  })
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true })
@@ -52,6 +104,70 @@ afterEach(async () => {
 })
 
 describe('ProjectSimulatorService', () => {
+  it('parses paired physical devices and keeps offline devices visible but unavailable', () => {
+    expect(parsePhysicalRunDestinations(physicalDevicesJson('unavailable'), 'iphone')).toEqual([
+      {
+        id: 'physical:PHYSICAL-IPHONE-UDID',
+        name: 'Test iPhone',
+        kind: 'physical',
+        deviceFamily: 'iphone',
+        osVersion: 'iOS 26.3',
+        available: false,
+        statusLabel: '개발 터널 연결 필요',
+        detail: '실기기 · iOS 26.3 · 개발 터널 연결 필요'
+      }
+    ])
+  })
+
+  it('distinguishes Signing failures from physical-device connection failures', () => {
+    expect(explainPhysicalDeviceFailure(
+      'Signing for "Demo" requires a development team.',
+      'Swift 앱 빌드에 실패했습니다.'
+    )).toContain('Signing 설정 필요')
+    expect(explainPhysicalDeviceFailure(
+      'The device is not available because the CoreDevice tunnel is disconnected.',
+      '실기기 연결에 실패했습니다.'
+    )).toContain('개발 터널 연결 필요')
+    expect(explainPhysicalDeviceFailure(
+      'Developer Mode is disabled on this device.',
+      '실기기 연결에 실패했습니다.'
+    )).toContain('Developer Mode 필요')
+  })
+
+  it('shows an actionable Signing error when a physical-device build is unsigned', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-signing-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    const runtimeRoot = join(directory, 'runtime')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    const execute = async (request: RuntimeCommandRequest) => {
+      const jsonOutputIndex = request.args.indexOf('--json-output')
+      if (request.args.slice(0, 3).join(' ') === 'devicectl list devices' && jsonOutputIndex >= 0) {
+        await writeFile(request.args[jsonOutputIndex + 1], physicalDevicesJson())
+        return { code: 0, output: '', stdout: '' }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return { code: 0, output: '', stdout: appBuildSettings() }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build') {
+        return {
+          code: 65,
+          output: 'Signing for "Demo" requires a development team.',
+          stdout: ''
+        }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const service = new ProjectSimulatorService(runtimeRoot, () => undefined, execute)
+
+    await expect(service.launch(
+      projectRecord(projectPath),
+      undefined,
+      'physical:PHYSICAL-IPHONE-UDID'
+    )).rejects.toThrow('Signing 설정 필요')
+    expect(service.getStatus(projectRecord(projectPath)).error).toContain('Signing & Capabilities')
+  })
+
   it('builds, launches, restarts, and stops the configured iPhone app', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-simulator-'))
     temporaryDirectories.push(directory)
@@ -160,6 +276,128 @@ describe('ProjectSimulatorService', () => {
     expect(service.getStatus(projectRecord(projectPath, '../Outside.xcodeproj')).status).toBe('failed')
   })
 
+  it('uses the selected task worktree and reports its branch as the launch source', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-simulator-worktree-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    const worktreePath = join(directory, 'worktree')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    await mkdir(join(worktreePath, 'Demo.xcodeproj'), { recursive: true })
+    const commands: RuntimeCommandRequest[] = []
+    const execute = async (request: RuntimeCommandRequest) => {
+      commands.push(request)
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return { code: 0, output: '', stdout: appBuildSettings() }
+      }
+      if (request.args.join(' ') === 'simctl list devices available --json') {
+        return { code: 0, output: '', stdout: JSON.stringify({ devices: {} }) }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const project = projectRecord(projectPath)
+    const service = new ProjectSimulatorService(join(directory, 'runtime'), () => undefined, execute)
+
+    await expect(service.launch(project, {
+      path: worktreePath,
+      source: {
+        kind: 'task-worktree',
+        taskId: '22222222-2222-4222-8222-222222222222',
+        branchName: 'agentmonitor/task-branch'
+      }
+    })).rejects.toThrow('사용 가능한 iPhone Simulator가 없습니다')
+
+    const resolvedWorktreePath = await realpath(worktreePath)
+    expect(commands).not.toHaveLength(0)
+    expect(commands.every((request) => request.cwd === resolvedWorktreePath)).toBe(true)
+    expect(service.getStatus(project).source).toEqual({
+      kind: 'task-worktree',
+      taskId: '22222222-2222-4222-8222-222222222222',
+      branchName: 'agentmonitor/task-branch'
+    })
+  })
+
+  it('lists and runs a selected physical iPhone with devicectl', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-device-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    const runtimeRoot = join(directory, 'runtime')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    const commands: RuntimeCommandRequest[] = []
+    let launchPid = 7300
+    const execute = async (request: RuntimeCommandRequest) => {
+      commands.push(request)
+      const jsonOutputIndex = request.args.indexOf('--json-output')
+      if (request.args.slice(0, 3).join(' ') === 'devicectl list devices' && jsonOutputIndex >= 0) {
+        await writeFile(request.args[jsonOutputIndex + 1], physicalDevicesJson())
+        return { code: 0, output: '', stdout: '' }
+      }
+      if (request.args.join(' ') === 'simctl list devices available --json') {
+        return {
+          code: 0,
+          output: '',
+          stdout: JSON.stringify({
+            devices: {
+              'com.apple.CoreSimulator.SimRuntime.iOS-26-4': [{
+                udid: 'SIMULATOR-UDID',
+                name: 'iPhone 16 Pro',
+                state: 'Shutdown',
+                isAvailable: true
+              }]
+            }
+          })
+        }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build') {
+        const derivedDataPath = request.args[request.args.indexOf('-derivedDataPath') + 1]
+        await mkdir(join(derivedDataPath, 'Build', 'Products', 'Debug-iphoneos', 'Demo.app'), {
+          recursive: true
+        })
+        return { code: 0, output: 'BUILD SUCCEEDED', stdout: 'BUILD SUCCEEDED' }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        const derivedDataIndex = request.args.indexOf('-derivedDataPath')
+        const targetBuildDirectory = derivedDataIndex >= 0
+          ? join(request.args[derivedDataIndex + 1], 'Build', 'Products', 'Debug-iphoneos')
+          : '/tmp/DerivedData/Build/Products/Debug-iphoneos'
+        return { code: 0, output: '', stdout: appBuildSettings(targetBuildDirectory) }
+      }
+      if (request.args.slice(0, 4).join(' ') === 'devicectl device process launch' && jsonOutputIndex >= 0) {
+        launchPid += 1
+        await writeFile(request.args[jsonOutputIndex + 1], JSON.stringify({
+          info: { outcome: 'success' },
+          result: { process: { processIdentifier: launchPid } }
+        }))
+        return { code: 0, output: '', stdout: '' }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const service = new ProjectSimulatorService(runtimeRoot, () => undefined, execute)
+    const project = projectRecord(projectPath)
+
+    const destinations = await service.listDestinations(project, true)
+    expect(destinations.map((destination) => destination.id)).toEqual([
+      'simulator:SIMULATOR-UDID',
+      'physical:PHYSICAL-IPHONE-UDID'
+    ])
+
+    const launched = await service.launch(project, undefined, 'physical:PHYSICAL-IPHONE-UDID')
+    expect(launched).toMatchObject({
+      status: 'running',
+      destinationKind: 'physical',
+      deviceName: 'Test iPhone',
+      processId: 7301
+    })
+    const build = commands.find((request) => request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build')
+    expect(build?.args).toContain('iphoneos')
+    expect(commands.some((request) => request.args.slice(0, 4).join(' ') === 'devicectl device install app')).toBe(true)
+    expect(commands.some((request) => request.args[0] === 'simctl' && request.args.includes('install'))).toBe(false)
+
+    expect((await service.restart(project)).processId).toBe(7302)
+    await service.stop(project)
+    expect(commands.at(-1)?.args).toContain('terminate')
+    expect(commands.at(-1)?.args).toContain('7302')
+  })
+
   it('blocks overlapping Simulator commands for the same project', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-simulator-lock-'))
     temporaryDirectories.push(directory)
@@ -197,6 +435,22 @@ describe('ProjectSimulatorService', () => {
     const commands: RuntimeCommandRequest[] = []
     const execute = async (request: RuntimeCommandRequest) => {
       commands.push(request)
+      if (request.args.join(' ') === 'simctl list devices available --json') {
+        return {
+          code: 0,
+          output: '',
+          stdout: JSON.stringify({
+            devices: {
+              'com.apple.CoreSimulator.SimRuntime.iOS-26-4': [{
+                udid: 'IPHONE-UDID',
+                name: 'iPhone 16 Pro',
+                state: 'Shutdown',
+                isAvailable: true
+              }]
+            }
+          })
+        }
+      }
       if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
         return {
           code: 0,
@@ -220,11 +474,10 @@ describe('ProjectSimulatorService', () => {
     project.runtimeAdapter!.scheme = 'Core'
 
     await expect(service.launch(project)).rejects.toThrow(
-      'Core Scheme은 Simulator에 설치할 수 있는 iOS 앱이 아닙니다'
+      'Core Scheme은 선택한 iOS 기기에 설치할 수 있는 앱이 아닙니다'
     )
-    expect(commands).toHaveLength(1)
-    expect(commands[0].args).toContain('-showBuildSettings')
+    expect(commands.some((request) => request.args.includes('-showBuildSettings'))).toBe(true)
     expect(commands.some((request) => request.args.includes('build'))).toBe(false)
-    expect(commands.some((request) => request.args.includes('simctl'))).toBe(false)
+    expect(commands.some((request) => request.args.includes('boot'))).toBe(false)
   })
 })

@@ -41,4 +41,11 @@ describe('project environment', () => {
     expect(environmentFailureMessage('Authentication failed for repository')).toContain('인증')
     expect(isEnvironmentFailureOutput('XCTAssertEqual failed: expected 1, got 2')).toBe(false)
   })
+
+  it('classifies Simulator service and invalid workspace failures as environment problems', () => {
+    expect(isEnvironmentFailureOutput('CoreSimulatorService connection became invalid')).toBe(true)
+    expect(environmentFailureMessage('Failed to initialize simulator device set')).toContain('Simulator 서비스')
+    expect(isEnvironmentFailureOutput("'Yeobaek.xcworkspace' is not a workspace file")).toBe(true)
+    expect(environmentFailureMessage("'Yeobaek.xcworkspace' is not a workspace file")).toContain('Xcode workspace')
+  })
 })

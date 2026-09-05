@@ -1,6 +1,8 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   Bot,
   Bug,
   Check,
@@ -29,6 +31,7 @@ import {
   NotebookPen,
   Octagon,
   Pencil,
+  Pause,
   Play,
   Plus,
   RotateCcw,
@@ -37,6 +40,7 @@ import {
   ShieldCheck,
   Square,
   SquareTerminal,
+  StepForward,
   Trash2,
   X
 } from 'lucide-react'
@@ -57,10 +61,19 @@ import {
   isActiveTask
 } from '../../shared/domain'
 import { normalizeRuntimeScenarioEnvironment } from '../../shared/runtime-scenario-policy'
+import {
+  CODEX_MODEL_ROLES,
+  CODEX_MODEL_ROLE_LABELS,
+  RECOMMENDED_CODEX_MODEL_PROFILE,
+  codexExecutionMode
+} from '../../shared/codex-models'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
+  CodexModelCatalog,
+  CodexModelProfile,
+  CodexModelSelection,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -71,6 +84,7 @@ import type {
   ProjectCapabilityStatus,
   ProjectChangeKind,
   ProjectRecord,
+  ProjectRunDestination,
   ProjectRuntimeEnvironmentEntry,
   ProjectRuntimeDiscovery,
   ProjectSimulatorSession,
@@ -110,6 +124,7 @@ type BridgeConnectionIssue = 'missing' | 'outdated'
 const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
+  'listCodexModels',
   'autoConfigureProjectRuntime',
   'listProjectRuntimeEnvironment',
   'upsertProjectRuntimeEnvironment',
@@ -118,6 +133,12 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'refineTechSpec',
   'recommendVerificationPlan',
   'retryTaskVerification',
+  'continueTask',
+  'updateTaskRevisionRequest',
+  'cancelTaskRevisionRequest',
+  'moveTaskRevisionRequest',
+  'setTaskRevisionQueuePaused',
+  'runNextTaskRevision',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage',
@@ -129,7 +150,10 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'pushSourceControlRemote',
   'syncSourceControlRemote',
   'getProjectSimulatorStatus',
+  'listProjectRunDestinations',
   'launchProjectSimulator',
+  'launchTaskSimulator',
+  'openTaskInXcode',
   'restartProjectSimulator',
   'stopProjectSimulator',
   'onProjectSimulatorChanged',
@@ -154,6 +178,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   running: '구현 중',
   testing: '테스트 중',
   blocked_environment: '환경 확인 필요',
+  blocked_agent: 'AI 사용 대기',
   awaiting_approval: '승인 대기',
   awaiting_manual_validation: '수동 검증 필요',
   awaiting_merge: 'PR 병합 대기',
@@ -320,7 +345,16 @@ function duration(task: TaskRecord): string {
   return `${hours}시간 ${minutes % 60}분`
 }
 
+function shortElapsed(startedAt: string | null, finishedAt: string): string | null {
+  if (!startedAt) return null
+  const seconds = Math.max(1, Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1_000))
+  if (seconds < 60) return `${seconds}초`
+  const minutes = Math.round(seconds / 60)
+  return minutes < 60 ? `${minutes}분` : `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
+}
+
 function eventIcon(kind: EventKind): typeof Activity {
+  if (kind.includes('task_revision')) return MessageSquare
   if (kind.includes('finding')) return Bug
   if (kind.includes('note')) return NotebookPen
   if (kind.includes('test')) return kind === 'test_failed' ? AlertTriangle : CheckCircle2
@@ -338,6 +372,7 @@ function statusTone(status: TaskStatus): string {
   if (status === 'awaiting_manual_validation') return 'amber'
   if (status === 'awaiting_merge') return 'violet'
   if (status === 'blocked_environment') return 'amber'
+  if (status === 'blocked_agent') return 'amber'
   if (status === 'running' || status === 'testing') return 'blue'
   if (status === 'stopped' || status === 'discarded') return 'muted'
   return 'amber'
@@ -566,6 +601,106 @@ export function App(): React.JSX.Element {
       .then(() => load(task.projectId))
       .catch((retryError) => setError(String(retryError)))
     void load(task.projectId)
+  }
+
+  const continueTask = async (task: TaskRecord, instruction: string): Promise<void> => {
+    setError(null)
+    setSelectedTask(task)
+    try {
+      await bridge.continueTask({ taskId: task.id, instruction })
+      setNotice(isActiveTask(task)
+        ? '추가 수정 요청을 큐에 등록했습니다.'
+        : '추가 수정 요청을 등록하고 같은 작업에서 실행을 시작했습니다.')
+      await load(task.projectId)
+    } catch (continueError) {
+      setError(String(continueError))
+      throw continueError
+    }
+  }
+
+  const updateTaskRevisionRequest = async (task: TaskRecord, requestId: string, instruction: string): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.updateTaskRevisionRequest({ taskId: task.id, requestId, instruction })
+      setNotice('대기 중인 추가 수정 요청을 변경했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const cancelTaskRevisionRequest = async (task: TaskRecord, requestId: string): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.cancelTaskRevisionRequest({ taskId: task.id, requestId })
+      setNotice('추가 수정 요청을 취소했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const moveTaskRevisionRequest = async (task: TaskRecord, requestId: string, direction: 'up' | 'down'): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.moveTaskRevisionRequest({ taskId: task.id, requestId, direction })
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const setTaskRevisionQueuePaused = async (task: TaskRecord, paused: boolean): Promise<void> => {
+    setError(null)
+    try {
+      await bridge.setTaskRevisionQueuePaused({ taskId: task.id, paused })
+      setNotice(paused ? '현재 요청이 끝나면 추가 수정 큐를 일시정지합니다.' : '추가 수정 큐 자동 실행을 재개했습니다.')
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const runNextTaskRevision = async (task: TaskRecord): Promise<void> => {
+    setError(null)
+    setNotice('다음 추가 수정 요청 하나를 실행합니다.')
+    try {
+      await bridge.runNextTaskRevision(task.id)
+      await load(task.projectId)
+    } catch (revisionError) {
+      setError(String(revisionError))
+      throw revisionError
+    }
+  }
+
+  const launchTaskSimulator = (task: TaskRecord, destinationId: string): void => {
+    setError(null)
+    setNotice(`${task.branchName ?? '작업 브랜치'}에서 앱을 빌드하고 있습니다.`)
+    setSelectedTask(null)
+    setPage('dashboard')
+    void bridge.launchTaskSimulator(task.id, destinationId)
+      .then((session) => {
+        setNotice(`${session.source.branchName ?? '작업 브랜치'} 앱을 ${session.deviceName ?? '선택한 iOS 기기'}에서 실행했습니다.`)
+      })
+      .catch((launchError) => setError(String(launchError)))
+  }
+
+  const regenerateTaskRuntimeScenario = async (task: TaskRecord): Promise<void> => {
+    try {
+      setBusy(true)
+      setSelectedTask(task)
+      await bridge.regenerateTaskRuntimeScenario(task.id)
+      setNotice('현재 코드와 실행 환경에서 재현 가능한 검증 시나리오로 다시 만들었습니다.')
+      await load(task.projectId)
+    } catch (scenarioError) {
+      setError(String(scenarioError))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr'): Promise<void> => {
@@ -919,9 +1054,19 @@ export function App(): React.JSX.Element {
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
+          onContinue={continueTask}
+          onUpdateRevision={updateTaskRevisionRequest}
+          onCancelRevision={cancelTaskRevisionRequest}
+          onMoveRevision={moveTaskRevisionRequest}
+          onSetRevisionQueuePaused={setTaskRevisionQueuePaused}
+          onRunNextRevision={runNextTaskRevision}
           onRetryVerification={retryTaskVerification}
+          onRegenerateRuntimeScenario={(task) => void regenerateTaskRuntimeScenario(task)}
+          canLaunchSimulator={selectedProject?.id === selectedTask.projectId && selectedProject.runtimeAdapter?.kind === 'ios-simulator'}
+          onLaunchSimulator={launchTaskSimulator}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
+          onOpenXcode={() => void bridge.openTaskInXcode(selectedTask.id).catch((openError) => setError(String(openError)))}
           onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
         />
       )}
@@ -1338,7 +1483,7 @@ function ProjectCapabilitySummary({
 const PROJECT_SIMULATOR_STATUS_LABELS: Record<ProjectSimulatorSession['status'], string> = {
   idle: '실행 준비',
   preparing: '기기 확인 중',
-  booting: 'Simulator 준비 중',
+  booting: '기기 준비 중',
   building: '앱 빌드 중',
   installing: '앱 설치 중',
   running: '실행 중',
@@ -1357,36 +1502,92 @@ const PROJECT_SIMULATOR_BUSY = new Set<ProjectSimulatorSession['status']>([
   'stopping'
 ])
 
+function sessionDestinationId(session: ProjectSimulatorSession | null): string | null {
+  return session?.destinationKind && session.deviceId
+    ? `${session.destinationKind}:${session.deviceId}`
+    : null
+}
+
+function initialRunDestination(
+  destinations: ProjectRunDestination[],
+  preferredId: string | null = null
+): string {
+  if (preferredId && destinations.some((destination) => destination.id === preferredId && destination.available)) {
+    return preferredId
+  }
+  return destinations.find((destination) => destination.available && destination.kind === 'simulator')?.id
+    ?? destinations.find((destination) => destination.available)?.id
+    ?? ''
+}
+
 function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.JSX.Element {
   const [session, setSession] = useState<ProjectSimulatorSession | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [destinations, setDestinations] = useState<ProjectRunDestination[]>([])
+  const [selectedDestinationId, setSelectedDestinationId] = useState('')
+  const [destinationsLoading, setDestinationsLoading] = useState(true)
 
   useEffect(() => {
     let active = true
     setSession(null)
     setError(null)
+    setDestinations([])
+    setSelectedDestinationId('')
+    setDestinationsLoading(true)
     void bridge.getProjectSimulatorStatus(project.id)
       .then((next) => {
-        if (active) setSession(next)
+        if (active) {
+          setSession(next)
+          const runningDestinationId = sessionDestinationId(next)
+          if (runningDestinationId) setSelectedDestinationId(runningDestinationId)
+        }
       })
       .catch((statusError) => {
         if (active) setError(String(statusError))
       })
     const unsubscribe = bridge.onProjectSimulatorChanged((next) => {
-      if (active && next.projectId === project.id) setSession(next)
+      if (active && next.projectId === project.id) {
+        setSession(next)
+        const runningDestinationId = sessionDestinationId(next)
+        if (runningDestinationId) setSelectedDestinationId(runningDestinationId)
+      }
     })
+    void bridge.listProjectRunDestinations(project.id)
+      .then((next) => {
+        if (!active) return
+        setDestinations(next)
+        setSelectedDestinationId((current) => initialRunDestination(next, current))
+      })
+      .catch((destinationError) => {
+        if (active) setError(String(destinationError))
+      })
+      .finally(() => {
+        if (active) setDestinationsLoading(false)
+      })
     return () => {
       active = false
       unsubscribe()
     }
   }, [project.id])
 
-  const run = async (
-    operation: (projectId: string) => Promise<ProjectSimulatorSession>
-  ): Promise<void> => {
+  const refreshDestinations = async (): Promise<void> => {
+    setDestinationsLoading(true)
     setError(null)
     try {
-      setSession(await operation(project.id))
+      const next = await bridge.listProjectRunDestinations(project.id, true)
+      setDestinations(next)
+      setSelectedDestinationId((current) => initialRunDestination(next, current))
+    } catch (destinationError) {
+      setError(String(destinationError))
+    } finally {
+      setDestinationsLoading(false)
+    }
+  }
+
+  const run = async (operation: () => Promise<ProjectSimulatorSession>): Promise<void> => {
+    setError(null)
+    try {
+      setSession(await operation())
     } catch (operationError) {
       setError(String(operationError))
     }
@@ -1394,8 +1595,12 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
 
   const busy = session ? PROJECT_SIMULATOR_BUSY.has(session.status) : true
   const installed = Boolean(session?.deviceId && session.bundleIdentifier)
+  const canStop = installed && (session?.destinationKind !== 'physical' || Boolean(session.processId))
   const adapter = project.runtimeAdapter!
   const family = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
+  const taskSource = session?.source.kind === 'task-worktree' && session.source.taskId
+    ? session.source
+    : null
 
   return (
     <article className={`panel project-simulator status-${session?.status ?? 'idle'}`} aria-live="polite">
@@ -1403,13 +1608,44 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         {busy ? <LoaderCircle className="spin" size={18} /> : <SquareTerminal size={18} />}
       </div>
       <div className="project-simulator-copy">
-        <p className="eyebrow">DEVELOPMENT SIMULATOR</p>
+        <p className="eyebrow">DEVELOPMENT DEVICE</p>
         <div className="project-simulator-title">
-          <h3>{family}에서 앱 바로 실행</h3>
+          <h3>{family} 앱 바로 실행</h3>
           <span>{session ? PROJECT_SIMULATOR_STATUS_LABELS[session.status] : '상태 확인 중'}</span>
         </div>
         <p>{session?.message ?? `${adapter.scheme} 실행 상태를 확인하고 있습니다.`}</p>
+        <div className="project-simulator-target">
+          <select
+            aria-label="앱 실행 기기"
+            disabled={busy || destinationsLoading}
+            value={selectedDestinationId}
+            onChange={(event) => setSelectedDestinationId(event.target.value)}
+          >
+            {destinations.length === 0 && <option value="">{destinationsLoading ? '기기 찾는 중' : '사용 가능한 기기 없음'}</option>}
+            {destinations.map((destination) => (
+              <option disabled={!destination.available} key={destination.id} value={destination.id}>
+                {destination.name} · {destination.kind === 'simulator' ? 'Simulator' : '실기기'} · {destination.statusLabel}
+              </option>
+            ))}
+          </select>
+          <button
+            aria-label="실행 기기 새로고침"
+            className="icon-button"
+            disabled={busy || destinationsLoading}
+            type="button"
+            onClick={() => void refreshDestinations()}
+          >
+            {destinationsLoading ? <LoaderCircle className="spin" size={12} /> : <RotateCcw size={12} />}
+          </button>
+        </div>
+        <small className="project-simulator-hint">
+          기기 목록은 페어링·Developer Mode·개발 터널 상태를 표시합니다. 프로젝트 Signing은 실기기 빌드할 때 별도로 확인합니다.
+        </small>
         <div className="project-simulator-meta">
+          <code className={taskSource ? 'task-source' : undefined}>
+            <GitBranch size={10} />
+            {taskSource ? `${taskSource.branchName ?? '작업 브랜치'} · 작업본` : '원본 저장소'}
+          </code>
           <code>{adapter.scheme} · {adapter.configuration}</code>
           {session?.deviceName && <code>{session.deviceName}</code>}
           {session?.bundleIdentifier && <code>{session.bundleIdentifier}</code>}
@@ -1422,27 +1658,39 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         <button
           className="primary-button"
           type="button"
-          disabled={busy}
-          onClick={() => void run(bridge.launchProjectSimulator)}
+          disabled={busy || !selectedDestinationId}
+          onClick={() => void run(() => taskSource
+            ? bridge.launchTaskSimulator(taskSource.taskId!, selectedDestinationId)
+            : bridge.launchProjectSimulator(project.id, selectedDestinationId))}
         >
           {busy && ['preparing', 'booting', 'building', 'installing'].includes(session?.status ?? '')
             ? <LoaderCircle className="spin" size={13} />
             : <Play size={13} />}
           {session?.status === 'running' ? '다시 빌드·실행' : '빌드·실행'}
         </button>
+        {taskSource && (
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={busy || !selectedDestinationId}
+            onClick={() => void run(() => bridge.launchProjectSimulator(project.id, selectedDestinationId))}
+          >
+            <GitBranch size={13} /> 원본으로 실행
+          </button>
+        )}
         <button
           className="secondary-button"
           type="button"
           disabled={busy || !installed}
-          onClick={() => void run(bridge.restartProjectSimulator)}
+          onClick={() => void run(() => bridge.restartProjectSimulator(project.id))}
         >
           <RotateCcw size={13} /> 재실행
         </button>
         <button
           className="secondary-button danger"
           type="button"
-          disabled={busy || !installed || session?.status === 'stopped'}
-          onClick={() => void run(bridge.stopProjectSimulator)}
+          disabled={busy || !canStop || session?.status === 'stopped'}
+          onClick={() => void run(() => bridge.stopProjectSimulator(project.id))}
         >
           <Square size={12} /> 종료
         </button>
@@ -1859,7 +2107,7 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <code>{task.branchName ?? '—'}</code>
             <time>{timeAgo(task.updatedAt)}</time>
             <div className="row-actions">
-              {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
+              {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
               {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
               {(task.status === 'awaiting_merge' || isAwaitingLocalPublicationSync(task)) && <button title={isAwaitingLocalPublicationSync(task) ? '로컬 동기화 다시 시도' : 'PR 상태 확인'} onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
@@ -2265,6 +2513,168 @@ function SourceControlGroup({
   )
 }
 
+function catalogDefaultSelection(catalog: CodexModelCatalog): CodexModelSelection {
+  const model = catalog.models.find((candidate) => candidate.id === catalog.defaultModelId) ?? catalog.models[0]
+  return { model: model.id, reasoningEffort: model.defaultReasoningEffort }
+}
+
+function cloneModelProfile(profile?: CodexModelProfile | null): CodexModelProfile {
+  return profile
+    ? {
+        ...profile,
+        executionMode: codexExecutionMode(profile),
+        selection: profile.selection ? { ...profile.selection } : null,
+        roleSelections: Object.fromEntries(
+          Object.entries(profile.roleSelections).map(([role, selection]) => [role, { ...selection }])
+        )
+      }
+    : { ...RECOMMENDED_CODEX_MODEL_PROFILE, roleSelections: {} }
+}
+
+function modelProfileSummary(profile: CodexModelProfile | null | undefined, catalog: CodexModelCatalog | null): string {
+  const execution = codexExecutionMode(profile) === 'root-subagents' ? '루트 + 서브에이전트 · ' : ''
+  if (!profile || profile.mode === 'recommended') {
+    if (!catalog) return `${execution}Codex 추천 기본값`
+    const selection = catalogDefaultSelection(catalog)
+    return `${execution}Codex 추천 · ${selection.model} · ${selection.reasoningEffort}`
+  }
+  if (profile.mode === 'single') return `${execution}${profile.selection?.model ?? '모델 미선택'} · ${profile.selection?.reasoningEffort ?? '-'}`
+  return `${execution}역할별 모델 · 기본 ${profile.selection?.model ?? '미선택'}`
+}
+
+function CodexModelSelectionEditor({
+  catalog,
+  selection,
+  onChange,
+  label,
+  allowInherited = false
+}: {
+  catalog: CodexModelCatalog
+  selection: CodexModelSelection | null
+  onChange: (selection: CodexModelSelection | null) => void
+  label: string
+  allowInherited?: boolean
+}): React.JSX.Element {
+  const model = selection ? catalog.models.find((candidate) => candidate.id === selection.model) : null
+  return (
+    <div className="codex-model-selection">
+      <label>
+        <span>{label}</span>
+        <select value={selection?.model ?? ''} onChange={(event) => {
+          if (!event.target.value) {
+            onChange(null)
+            return
+          }
+          const selectedModel = catalog.models.find((candidate) => candidate.id === event.target.value)!
+          onChange({ model: selectedModel.id, reasoningEffort: selectedModel.defaultReasoningEffort })
+        }}>
+          {allowInherited && <option value="">기본 모델 사용</option>}
+          {catalog.models.map((candidate) => (
+            <option value={candidate.id} key={candidate.id}>{candidate.displayName}{candidate.isDefault ? ' · 추천' : ''}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>추론 강도</span>
+        <select
+          disabled={!selection || !model}
+          value={selection?.reasoningEffort ?? ''}
+          onChange={(event) => selection && onChange({ ...selection, reasoningEffort: event.target.value as CodexModelSelection['reasoningEffort'] })}
+        >
+          {!selection && <option value="">기본값 상속</option>}
+          {model?.supportedReasoningEfforts.map((effort) => (
+            <option value={effort.reasoningEffort} key={effort.reasoningEffort}>{effort.reasoningEffort}</option>
+          ))}
+        </select>
+      </label>
+      {model?.description && <small>{model.description}</small>}
+    </div>
+  )
+}
+
+function CodexModelProfileEditor({
+  catalog,
+  profile,
+  onChange
+}: {
+  catalog: CodexModelCatalog
+  profile: CodexModelProfile
+  onChange: (profile: CodexModelProfile) => void
+}): React.JSX.Element {
+  const defaultSelection = profile.selection ?? catalogDefaultSelection(catalog)
+  const setMode = (mode: CodexModelProfile['mode']): void => {
+    onChange({
+      ...profile,
+      mode,
+      selection: mode === 'recommended' ? null : defaultSelection,
+      roleSelections: mode === 'role-based' ? profile.roleSelections : {}
+    })
+  }
+  return (
+    <div className="codex-model-profile-editor">
+      <label>
+        <span>실행 구조</span>
+        <select
+          value={codexExecutionMode(profile)}
+          onChange={(event) => onChange({
+            ...profile,
+            executionMode: event.target.value as NonNullable<CodexModelProfile['executionMode']>
+          })}
+        >
+          <option value="independent">역할별 독립 실행</option>
+          <option value="root-subagents">루트 + 서브에이전트</option>
+        </select>
+        <small>{codexExecutionMode(profile) === 'root-subagents'
+          ? '계획 모델이 각 역할을 한 명씩 위임합니다. 생성·완료 기록과 자식의 최종 응답을 확인하며, 확인할 수 없으면 중단합니다. 토큰 사용량이 늘어날 수 있습니다.'
+          : '각 역할을 선택한 모델로 바로 실행합니다. 가장 단순하고 토큰 사용량이 적습니다.'}</small>
+      </label>
+      <label>
+        <span>모델 사용 방식</span>
+        <select value={profile.mode} onChange={(event) => setMode(event.target.value as CodexModelProfile['mode'])}>
+          <option value="recommended">Codex 추천 기본값</option>
+          <option value="single">모든 단계 같은 모델</option>
+          <option value="role-based">역할별 모델</option>
+        </select>
+      </label>
+      {profile.mode === 'recommended' && (
+        <div className="codex-model-recommended">
+          <Bot size={15} />
+          <div><strong>{modelProfileSummary(profile, catalog)}</strong><small>Codex가 추천 모델을 바꾸면 새 작업부터 자동으로 따라갑니다.</small></div>
+        </div>
+      )}
+      {profile.mode !== 'recommended' && (
+        <CodexModelSelectionEditor
+          catalog={catalog}
+          selection={defaultSelection}
+          label={profile.mode === 'single' ? '모든 단계 모델' : '역할 기본 모델'}
+          onChange={(selection) => onChange({ ...profile, selection })}
+        />
+      )}
+      {profile.mode === 'role-based' && (
+        <div className="codex-role-models">
+          {CODEX_MODEL_ROLES.map((role) => (
+            <CodexModelSelectionEditor
+              allowInherited
+              catalog={catalog}
+              key={role}
+              label={codexExecutionMode(profile) === 'root-subagents' && role === 'planning'
+                ? 'Root · 계획·조정'
+                : CODEX_MODEL_ROLE_LABELS[role]}
+              selection={profile.roleSelections[role] ?? null}
+              onChange={(selection) => {
+                const roleSelections = { ...profile.roleSelections }
+                if (selection) roleSelections[role] = selection
+                else delete roleSelections[role]
+                onChange({ ...profile, roleSelections })
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProjectsPage({
   project,
   runtimeDiscovery,
@@ -2293,6 +2703,9 @@ function ProjectsPage({
   const [testCommand, setTestCommand] = useState(project.testCommand)
   const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
   const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
+  const [modelProfile, setModelProfile] = useState<CodexModelProfile>(() => cloneModelProfile(project.modelProfile))
+  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalog | null>(null)
+  const [modelCatalogError, setModelCatalogError] = useState<string | null>(null)
   const [runtimeEnvironment, setRuntimeEnvironment] = useState<ProjectRuntimeEnvironmentEntry[]>([])
   const [environmentKey, setEnvironmentKey] = useState('')
   const [environmentLabel, setEnvironmentLabel] = useState('')
@@ -2308,7 +2721,16 @@ function ProjectsPage({
     setTestCommand(project.testCommand)
     setRuntimeAdapter(project.runtimeAdapter)
     setPublishStrategy(project.publishStrategy ?? 'pull-request')
+    setModelProfile(cloneModelProfile(project.modelProfile))
   }, [project])
+  useEffect(() => {
+    let active = true
+    setModelCatalogError(null)
+    void bridge.listCodexModels()
+      .then((catalog) => { if (active) setModelCatalog(catalog) })
+      .catch((error) => { if (active) setModelCatalogError(String(error).replace(/^Error:\s*/, '')) })
+    return () => { active = false }
+  }, [project.id])
   useEffect(() => {
     let active = true
     void bridge.listProjectRuntimeEnvironment(project.id)
@@ -2379,7 +2801,7 @@ function ProjectsPage({
       )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
-        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter, publishStrategy })
+        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter, publishStrategy, modelProfile })
       }}>
         <div className="setting-icon"><Settings2 size={18} /></div>
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -2395,6 +2817,24 @@ function ProjectsPage({
           </select>
           <small>새 작업에 기본 적용됩니다. 작업을 등록할 때마다 바꿀 수 있습니다.</small>
         </label>
+        <section className="runtime-settings codex-model-settings">
+          <div className="runtime-settings-heading">
+            <div>
+              <strong>AI 모델</strong>
+              <small>새 작업의 테크스펙·테스트 설계·구현·검토 단계에 적용됩니다.</small>
+            </div>
+            <button className="text-button" type="button" onClick={() => {
+              setModelCatalogError(null)
+              void bridge.listCodexModels(true)
+                .then(setModelCatalog)
+                .catch((error) => setModelCatalogError(String(error).replace(/^Error:\s*/, '')))
+            }}><RotateCcw size={12} />목록 새로고침</button>
+          </div>
+          {modelCatalog
+            ? <CodexModelProfileEditor catalog={modelCatalog} profile={modelProfile} onChange={setModelProfile} />
+            : <p className="empty-copy"><LoaderCircle className="spin" size={12} />Codex 모델을 확인하고 있습니다.</p>}
+          {modelCatalogError && <p className="tech-spec-error" role="alert">{modelCatalogError}</p>}
+        </section>
         <section className="runtime-settings" id="ios-runtime-settings">
           <div className="runtime-settings-heading">
             <div>
@@ -2818,6 +3258,10 @@ function TaskModal({
 }): React.JSX.Element {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [overrideModelProfile, setOverrideModelProfile] = useState(false)
+  const [modelProfile, setModelProfile] = useState<CodexModelProfile>(() => cloneModelProfile(project.modelProfile))
+  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalog | null>(null)
+  const [modelCatalogError, setModelCatalogError] = useState<string | null>(null)
   const [useTechSpec, setUseTechSpec] = useState(false)
   const [techSpec, setTechSpec] = useState<GeneratedTechSpec | null>(null)
   const [techSpecApproved, setTechSpecApproved] = useState(false)
@@ -2844,9 +3288,10 @@ function TaskModal({
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [configuredEnvironmentKeys, setConfiguredEnvironmentKeys] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
+  const taskModelProfile = overrideModelProfile ? modelProfile : undefined
   const usesTests = mode === 'project-tests' || mode === 'both'
   const usesRuntime = mode === 'simulator-runtime' || mode === 'both'
-  const requirementsKey = `${title}\u0000${prompt}`
+  const requirementsKey = `${title}\u0000${prompt}\u0000${overrideModelProfile ? JSON.stringify(modelProfile) : 'project-default'}`
   const techSpecStale = Boolean(techSpec && techSpecSource !== requirementsKey)
   const techSpecReady = Boolean(useTechSpec && techSpec && techSpecApproved && !techSpecStale)
   const approvedTechSpec = techSpecReady && techSpec
@@ -2865,6 +3310,13 @@ function TaskModal({
     }).catch(() => undefined)
     return () => { active = false }
   }, [project.id])
+  useEffect(() => {
+    let active = true
+    void bridge.listCodexModels()
+      .then((catalog) => { if (active) setModelCatalog(catalog) })
+      .catch((error) => { if (active) setModelCatalogError(String(error).replace(/^Error:\s*/, '')) })
+    return () => { active = false }
+  }, [project.id])
 
   const invalidateDownstreamPlanning = (): void => {
     setGenerated(null)
@@ -2876,7 +3328,7 @@ function TaskModal({
     setTechSpecLoading(true)
     setTechSpecError(null)
     try {
-      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt })
+      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt, modelProfile: taskModelProfile })
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
       setTechSpecApproved(false)
@@ -2905,7 +3357,8 @@ function TaskModal({
           markdown: techSpec.markdown,
           openQuestions: techSpec.openQuestions
         },
-        feedback: techSpecFeedback
+        feedback: techSpecFeedback,
+        modelProfile: taskModelProfile
       })
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
@@ -2940,7 +3393,8 @@ function TaskModal({
         projectId: project.id,
         title,
         prompt,
-        techSpec: approvedTechSpec
+        techSpec: approvedTechSpec,
+        modelProfile: taskModelProfile
       })
       setMode(result.plan.mode)
       setTestDesign(result.plan.testDesign)
@@ -2962,7 +3416,8 @@ function TaskModal({
         projectId: project.id,
         title,
         prompt,
-        techSpec: approvedTechSpec
+        techSpec: approvedTechSpec,
+        modelProfile: taskModelProfile
       }))
     } catch (error) {
       setGenerationError(String(error).replace(/^Error:\s*/, ''))
@@ -3040,7 +3495,8 @@ function TaskModal({
         runtimeScenarioSummary: usesRuntime && runtimeSource === 'task-scenario' ? generated?.summary ?? null : null,
         techSpec: approvedTechSpec,
         verificationPlan: { version: 1, mode, testDesign, runtimeSource },
-        publishStrategy
+        publishStrategy,
+        modelProfile: taskModelProfile
       })
     } finally {
       setSubmitting(false)
@@ -3051,6 +3507,33 @@ function TaskModal({
       <form className="modal-form" onSubmit={(event) => void submit(event)}>
         <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
         <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <section className={`task-model-selector${overrideModelProfile ? ' enabled' : ''}`}>
+          <label className="tech-spec-toggle">
+            <input
+              type="checkbox"
+              checked={overrideModelProfile}
+              onChange={(event) => {
+                setOverrideModelProfile(event.target.checked)
+                setTechSpecApproved(false)
+                invalidateDownstreamPlanning()
+              }}
+            />
+            <Bot size={15} />
+            <span>
+              <strong>이 작업만 AI 모델 변경</strong>
+              <small>{overrideModelProfile ? modelProfileSummary(modelProfile, modelCatalog) : `프로젝트 설정 사용 · ${modelProfileSummary(project.modelProfile, modelCatalog)}`}</small>
+            </span>
+          </label>
+          {overrideModelProfile && modelCatalog && (
+            <CodexModelProfileEditor catalog={modelCatalog} profile={modelProfile} onChange={(profile) => {
+              setModelProfile(profile)
+              setTechSpecApproved(false)
+              invalidateDownstreamPlanning()
+            }} />
+          )}
+          {overrideModelProfile && !modelCatalog && !modelCatalogError && <p className="empty-copy"><LoaderCircle className="spin" size={12} />Codex 모델을 확인하고 있습니다.</p>}
+          {modelCatalogError && <p className="tech-spec-error" role="alert">{modelCatalogError}</p>}
+        </section>
         <section className={`tech-spec-builder${useTechSpec ? ' enabled' : ''}`}>
           <label className="tech-spec-toggle">
             <input
@@ -3351,6 +3834,17 @@ function TaskModal({
                           ))}
                         </div>
                       )}
+                      {Object.keys(scenario.preconditions.launchVariables ?? {}).length > 0 && (
+                        <div className="scenario-environment-requirements">
+                          <p>자동 적용할 UI 테스트 fixture</p>
+                          {Object.entries(scenario.preconditions.launchVariables ?? {}).map(([name, value]) => (
+                            <span className="ready" key={`${scenario.id}-${name}`}>
+                              <CheckCircle2 size={12} />
+                              <code>{name}</code> = <code>{value || '(빈 값)'}</code>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="scenario-list">
                         {scenario.steps.map((step, stepIndex) => step.kind === 'action' ? (
                           <div className="scenario-row" key={`${scenario.id}-step-${stepIndex}`}>
@@ -3473,7 +3967,7 @@ function SearchModal({
     const normalized = query.trim().toLowerCase()
     const matches = (value: string): boolean => !normalized || value.toLowerCase().includes(normalized)
     return {
-      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.techSpec?.markdown ?? ''} ${task.status}`)).slice(0, 6),
+      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.techSpec?.markdown ?? ''} ${(task.revisionRequests ?? []).map((request) => request.instruction).join(' ')} ${task.status}`)).slice(0, 6),
       notes: snapshot.notes.filter((note) => matches(`${note.title} ${note.body}`)).slice(0, 5),
       events: snapshot.events.filter((event) => matches(`${event.actor} ${event.message} ${event.kind}`)).slice(0, 5)
     }
@@ -3506,9 +4000,19 @@ function TaskDrawer({
   evidence,
   onClose,
   onRun,
+  onContinue,
+  onUpdateRevision,
+  onCancelRevision,
+  onMoveRevision,
+  onSetRevisionQueuePaused,
+  onRunNextRevision,
   onRetryVerification,
+  onRegenerateRuntimeScenario,
+  canLaunchSimulator,
+  onLaunchSimulator,
   onAction,
   onOpenPath,
+  onOpenXcode,
   onOpenEvidence
 }: {
   task: TaskRecord
@@ -3518,9 +4022,19 @@ function TaskDrawer({
   evidence: RuntimeEvidenceRecord[]
   onClose: () => void
   onRun: (task: TaskRecord) => void
+  onContinue: (task: TaskRecord, instruction: string) => Promise<void>
+  onUpdateRevision: (task: TaskRecord, requestId: string, instruction: string) => Promise<void>
+  onCancelRevision: (task: TaskRecord, requestId: string) => Promise<void>
+  onMoveRevision: (task: TaskRecord, requestId: string, direction: 'up' | 'down') => Promise<void>
+  onSetRevisionQueuePaused: (task: TaskRecord, paused: boolean) => Promise<void>
+  onRunNextRevision: (task: TaskRecord) => Promise<void>
   onRetryVerification: (task: TaskRecord) => void
+  onRegenerateRuntimeScenario: (task: TaskRecord) => void
+  canLaunchSimulator: boolean
+  onLaunchSimulator: (task: TaskRecord, destinationId: string) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
+  onOpenXcode: () => void
   onOpenEvidence: (path: string) => void
 }): React.JSX.Element {
   const runtimeReport = buildRuntimeTaskReport(evidence, events)
@@ -3537,17 +4051,291 @@ function TaskDrawer({
     ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
     : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
+  const pendingRevisionRequests = (task.revisionRequests ?? []).filter((request) => !request.appliedAt && !request.cancelledAt)
+  const hasPendingRevisionRequest = pendingRevisionRequests.length > 0
+  const processingRevisionRequestId = isActiveTask(task)
+    ? pendingRevisionRequests.find((request) => request.startedAt)?.id ?? null
+    : null
+  const queuedRevisionCount = pendingRevisionRequests.filter((request) => request.id !== processingRevisionRequestId).length
+  const mutableRevisionRequests = pendingRevisionRequests.filter((request) => request.id !== processingRevisionRequestId)
+  const mutableRevisionRequestIds = mutableRevisionRequests.map((request) => request.id)
+  const canContinueTask = (isActiveTask(task) || ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) &&
+    Boolean(task.worktreePath) &&
+    !awaitingLocalPublicationSync
+  const [revisionInstruction, setRevisionInstruction] = useState('')
+  const [revisionSubmitting, setRevisionSubmitting] = useState(false)
+  const [editingRevisionId, setEditingRevisionId] = useState<string | null>(null)
+  const [editingRevisionInstruction, setEditingRevisionInstruction] = useState('')
+  const [revisionActionBusy, setRevisionActionBusy] = useState<string | null>(null)
+  const canLaunchTaskApp = canLaunchSimulator && Boolean(task.worktreePath) && !['queued', 'running', 'testing'].includes(task.status)
+  const [taskDestinations, setTaskDestinations] = useState<ProjectRunDestination[]>([])
+  const [taskDestinationId, setTaskDestinationId] = useState('')
+  const [taskDestinationsLoading, setTaskDestinationsLoading] = useState(canLaunchTaskApp)
+  const [taskDestinationError, setTaskDestinationError] = useState(false)
+  useEffect(() => {
+    let active = true
+    setTaskDestinations([])
+    setTaskDestinationId('')
+    setTaskDestinationsLoading(canLaunchTaskApp)
+    setTaskDestinationError(false)
+    if (canLaunchTaskApp) {
+      void bridge.listProjectRunDestinations(task.projectId)
+        .then((destinations) => {
+          if (!active) return
+          setTaskDestinations(destinations)
+          setTaskDestinationId(initialRunDestination(destinations))
+        })
+        .catch(() => {
+          if (active) setTaskDestinationError(true)
+        })
+        .finally(() => {
+          if (active) setTaskDestinationsLoading(false)
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [canLaunchTaskApp, task.id, task.projectId])
+  useEffect(() => {
+    setEditingRevisionId(null)
+    setEditingRevisionInstruction('')
+    setRevisionActionBusy(null)
+  }, [task.id])
+  const refreshTaskDestinations = async (): Promise<void> => {
+    setTaskDestinationsLoading(true)
+    setTaskDestinationError(false)
+    try {
+      const destinations = await bridge.listProjectRunDestinations(task.projectId, true)
+      setTaskDestinations(destinations)
+      setTaskDestinationId((current) => initialRunDestination(destinations, current))
+    } catch {
+      setTaskDestinationError(true)
+    } finally {
+      setTaskDestinationsLoading(false)
+    }
+  }
   const runtimeReportOutcome = runtimeReport?.recovered
     ? '복구 후 통과'
     : runtimeReport
       ? RUNTIME_REPORT_OUTCOME_LABELS[runtimeReport.latestOutcome]
       : null
+  const submitRevisionRequest = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+    const instruction = revisionInstruction.trim()
+    if (instruction.length < 5 || revisionSubmitting) return
+    setRevisionSubmitting(true)
+    try {
+      await onContinue(task, instruction)
+      setRevisionInstruction('')
+    } catch {
+      // 상위 컴포넌트가 사용자에게 오류를 표시하며 입력은 재시도를 위해 유지합니다.
+    } finally {
+      setRevisionSubmitting(false)
+    }
+  }
+  const updateRevisionRequest = async (requestId: string): Promise<void> => {
+    const instruction = editingRevisionInstruction.trim()
+    if (instruction.length < 5 || revisionActionBusy) return
+    setRevisionActionBusy(`update:${requestId}`)
+    try {
+      await onUpdateRevision(task, requestId, instruction)
+      setEditingRevisionId(null)
+      setEditingRevisionInstruction('')
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const cancelRevisionRequest = async (requestId: string, instruction: string): Promise<void> => {
+    if (revisionActionBusy || !window.confirm(`다음 추가 수정 요청을 취소할까요?\n\n${instruction}`)) return
+    setRevisionActionBusy(`cancel:${requestId}`)
+    try {
+      await onCancelRevision(task, requestId)
+      if (editingRevisionId === requestId) {
+        setEditingRevisionId(null)
+        setEditingRevisionInstruction('')
+      }
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const moveRevisionRequest = async (requestId: string, direction: 'up' | 'down'): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy(`move:${requestId}`)
+    try {
+      await onMoveRevision(task, requestId, direction)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const setRevisionQueuePaused = async (paused: boolean): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy('pause')
+    try {
+      await onSetRevisionQueuePaused(task, paused)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
+  const runNextRevisionRequest = async (): Promise<void> => {
+    if (revisionActionBusy) return
+    setRevisionActionBusy('run-next')
+    try {
+      await onRunNextRevision(task)
+    } finally {
+      setRevisionActionBusy(null)
+    }
+  }
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        <section className="task-model-plan">
+          <div className="drawer-section-title"><strong>AI 모델</strong><span>{task.modelPlan ? '요청 설정 · 등록 시 고정됨' : 'Codex 추천 기본값'}</span></div>
+          {task.modelPlan ? (
+            <>
+            <div className={`task-model-execution ${codexExecutionMode(task.modelPlan)}`}>
+              <Bot size={14} />
+              <div>
+                <strong>{codexExecutionMode(task.modelPlan) === 'root-subagents' ? '루트 + 서브에이전트' : '역할별 독립 실행'}</strong>
+                <small>{codexExecutionMode(task.modelPlan) === 'root-subagents'
+                  ? `${task.modelPlan.roles.planning.model} 루트가 각 역할을 한 명씩 위임합니다.`
+                  : '각 역할 모델이 해당 단계를 직접 실행합니다.'}</small>
+              </div>
+            </div>
+            <div className="task-model-plan-grid">
+              {CODEX_MODEL_ROLES.map((role) => (
+                <div key={role}><span>{codexExecutionMode(task.modelPlan) === 'root-subagents' && role === 'planning' ? 'Root · 계획·조정' : CODEX_MODEL_ROLE_LABELS[role]}</span><code>{task.modelPlan!.roles[role].model}</code><small>{task.modelPlan!.roles[role].reasoningEffort}</small></div>
+              ))}
+            </div>
+            </>
+          ) : <p>이 작업은 모델 고정 기능이 추가되기 전에 만들어져 실행 시점의 Codex 추천 모델을 사용합니다.</p>}
+        </section>
+        {(canContinueTask || (task.revisionRequests?.length ?? 0) > 0) && (
+          <section className="task-revision-request">
+            <div className="drawer-section-title">
+              <strong>추가 수정 큐</strong>
+              <span>
+                {task.revisionQueuePaused && hasPendingRevisionRequest ? '자동 실행 일시정지 · ' : ''}
+                {processingRevisionRequestId ? '반영 중 1 · ' : ''}
+                {queuedRevisionCount > 0 ? `대기 ${queuedRevisionCount}` : processingRevisionRequestId ? '다음 요청 없음' : '같은 작업에서 계속'}
+              </span>
+            </div>
+            <p>{isActiveTask(task)
+              ? '현재 단계는 그대로 실행합니다. 지금 추가한 요청은 큐에서 기다렸다가 같은 worktree와 브랜치의 다음 실행에서 순서대로 반영합니다.'
+              : canContinueTask
+                ? '실행 결과에서 새 문제를 발견했다면 현재 worktree와 브랜치를 유지한 채 수정·검증을 다시 진행할 수 있습니다.'
+                : hasPendingRevisionRequest
+                  ? '실행이 멈춰 미완료 요청을 보존했습니다. 환경이나 실패 원인을 해결한 뒤 실행하면 선두 요청부터 이어갑니다.'
+                  : '이 작업에서 반영하고 검증한 추가 수정 내역입니다.'}</p>
+            {hasPendingRevisionRequest && (
+              <div className="revision-queue-toolbar">
+                {task.revisionQueuePaused ? (
+                  <>
+                    {!isActiveTask(task) && (
+                      <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void runNextRevisionRequest()}>
+                        <StepForward size={12} />다음 요청 하나 실행
+                      </button>
+                    )}
+                    <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void setRevisionQueuePaused(false)}>
+                      <Play size={12} />자동 실행 재개
+                    </button>
+                  </>
+                ) : (
+                  <button className="secondary-button" disabled={Boolean(revisionActionBusy)} onClick={() => void setRevisionQueuePaused(true)}>
+                    <Pause size={12} />{isActiveTask(task) ? '현재 요청 후 일시정지' : '자동 실행 일시정지'}
+                  </button>
+                )}
+              </div>
+            )}
+            {(task.revisionRequests?.length ?? 0) > 0 && (
+              <details>
+                <summary>추가 수정 내역 {task.revisionRequests!.length}개</summary>
+                <ol>
+                  {task.revisionRequests!.map((request, index) => {
+                    const isProcessing = request.id === processingRevisionRequestId
+                    const isMutable = !request.appliedAt && !request.cancelledAt && !isProcessing
+                    const mutableIndex = mutableRevisionRequestIds.indexOf(request.id)
+                    const elapsed = request.appliedAt ? shortElapsed(request.startedAt, request.appliedAt) : null
+                    return (
+                      <li className={request.cancelledAt ? 'is-cancelled' : ''} key={request.id}>
+                        {editingRevisionId === request.id ? (
+                          <div className="revision-request-editor">
+                            <textarea
+                              aria-label={`추가 수정 요청 ${index + 1} 내용`}
+                              maxLength={5_000}
+                              rows={3}
+                              value={editingRevisionInstruction}
+                              onChange={(event) => setEditingRevisionInstruction(event.target.value)}
+                            />
+                            <div>
+                              <button aria-label={`추가 수정 요청 ${index + 1} 수정 취소`} className="icon-button" onClick={() => setEditingRevisionId(null)}><X size={11} /></button>
+                              <button aria-label={`추가 수정 요청 ${index + 1} 저장`} className="icon-button" disabled={editingRevisionInstruction.trim().length < 5 || Boolean(revisionActionBusy)} onClick={() => void updateRevisionRequest(request.id)}><Check size={11} /></button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="revision-request-row">
+                            <span>{request.instruction}</span>
+                            {isMutable && (
+                              <div className="revision-request-actions">
+                                <button aria-label={`추가 수정 요청 ${index + 1} 위로 이동`} className="icon-button" disabled={mutableIndex <= 0 || Boolean(revisionActionBusy)} onClick={() => void moveRevisionRequest(request.id, 'up')}><ArrowUp size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 아래로 이동`} className="icon-button" disabled={mutableIndex < 0 || mutableIndex >= mutableRevisionRequestIds.length - 1 || Boolean(revisionActionBusy)} onClick={() => void moveRevisionRequest(request.id, 'down')}><ArrowDown size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 수정`} className="icon-button" disabled={Boolean(revisionActionBusy)} onClick={() => {
+                                  setEditingRevisionId(request.id)
+                                  setEditingRevisionInstruction(request.instruction)
+                                }}><Pencil size={11} /></button>
+                                <button aria-label={`추가 수정 요청 ${index + 1} 취소`} className="icon-button danger" disabled={Boolean(revisionActionBusy)} onClick={() => void cancelRevisionRequest(request.id, request.instruction)}><Trash2 size={11} /></button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <time className={isProcessing ? 'is-processing' : !request.appliedAt && !request.cancelledAt ? 'is-queued' : ''}>
+                          {request.cancelledAt
+                            ? `${timeAgo(request.cancelledAt)} 취소됨`
+                            : request.appliedAt
+                              ? `${timeAgo(request.appliedAt)} 검증 완료${elapsed ? ` · ${elapsed}` : ''}`
+                              : isProcessing
+                                ? '현재 반영 중'
+                                : request.lastFailureAt
+                                  ? '실패 후 재개 대기'
+                                  : request.startedAt
+                                    ? '재개 대기'
+                                    : '큐 대기'}
+                        </time>
+                        {(request.resultSummary || request.lastFailureMessage) && (
+                          <small className={request.lastFailureMessage ? 'revision-request-failure' : 'revision-request-result'}>
+                            {request.lastFailureMessage ?? request.resultSummary}
+                          </small>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ol>
+              </details>
+            )}
+            {canContinueTask && <form onSubmit={(event) => void submitRevisionRequest(event)}>
+              <label htmlFor={`task-revision-${task.id}`}>추가로 수정할 내용</label>
+              <textarea
+                id={`task-revision-${task.id}`}
+                maxLength={5_000}
+                placeholder="예: 메인 스레드 경고가 발생합니다. 원인을 수정하고 기존 검증을 다시 실행해 주세요."
+                rows={4}
+                value={revisionInstruction}
+                onChange={(event) => setRevisionInstruction(event.target.value)}
+              />
+              <div>
+                <small>{isActiveTask(task)
+                  ? '현재 실행 다음에 시작 · 입력 순서 유지 · 실패 시 큐 보존'
+                  : '같은 브랜치 · 구현 · 기존 검증 · Reviewer · 다시 승인 대기'}</small>
+                <button className="primary-button" disabled={revisionInstruction.trim().length < 5 || revisionSubmitting} type="submit">
+                  {revisionSubmitting ? <LoaderCircle className="spin" size={13} /> : <MessageSquare size={13} />}
+                  {revisionSubmitting ? '요청 등록 중' : isActiveTask(task) ? '큐에 추가' : '요청하고 작업 이어가기'}
+                </button>
+              </div>
+            </form>}
+          </section>
+        )}
         {task.techSpec && (
           <section className="approved-tech-spec">
             <div className="drawer-section-title"><strong>승인된 테크스펙</strong><span>revision {task.techSpec.revision}</span></div>
@@ -3717,9 +4505,20 @@ function TaskDrawer({
         )}
         <section className="drawer-events"><div className="drawer-section-title"><strong>실시간 로그</strong><span>{events.length}개</span></div>{events.length === 0 && <p className="empty-copy">아직 실행 로그가 없습니다.</p>}{events.map((event) => { const Icon = eventIcon(event.kind); return <div key={event.id}><span><Icon size={12} /></span><p><strong>{event.actor}</strong>{event.message}</p><time>{timeAgo(event.createdAt)}</time></div> })}</section>
         {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && (
-          <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}`}>
-            <ShieldCheck size={14} />
-            <p><strong>{task.status === 'awaiting_manual_validation' ? '사람의 직접 검증이 필요합니다' : '안전한 원격 게시'}</strong>{task.status === 'awaiting_manual_validation' ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 게시하거나 폐기하세요.' : '원격 최신 상태를 반영하고 fast-forward 가능한 경우에만 게시합니다.'}</p>
+          <div className={`approval-notice${task.status === 'awaiting_manual_validation' ? ' manual' : ''}${hasPendingRevisionRequest ? ' revision-pending' : ''}`}>
+            {hasPendingRevisionRequest ? <AlertTriangle size={14} /> : <ShieldCheck size={14} />}
+            <p>
+              <strong>{hasPendingRevisionRequest
+                ? `추가 수정 요청 ${pendingRevisionRequests.length}개가 남았습니다`
+                : task.status === 'awaiting_manual_validation'
+                  ? '사람의 직접 검증이 필요합니다'
+                  : '안전한 원격 게시'}</strong>
+              {hasPendingRevisionRequest
+                ? '대기 요청을 실행하거나 취소한 뒤 게시할 수 있습니다. 위의 추가 수정 큐에서 순서와 자동 실행 상태를 확인하세요.'
+                : task.status === 'awaiting_manual_validation'
+                  ? '자동 통과로 판정하지 않았습니다. 변경을 직접 확인한 뒤 게시하거나 폐기하세요.'
+                  : '원격 최신 상태를 반영하고 fast-forward 가능한 경우에만 게시합니다.'}
+            </p>
           </div>
         )}
         {task.status === 'blocked_environment' && (
@@ -3728,14 +4527,60 @@ function TaskDrawer({
             <p><strong>코드 문제가 아니라 검증 환경을 먼저 준비해야 합니다</strong>현재 변경과 작업공간은 그대로 보관했습니다. 프로젝트 설정의 환경 준비 명령을 확인한 뒤 구현을 다시 시키지 않고 검증만 재실행할 수 있습니다.</p>
           </div>
         )}
+        {task.status === 'blocked_agent' && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>Codex를 다시 사용할 수 있을 때 이어서 실행하세요</strong>제품 코드 실패가 아니라 AI 제공자 요청이 중단된 상태입니다. 현재 변경과 작업공간은 보존했으며, 실행을 누르면 Implementer 단계부터 다시 이어갑니다.</p>
+          </div>
+        )}
+        {task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>Reviewer 지적을 다음 구현에 반영할 수 있습니다</strong>실행을 누르면 기존 작업공간을 유지한 채 미해결 지적을 Implementer에 전달하고 테스트부터 Reviewer까지 다시 진행합니다.</p>
+          </div>
+        )}
+        {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>{task.runtimeContract.version === 1 ? '이전 Simulator 시나리오를 최신화할 수 있습니다' : '검증 시나리오를 다시 만들 수 있습니다'}</strong>실행할 수 없는 환경값이나 순간적인 상태로 막힌 경우, 현재 코드와 IDE에 등록된 환경을 기준으로 재생성합니다.</p>
+          </div>
+        )}
         </div>
         <footer>
+          {canLaunchTaskApp && (
+            <div className="task-device-launch">
+              <select
+                aria-label="작업 브랜치 앱 실행 기기"
+                disabled={taskDestinationsLoading}
+                value={taskDestinationId}
+                onChange={(event) => setTaskDestinationId(event.target.value)}
+              >
+                {taskDestinations.length === 0 && <option value="">{taskDestinationsLoading ? '기기 찾는 중' : taskDestinationError ? '기기 조회 실패' : '사용 가능한 기기 없음'}</option>}
+                {taskDestinations.map((destination) => (
+                  <option disabled={!destination.available} key={destination.id} value={destination.id}>
+                    {destination.name} · {destination.kind === 'simulator' ? 'Simulator' : '실기기'} · {destination.statusLabel}
+                  </option>
+                ))}
+              </select>
+              <button
+                aria-label="작업 실행 기기 새로고침"
+                className="icon-button"
+                disabled={taskDestinationsLoading}
+                onClick={() => void refreshTaskDestinations()}
+              >
+                {taskDestinationsLoading ? <LoaderCircle className="spin" size={13} /> : <RotateCcw size={13} />}
+              </button>
+              <button className="secondary-button" disabled={!taskDestinationId || taskDestinationsLoading} onClick={() => onLaunchSimulator(task, taskDestinationId)}><SquareTerminal size={14} />작업본 실행</button>
+            </div>
+          )}
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
-          {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
-          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
-          {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
+          {canLaunchSimulator && task.worktreePath && <button className="secondary-button" onClick={onOpenXcode}><SquareTerminal size={14} />Xcode로 열기</button>}
+          {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
+          {(['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) || (task.status === 'blocked_environment' && hasPendingRevisionRequest)) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'blocked_environment' && hasPendingRevisionRequest ? '환경 준비 후 수정 계속' : task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}
+          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && !hasPendingRevisionRequest && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
+          {['failed', 'stopped', 'blocked_environment', 'blocked_agent'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>{!hasPendingRevisionRequest && <button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button>}</>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}
           {task.status === 'awaiting_merge' && !awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
           {awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />로컬 동기화 다시 시도</button>}

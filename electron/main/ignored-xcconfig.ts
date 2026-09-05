@@ -57,6 +57,10 @@ async function listIgnoredXcconfigPaths(repositoryRoot: string): Promise<string[
     .sort((left, right) => left.localeCompare(right))
 }
 
+export async function hasIgnoredXcconfigFiles(repositoryRoot: string): Promise<boolean> {
+  return (await listIgnoredXcconfigPaths(repositoryRoot)).length > 0
+}
+
 async function isIgnoredInWorktree(worktreeRoot: string, path: string): Promise<boolean> {
   try {
     await execFileAsync('git', ['check-ignore', '--quiet', '--', path], {

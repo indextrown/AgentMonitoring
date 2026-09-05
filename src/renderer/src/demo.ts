@@ -2,6 +2,8 @@ import {
   AGENT_MONITORING_BRIDGE_VERSION,
   type AgentMonitoringBridge,
   type CodexAuthStatus,
+  type CodexModelCatalog,
+  type CodexReasoningEffort,
   type DashboardSnapshot,
   type EventKind,
   type EventRecord,
@@ -14,21 +16,55 @@ import {
   type TaskStatus
 } from '../../shared/types'
 import { createVerificationResult, updateVerificationStep } from '../../shared/domain'
+import { resolveCodexModelPlan } from '../../shared/codex-models'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const secondaryProjectId = '22222222-2222-4222-8222-222222222222'
 const simulatorListeners = new Set<(session: ProjectSimulatorSession) => void>()
 const demoSimulatorSessions = new Map<string, ProjectSimulatorSession>()
+const demoReasoningEfforts: CodexReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+const demoModelCatalog: CodexModelCatalog = {
+  defaultModelId: 'gpt-5.6-sol',
+  loadedAt: new Date().toISOString(),
+  models: [
+    {
+      id: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6-Sol',
+      description: '안정적인 기본 코딩 모델',
+      supportedReasoningEfforts: demoReasoningEfforts.map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+      defaultReasoningEffort: 'low',
+      inputModalities: ['text', 'image'],
+      isDefault: true,
+      upgrade: null
+    },
+    {
+      id: 'gpt-5.6-terra',
+      displayName: 'GPT-5.6-Terra',
+      description: '속도와 품질의 균형을 맞춘 모델',
+      supportedReasoningEfforts: demoReasoningEfforts.map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+      defaultReasoningEffort: 'medium',
+      inputModalities: ['text', 'image'],
+      isDefault: false,
+      upgrade: null
+    }
+  ]
+}
 
 function demoSimulatorSession(requestedProjectId: string): ProjectSimulatorSession {
   return demoSimulatorSessions.get(requestedProjectId) ?? {
     projectId: requestedProjectId,
+    source: {
+      kind: 'project',
+      taskId: null,
+      branchName: null
+    },
     status: 'idle',
+    destinationKind: null,
     deviceId: null,
     deviceName: null,
     bundleIdentifier: null,
     processId: null,
-    message: 'Simulator에서 앱을 실행할 준비가 되었습니다.',
+    message: '실행할 Simulator 또는 실기기를 선택하세요.',
     error: null,
     updatedAt: new Date().toISOString()
   }
@@ -494,6 +530,123 @@ function updateTaskVerification(
   }
 }
 
+const demoActiveTaskIds = new Set<string>()
+const demoRevisionQueueDrains = new Set<string>()
+
+async function executeDemoTask(taskId: string, revisionRequestId?: string): Promise<void> {
+  if (demoActiveTaskIds.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
+  demoActiveTaskIds.add(taskId)
+  if (revisionRequestId) {
+    const startedAt = new Date().toISOString()
+    state = {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === taskId
+        ? {
+            ...task,
+            revisionRequests: (task.revisionRequests ?? []).map((request) => request.id === revisionRequestId
+              ? {
+                  ...request,
+                  updatedAt: startedAt,
+                  startedAt,
+                  lastFailureAt: null,
+                  lastFailureMessage: null,
+                  resultSummary: null
+                }
+              : request),
+            updatedAt: startedAt
+          }
+        : task)
+    }
+  }
+  try {
+    const task = updateTask(taskId, 'running', {
+      branchName: `agentmonitor/demo-${taskId.slice(0, 6)}`,
+      worktreePath: `demo://worktrees/${taskId}`,
+      sourceBranch: 'main',
+      baseCommit: '1111111111111111111111111111111111111111',
+      verificationBaseCommit: '1111111111111111111111111111111111111111'
+    })
+    emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
+    const plan = task.verificationPlan
+    if (plan && plan.mode !== 'manual-review') {
+      updateTaskVerification(taskId, 'environment-setup', 'running', '격리 작업공간의 의존성을 준비하고 있습니다.')
+      emit(task, 'environment_started', 'environment', '격리 작업공간 환경 준비 시작')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+      updateTaskVerification(taskId, 'environment-setup', 'passed', '환경 준비를 완료했습니다.')
+      emit(task, 'environment_passed', 'environment', '격리 작업공간 환경 준비 완료')
+    }
+    if (plan && ['project-tests', 'both'].includes(plan.mode) && !['existing-tests', 'skip'].includes(plan.testDesign)) {
+      updateTaskVerification(taskId, 'test-design', 'running', '테스트 설계 중')
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      updateTaskVerification(taskId, 'test-design', 'passed', '테스트 설계와 비평이 끝났습니다.')
+      emit(task, 'agent', 'test-designer', '테스트 설계 완료')
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
+    if (!plan || ['project-tests', 'both'].includes(plan.mode)) {
+      updateTaskVerification(taskId, 'project-tests', 'passed', '프로젝트 테스트가 모두 통과했습니다.')
+      emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
+    }
+    if (plan && ['simulator-runtime', 'both'].includes(plan.mode)) {
+      updateTaskVerification(taskId, 'simulator-runtime', 'passed', 'Simulator 검증이 통과했습니다.')
+    }
+    updateTaskVerification(taskId, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
+    if (revisionRequestId) {
+      const appliedAt = new Date().toISOString()
+      state = {
+        ...state,
+        tasks: state.tasks.map((item) => {
+          if (item.id !== taskId) return item
+          const revisionRequests = (item.revisionRequests ?? []).map((request) => request.id === revisionRequestId
+            ? {
+                ...request,
+                updatedAt: appliedAt,
+                appliedAt,
+                resultSummary: '구현과 선택된 검증을 완료했습니다.'
+              }
+            : request)
+          return {
+            ...item,
+            revisionRequests,
+            revisionQueuePaused: revisionRequests.some((request) => !request.appliedAt && !request.cancelledAt)
+              ? item.revisionQueuePaused
+              : false,
+            updatedAt: appliedAt
+          }
+        })
+      }
+    }
+    updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
+    emit(task, 'agent', 'reviewer', '최종 검토가 끝났습니다. 승인을 기다립니다.')
+  } finally {
+    demoActiveTaskIds.delete(taskId)
+    scheduleDemoRevisionQueue(taskId)
+  }
+}
+
+function scheduleDemoRevisionQueue(taskId: string): void {
+  if (demoActiveTaskIds.has(taskId) || demoRevisionQueueDrains.has(taskId)) return
+  const task = state.tasks.find((item) => item.id === taskId)
+  if (!task || !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return
+  if (task.revisionQueuePaused) return
+  if (!(task?.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) return
+  demoRevisionQueueDrains.add(taskId)
+  void drainDemoRevisionQueue(taskId).then((shouldRecheck) => {
+    demoRevisionQueueDrains.delete(taskId)
+    if (shouldRecheck) scheduleDemoRevisionQueue(taskId)
+  })
+}
+
+async function drainDemoRevisionQueue(taskId: string): Promise<boolean> {
+  while (true) {
+    const task = state.tasks.find((item) => item.id === taskId)
+    if (task?.revisionQueuePaused) return false
+    const nextRequest = task?.revisionRequests?.find((request) => !request.appliedAt && !request.cancelledAt)
+    if (!nextRequest) return true
+    if (!task || !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return false
+    await executeDemoTask(taskId, nextRequest.id)
+  }
+}
+
 export const demoBridge: AgentMonitoringBridge = {
   apiVersion: AGENT_MONITORING_BRIDGE_VERSION,
   getCodexAuth: async () => demoAuth,
@@ -509,6 +662,7 @@ export const demoBridge: AgentMonitoringBridge = {
   },
   cancelCodexLogin: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
   logoutCodex: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
+  listCodexModels: async () => demoModelCatalog,
   getSnapshot: async (requestedProjectId?: string) => {
     const selectedProject = state.projects.find((project) => project.id === requestedProjectId) ?? state.projects[0]
     if (!selectedProject) {
@@ -570,7 +724,8 @@ export const demoBridge: AgentMonitoringBridge = {
               ? 'manifest'
               : 'detected'
             : null,
-          publishStrategy: input.publishStrategy ?? project.publishStrategy ?? 'pull-request'
+          publishStrategy: input.publishStrategy ?? project.publishStrategy ?? 'pull-request',
+          modelProfile: input.modelProfile === undefined ? project.modelProfile : input.modelProfile
         }
         return updated
       })
@@ -815,25 +970,99 @@ export const demoBridge: AgentMonitoringBridge = {
     return sourceControlStatus(requestedProjectId)
   },
   getProjectSimulatorStatus: async (requestedProjectId) => demoSimulatorSession(requestedProjectId),
-  launchProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
-    status: 'running',
-    deviceId: 'DEMO-IPHONE-UDID',
-    deviceName: 'iPhone 16 Pro',
-    bundleIdentifier: 'com.example.Demo',
-    processId: 4242,
-    message: 'iPhone 16 Pro에서 앱을 실행하고 있습니다.',
-    error: null
-  }),
+  listProjectRunDestinations: async (requestedProjectId) => {
+    const project = state.projects.find((item) => item.id === requestedProjectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    return [
+      {
+        id: `simulator:DEMO-${family.toUpperCase()}-UDID`,
+        name: family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch',
+        kind: 'simulator' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.4',
+        available: true,
+        statusLabel: '사용 가능',
+        detail: 'Simulator · iOS 26.4 · 종료됨'
+      },
+      {
+        id: `physical:DEMO-PHYSICAL-${family.toUpperCase()}-UDID`,
+        name: `테스트 ${familyLabel}`,
+        kind: 'physical' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.3',
+        available: true,
+        statusLabel: '연결됨',
+        detail: '실기기 · iOS 26.3 · 연결됨'
+      },
+      {
+        id: `physical:DEMO-OFFLINE-${family.toUpperCase()}-UDID`,
+        name: `오프라인 ${familyLabel}`,
+        kind: 'physical' as const,
+        deviceFamily: family,
+        osVersion: 'iOS 26.2',
+        available: false,
+        statusLabel: '개발 터널 연결 필요',
+        detail: '실기기 · iOS 26.2 · 개발 터널 연결 필요'
+      }
+    ]
+  },
+  launchProjectSimulator: async (requestedProjectId, destinationId) => {
+    const project = state.projects.find((item) => item.id === requestedProjectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    const physical = destinationId?.startsWith('physical:') ?? false
+    const deviceName = physical ? `테스트 ${familyLabel}` : family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch'
+    return updateDemoSimulator(requestedProjectId, {
+      source: {
+        kind: 'project',
+        taskId: null,
+        branchName: null
+      },
+      status: 'running',
+      destinationKind: physical ? 'physical' : 'simulator',
+      deviceId: physical ? `DEMO-PHYSICAL-${family.toUpperCase()}-UDID` : `DEMO-${family.toUpperCase()}-UDID`,
+      deviceName,
+      bundleIdentifier: 'com.example.Demo',
+      processId: 4242,
+      message: `${deviceName}에서 앱을 실행하고 있습니다.`,
+      error: null
+    })
+  },
+  launchTaskSimulator: async (taskId, destinationId) => {
+    const task = state.tasks.find((item) => item.id === taskId)
+    if (!task?.worktreePath) throw new Error('이 작업의 격리 작업공간이 없습니다.')
+    const project = state.projects.find((item) => item.id === task.projectId)
+    const family = project?.runtimeAdapter?.deviceFamily ?? 'iphone'
+    const familyLabel = family === 'iphone' ? 'iPhone' : 'iPad'
+    const physical = destinationId?.startsWith('physical:') ?? false
+    const deviceName = physical ? `테스트 ${familyLabel}` : family === 'iphone' ? 'iPhone 16 Pro' : 'iPad Pro 13-inch'
+    return updateDemoSimulator(task.projectId, {
+      source: {
+        kind: 'task-worktree',
+        taskId: task.id,
+        branchName: task.branchName
+      },
+      status: 'running',
+      destinationKind: physical ? 'physical' : 'simulator',
+      deviceId: physical ? `DEMO-PHYSICAL-${family.toUpperCase()}-UDID` : `DEMO-${family.toUpperCase()}-UDID`,
+      deviceName,
+      bundleIdentifier: 'com.example.Demo',
+      processId: 4242,
+      message: `작업 브랜치 앱을 ${deviceName}에서 실행하고 있습니다.`,
+      error: null
+    })
+  },
   restartProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
     status: 'running',
     processId: 4243,
-    message: 'iPhone 16 Pro에서 앱을 다시 실행했습니다.',
+    message: `${demoSimulatorSession(requestedProjectId).deviceName ?? 'iOS 기기'}에서 앱을 다시 실행했습니다.`,
     error: null
   }),
   stopProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
     status: 'stopped',
     processId: null,
-    message: 'iPhone 16 Pro에서 앱을 종료했습니다.',
+    message: `${demoSimulatorSession(requestedProjectId).deviceName ?? 'iOS 기기'}에서 앱을 종료했습니다.`,
     error: null
   }),
   generateTechSpec: async (input) => ({
@@ -962,6 +1191,12 @@ export const demoBridge: AgentMonitoringBridge = {
       prompt: input.prompt,
       status: 'queued',
       provider: 'codex',
+      modelPlan: resolveCodexModelPlan(
+        demoModelCatalog,
+        input.modelProfile ?? state.projects.find((project) => project.id === input.projectId)?.modelProfile,
+        input.modelProfile ? 'task' : state.projects.find((project) => project.id === input.projectId)?.modelProfile ? 'project' : 'codex-recommended',
+        now
+      ),
       maxAttempts: input.maxAttempts,
       attempt: 0,
       branchName: null,
@@ -984,6 +1219,40 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(task, 'task_created', 'human', `${task.title} 작업 등록`)
     return task
   },
+  regenerateTaskRuntimeScenario: async (taskId) => {
+    const current = state.tasks.find((task) => task.id === taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if (!current.runtimeContract || current.runtimeContract.version === 2) return current
+    const legacy = current.runtimeContract
+    const steps = [
+      ...legacy.runtimeScenario.actions.map((action) => ({ kind: 'action' as const, action })),
+      ...(legacy.runtimeScenario.assertions.length > 0
+        ? [{ kind: 'assert' as const, assertions: legacy.runtimeScenario.assertions }]
+        : [])
+    ]
+    const updated: TaskRecord = {
+      ...current,
+      runtimeContract: {
+        version: 2,
+        adapter: legacy.adapter,
+        capabilities: legacy.capabilities,
+        environmentRequirements: [],
+        runtimeScenarios: {
+          cases: [{
+            id: 'demo-updated-scenario',
+            name: '최신화된 데모 시나리오',
+            preconditions: { permissions: legacy.runtimeScenario.permissions ?? [] },
+            steps
+          }]
+        }
+      },
+      runtimeScenarioSummary: '독립 케이스와 단계별 체크포인트를 사용하는 최신 시나리오',
+      runtimeScenarioApprovedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === taskId ? updated : task) }
+    return updated
+  },
   getTaskChanges: async (taskId) => {
     const task = state.tasks.find((item) => item.id === taskId)
     const available = Boolean(task?.worktreePath)
@@ -1003,40 +1272,124 @@ export const demoBridge: AgentMonitoringBridge = {
       truncated: false
     }
   },
-  runTask: async (taskId) => {
-    const task = updateTask(taskId, 'running', {
-      branchName: `agentmonitor/demo-${taskId.slice(0, 6)}`,
-      worktreePath: `demo://worktrees/${taskId}`,
-      sourceBranch: 'main',
-      baseCommit: '1111111111111111111111111111111111111111',
-      verificationBaseCommit: '1111111111111111111111111111111111111111'
-    })
-    emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
-    const plan = task.verificationPlan
-    if (plan && plan.mode !== 'manual-review') {
-      updateTaskVerification(taskId, 'environment-setup', 'running', '격리 작업공간의 의존성을 준비하고 있습니다.')
-      emit(task, 'environment_started', 'environment', '격리 작업공간 환경 준비 시작')
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
-      updateTaskVerification(taskId, 'environment-setup', 'passed', '환경 준비를 완료했습니다.')
-      emit(task, 'environment_passed', 'environment', '격리 작업공간 환경 준비 완료')
+  runTask: executeDemoTask,
+  continueTask: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if (!demoActiveTaskIds.has(current.id) && !['awaiting_approval', 'awaiting_manual_validation'].includes(current.status)) {
+      throw new Error('실행 중이거나 승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
     }
-    if (plan && ['project-tests', 'both'].includes(plan.mode) && !['existing-tests', 'skip'].includes(plan.testDesign)) {
-      updateTaskVerification(taskId, 'test-design', 'running', '테스트 설계 중')
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
-      updateTaskVerification(taskId, 'test-design', 'passed', '테스트 설계와 비평이 끝났습니다.')
-      emit(task, 'agent', 'test-designer', '테스트 설계 완료')
+    if (!current.worktreePath) throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
+    const instruction = input.instruction.trim()
+    const requests = current.revisionRequests ?? []
+    const now = new Date().toISOString()
+    const nextRequests = requests.at(-1)?.instruction === instruction && !requests.at(-1)?.appliedAt && !requests.at(-1)?.cancelledAt
+      ? requests
+      : [...requests, {
+          id: crypto.randomUUID(),
+          instruction,
+          createdAt: now,
+          updatedAt: now,
+          startedAt: null,
+          appliedAt: null,
+          cancelledAt: null,
+          lastFailureAt: null,
+          lastFailureMessage: null,
+          resultSummary: null
+        }]
+    const updated: TaskRecord = {
+      ...current,
+      publication: null,
+      revisionRequests: nextRequests,
+      updatedAt: new Date().toISOString()
     }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 450))
-    if (!plan || ['project-tests', 'both'].includes(plan.mode)) {
-      updateTaskVerification(taskId, 'project-tests', 'passed', '프로젝트 테스트가 모두 통과했습니다.')
-      emit(task, 'test_passed', 'test-runner', '프로젝트 테스트가 모두 통과했습니다.')
+    state = { ...state, tasks: state.tasks.map((task) => task.id === input.taskId ? updated : task) }
+    if (nextRequests.length !== requests.length) {
+      emit(updated, 'task_revision_requested', 'human', `추가 수정 큐 등록: ${instruction}`)
     }
-    if (plan && ['simulator-runtime', 'both'].includes(plan.mode)) {
-      updateTaskVerification(taskId, 'simulator-runtime', 'passed', 'Simulator 검증이 통과했습니다.')
+    scheduleDemoRevisionQueue(input.taskId)
+  },
+  updateTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const request = current.revisionRequests?.find((item) => item.id === input.requestId)
+    if (!request || request.appliedAt || request.cancelledAt) throw new Error('대기 중인 추가 요청만 수정할 수 있습니다.')
+    const activeRequest = current.revisionRequests?.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === request.id) throw new Error('현재 반영 중인 요청은 수정할 수 없습니다.')
+    const now = new Date().toISOString()
+    const updated = {
+      ...current,
+      revisionRequests: current.revisionRequests?.map((item) => item.id === input.requestId
+        ? { ...item, instruction: input.instruction.trim(), updatedAt: now }
+        : item),
+      updatedAt: now
     }
-    updateTaskVerification(taskId, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
-    updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
-    emit(task, 'agent', 'reviewer', '최종 검토가 끝났습니다. 승인을 기다립니다.')
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_updated', 'human', `추가 수정 요청 변경: ${input.instruction.trim()}`)
+    return updated
+  },
+  cancelTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const request = current.revisionRequests?.find((item) => item.id === input.requestId)
+    if (!request || request.appliedAt || request.cancelledAt) throw new Error('대기 중인 추가 요청만 취소할 수 있습니다.')
+    const activeRequest = current.revisionRequests?.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === request.id) throw new Error('현재 반영 중인 요청은 취소할 수 없습니다.')
+    const now = new Date().toISOString()
+    const revisionRequests = current.revisionRequests?.map((item) => item.id === input.requestId
+      ? { ...item, updatedAt: now, cancelledAt: now, resultSummary: '사용자가 추가 실행을 취소했습니다.' }
+      : item)
+    const updated = {
+      ...current,
+      revisionRequests,
+      revisionQueuePaused: revisionRequests?.some((item) => !item.appliedAt && !item.cancelledAt)
+        ? current.revisionQueuePaused
+        : false,
+      updatedAt: now
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_cancelled', 'human', `추가 수정 요청 취소: ${request.instruction}`)
+    scheduleDemoRevisionQueue(current.id)
+    return updated
+  },
+  moveTaskRevisionRequest: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const requests = [...(current.revisionRequests ?? [])]
+    const activeRequest = requests.find((item) => !item.appliedAt && !item.cancelledAt)
+    if (demoActiveTaskIds.has(current.id) && activeRequest?.id === input.requestId) throw new Error('현재 반영 중인 요청은 이동할 수 없습니다.')
+    const movableIndexes = requests.map((request, index) => ({ request, index }))
+      .filter(({ request }) => !request.appliedAt && !request.cancelledAt && request.id !== (demoActiveTaskIds.has(current.id) ? activeRequest?.id : null))
+    const position = movableIndexes.findIndex(({ request }) => request.id === input.requestId)
+    if (position < 0) throw new Error('이동할 대기 요청을 찾을 수 없습니다.')
+    const targetPosition = input.direction === 'up' ? position - 1 : position + 1
+    if (targetPosition >= 0 && targetPosition < movableIndexes.length) {
+      const sourceIndex = movableIndexes[position].index
+      const targetIndex = movableIndexes[targetPosition].index
+      ;[requests[sourceIndex], requests[targetIndex]] = [requests[targetIndex], requests[sourceIndex]]
+    }
+    const updated = { ...current, revisionRequests: requests, updatedAt: new Date().toISOString() }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, 'task_revision_reordered', 'human', '추가 수정 큐 실행 순서 변경')
+    return updated
+  },
+  setTaskRevisionQueuePaused: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    const updated = { ...current, revisionQueuePaused: input.paused, updatedAt: new Date().toISOString() }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === current.id ? updated : task) }
+    emit(updated, input.paused ? 'task_revision_queue_paused' : 'task_revision_queue_resumed', 'human', input.paused ? '추가 수정 큐 자동 실행 일시정지' : '추가 수정 큐 자동 실행 재개')
+    if (!input.paused) scheduleDemoRevisionQueue(current.id)
+    return updated
+  },
+  runNextTaskRevision: async (taskId) => {
+    const current = state.tasks.find((task) => task.id === taskId)
+    const nextRequest = current?.revisionRequests?.find((request) => !request.appliedAt && !request.cancelledAt)
+    if (!current || !nextRequest) throw new Error('실행할 추가 수정 요청이 없습니다.')
+    if (!current.revisionQueuePaused) {
+      throw new Error('추가 수정 큐를 일시정지한 뒤 한 건만 실행할 수 있습니다.')
+    }
+    await executeDemoTask(taskId, nextRequest.id)
   },
   retryTaskVerification: async (taskId) => {
     const task = updateTask(taskId, 'running')
@@ -1057,6 +1410,9 @@ export const demoBridge: AgentMonitoringBridge = {
   approveTask: async (taskId) => {
     const current = state.tasks.find((task) => task.id === taskId)
     if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if ((current.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
+      throw new Error('큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.')
+    }
     if ((current.publishStrategy ?? 'pull-request') === 'pull-request') {
       const publication = {
         strategy: 'pull-request' as const,
@@ -1186,6 +1542,7 @@ export const demoBridge: AgentMonitoringBridge = {
     state = { ...state, notes: state.notes.filter((item) => item.id !== noteId) }
     emit(null, 'note_deleted', 'human', `${note.title} 메모 삭제`)
   },
+  openTaskInXcode: async () => undefined,
   openPath: async () => undefined,
   openExternalUrl: async () => undefined,
   openFeedback: async () => undefined,

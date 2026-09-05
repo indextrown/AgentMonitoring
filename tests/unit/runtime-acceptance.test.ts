@@ -178,6 +178,34 @@ describe('runtime acceptance', () => {
     expect(summarizeRuntimeAcceptance(report)).toContain('runtime acceptance 0/3 통과 · 실패:')
   })
 
+  it('uses one exact accessibility label when SwiftUI does not expose an identifier', () => {
+    const accessibilityContent = JSON.stringify({
+      schemaVersion: 1,
+      root: {
+        identifier: 'root',
+        label: '',
+        children: [{
+          identifier: '',
+          label: 'Mapbox 토큰이 필요해요',
+          enabled: true,
+          selected: false,
+          children: []
+        }]
+      }
+    })
+
+    const report = evaluateRuntimeAcceptance([
+      {
+        kind: 'accessibility',
+        identifier: 'Mapbox 토큰이 필요해요',
+        property: 'exists',
+        expected: true
+      }
+    ], launchResult({ accessibilityContent }))
+
+    expect(report).toMatchObject({ passed: true, assertionCount: 1, passedCount: 1 })
+  })
+
   it('stores a bounded JSON report inside the task evidence directory', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-acceptance-'))
     temporaryDirectories.push(directory)

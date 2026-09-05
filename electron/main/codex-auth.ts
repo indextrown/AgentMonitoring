@@ -5,7 +5,12 @@ import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import type { CodexAuthStatus } from '../../src/shared/types'
+import type {
+  CodexAuthStatus,
+  CodexModelCatalog,
+  CodexModelOption,
+  CodexReasoningEffort
+} from '../../src/shared/types'
 
 type JsonObject = Record<string, unknown>
 
@@ -31,6 +36,10 @@ const AUTH_ARGUMENTS = [
   'model_provider="openai"'
 ] as const
 const execFileAsync = promisify(execFile)
+const MODEL_CATALOG_TTL_MS = 5 * 60_000
+const REASONING_EFFORTS = new Set<CodexReasoningEffort>([
+  'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
+])
 
 function asObject(value: unknown): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -43,6 +52,51 @@ function errorMessage(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Codex 요청에 실패했습니다.'
   const message = (value as JsonObject).message
   return typeof message === 'string' ? message : 'Codex 요청에 실패했습니다.'
+}
+
+function modelCatalogFromResult(result: JsonObject): CodexModelCatalog {
+  const data = Array.isArray(result.data) ? result.data : []
+  const models = data.flatMap((value): CodexModelOption[] => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+    const item = value as JsonObject
+    if (item.hidden === true) return []
+    const id = typeof item.id === 'string' ? item.id : typeof item.model === 'string' ? item.model : null
+    const defaultReasoningEffort = item.defaultReasoningEffort
+    if (!id || typeof defaultReasoningEffort !== 'string' || !REASONING_EFFORTS.has(defaultReasoningEffort as CodexReasoningEffort)) return []
+    const efforts = Array.isArray(item.supportedReasoningEfforts)
+      ? item.supportedReasoningEfforts.flatMap((option): CodexModelOption['supportedReasoningEfforts'] => {
+          if (!option || typeof option !== 'object' || Array.isArray(option)) return []
+          const record = option as JsonObject
+          const effort = record.reasoningEffort
+          if (typeof effort !== 'string' || !REASONING_EFFORTS.has(effort as CodexReasoningEffort)) return []
+          return [{
+            reasoningEffort: effort as CodexReasoningEffort,
+            description: typeof record.description === 'string' ? record.description : ''
+          }]
+        })
+      : []
+    if (!efforts.some((option) => option.reasoningEffort === defaultReasoningEffort)) return []
+    const inputModalities = Array.isArray(item.inputModalities)
+      ? item.inputModalities.filter((value): value is 'text' | 'image' => value === 'text' || value === 'image')
+      : ['text' as const]
+    return [{
+      id,
+      displayName: typeof item.displayName === 'string' ? item.displayName : id,
+      description: typeof item.description === 'string' ? item.description : '',
+      supportedReasoningEfforts: efforts,
+      defaultReasoningEffort: defaultReasoningEffort as CodexReasoningEffort,
+      inputModalities,
+      isDefault: item.isDefault === true,
+      upgrade: typeof item.upgrade === 'string' ? item.upgrade : null
+    }]
+  })
+  const defaultModel = models.find((model) => model.isDefault) ?? models[0]
+  if (!defaultModel) throw new Error('현재 계정에서 사용할 수 있는 Codex 모델을 찾지 못했습니다.')
+  return {
+    models,
+    defaultModelId: defaultModel.id,
+    loadedAt: new Date().toISOString()
+  }
 }
 
 function codexEnvironment(codexHome: string, codexCommand = 'codex'): NodeJS.ProcessEnv {
@@ -220,6 +274,7 @@ class CodexAppServerSession {
 export class CodexAuthManager {
   private loginSession: CodexAppServerSession | null = null
   private loginId: string | null = null
+  private modelCatalog: CodexModelCatalog | null = null
   private state: CodexAuthStatus = { state: 'checking', authMode: null, email: null, planType: null }
 
   constructor(
@@ -240,6 +295,16 @@ export class CodexAuthManager {
     } catch (error) {
       return this.setState(this.failureStatus(error))
     }
+  }
+
+  async models(forceRefresh = false): Promise<CodexModelCatalog> {
+    const loadedAt = this.modelCatalog ? Date.parse(this.modelCatalog.loadedAt) : 0
+    if (!forceRefresh && this.modelCatalog && Date.now() - loadedAt < MODEL_CATALOG_TTL_MS) {
+      return this.modelCatalog
+    }
+    const result = await this.withSession((session) => session.call('model/list', { limit: 100 }))
+    this.modelCatalog = modelCatalogFromResult(result)
+    return this.modelCatalog
   }
 
   async login(openUrl: (url: string) => Promise<void>): Promise<CodexAuthStatus> {
@@ -274,6 +339,7 @@ export class CodexAuthManager {
         await session.call('account/read', { refreshToken: false })
       )
       if (authenticated.state !== 'signed_in') throw new Error('Codex 로그인 상태를 확인하지 못했습니다.')
+      this.modelCatalog = null
       return this.setState(authenticated)
     } catch (error) {
       this.setState(this.failureStatus(error, 'signed_out'))
@@ -303,6 +369,7 @@ export class CodexAuthManager {
   async logout(): Promise<CodexAuthStatus> {
     await this.cancelLogin()
     await this.withSession((session) => session.call('account/logout', {}))
+    this.modelCatalog = null
     return this.setState({ state: 'signed_out', authMode: null, email: null, planType: null })
   }
 

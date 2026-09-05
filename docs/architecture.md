@@ -27,6 +27,16 @@ Electron main
 Renderer에는 Node.js 권한이 없다. 파일 선택, 외부 경로 열기, 데이터 변경, 프로세스 실행은 preload가 공개한 제한된 IPC를 통해서만 요청한다.
 Sandboxed Electron preload는 패키지 환경에서도 동일하게 로드되도록 CommonJS 진입점으로 빌드하며, 패키지 스모크 테스트가 bridge 연결 신호를 검증한다.
 
+## AI 모델과 위임 확인
+
+프로젝트 기본 모델 프로필은 새 작업을 등록할 때 역할별 모델·추론 강도와 실행 구조로 해석해 작업에 저장한다. 기존 작업은 프로젝트 기본값 변경의 영향을 받지 않는다. 독립 실행에서는 `agents.enabled=false`로 추가 위임을 끄고, 계층형 실행에서는 계획 모델을 루트로 사용하며 역할 모델을 서브에이전트 기본값으로 전달한다. 한 번에 열린 자식 수는 1로 제한하고 프롬프트에서 새 문맥의 기본 에이전트와 재위임 금지를 지정한다.
+
+`CodexDelegationTracker`는 루트의 성공 선언을 위임 증거로 사용하지 않는다. CLI JSONL의 `collab_tool_call`에서 생성과 완료 응답을 확인한다. Codex CLI 0.150.1의 v2 실행은 `SubAgentActivity`를 JSON 출력에서 누락하므로, 앱 전용 Codex 홈에서 현재 root UUIDv7와 자식 UUIDv7에 대응하는 세션 로그를 추가로 읽는다. 해당 날짜 주변 3일의 파일 이름만 탐색하고, 파일 크기·심볼릭 링크·세션 ID를 확인한 뒤 필요한 lifecycle·모델 필드만 메모리에 남긴다. 인증 파일과 다른 세션 본문은 읽지 않으며 로그 원문을 앱 DB에 복제하지 않는다.
+
+위임 누락, 복수 자식, 재위임, 자식 실패·중단, 최종 응답 누락은 `blocked_agent`로 처리한다. 자식 세션의 모델·추론 강도가 고정된 요청 설정과 다를 때도 중단한다. 세션 모델을 제공하지 않는 CLI 이벤트 형식에서는 위임 결과만 확인하므로 UI는 등록 설정과 관측된 모델을 구분한다. 기존 worktree와 수정 큐를 유지하고, Implementer 위임 실패는 구현 시도 횟수를 돌려준다. 성공한 경우 루트 요약 대신 자식의 최종 응답을 Test Designer·Critic·Reviewer 판정에 사용한다.
+
+루트 `turn.failed`는 종료 코드가 0이어도 실패다. 일시적 `error` 뒤에 `turn.completed`가 오면 스트림 재연결에 성공한 것으로 처리한다. 화면 증거가 있는 작업은 새 문맥의 자식에게도 이미지 파일 경로와 열람 지시를 전달한다. Electron bridge 버전이 다르면 재시작을 안내해 이전 main/preload와 새 실행 구조를 섞지 않는다.
+
 ## 프로젝트 준비 상태
 
 작업 이력이 없는 프로젝트를 선택하면 Renderer가 제한된 `project:inspect` IPC를 호출한다. `ProjectInspector`는 Git 명령으로 현재 브랜치, commit, remote, clean/dirty 상태와 tracked 파일 목록을 읽는다. 변경 상태는 폴더 단위로 축약하지 않고 파일별로 수집해 수정·추가·삭제·이름 변경·미추적·충돌로 분류하며, Renderer에는 종류별 개수와 최대 5개의 경로를 제공한다. 파일 확장자와 알려진 manifest 이름만으로 언어·도구·검증 명령 후보를 계산한다.
@@ -103,6 +113,10 @@ awaiting_approval/awaiting_manual_validation → running → testing → awaitin
 
 `running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다. PR 방식은 원격 브랜치를 게시한 뒤 `awaiting_merge`에서 멈추고, GitHub 병합과 로컬 fast-forward를 확인한 뒤 `completed`가 된다. 승인 시 원격 기준 브랜치가 앞서 있으면 작업 브랜치를 재배치한 뒤 검증 상태를 `running`으로 되돌리고 선택한 검증과 Reviewer를 다시 실행한다.
 
+승인 대기 또는 실행 중 사람이 새 문제를 발견하면 `task:continue`가 요청을 `tasks.revision_requests_json`의 FIFO 큐에 누적하고 즉시 반환한다. 원본 목표, 승인된 테크스펙과 runtime 계약은 수정하지 않는다. AgentRunner는 같은 worktree와 브랜치를 재사용하고 실행 시작 시 선두 요청 하나를 고정한다. 그 요청만 Test Designer, Critic, Implementer와 Reviewer에 추가 계약으로 전달하고, 실행 중 들어온 요청은 다음 실행까지 전달하지 않는다. 검증과 Reviewer가 통과하면 처리한 요청만 `appliedAt`으로 완료 처리하고 다음 요청을 자동 실행한다.
+
+환경·Codex·검증 실패 또는 사용자 중단 시 큐 drain을 멈춘다. 처리 중이던 요청과 이후 요청은 그대로 보존하며, 사람이 다시 실행하면 선두 미완료 요청부터 이어간다. 미완료 요청이 있으면 게시 승인을 거부한다. 원격 반영 뒤 로컬 동기화만 남은 작업에는 후속 요청을 허용하지 않는다.
+
 ## 역할과 권한
 
 | 역할 | sandbox | 변경 권한 | 책임 |
@@ -178,11 +192,15 @@ path:   <Electron userData>/worktrees/<project-id>/<task-id>
 
 환경 준비 명령, Codex와 프로젝트 테스트는 worktree를 `cwd`로 사용하며 원본 checkout을 직접 수정하지 않는다. 원본 checkout의 `.build`나 다른 무시 파일을 worktree에 복사하거나 심볼릭 링크하지 않는다. 각 작업공간에서 선언된 준비 명령으로 필요한 외부 의존성을 복원한다.
 
+작업 상세의 Xcode 열기 요청은 renderer에서 파일 경로를 받지 않고 task UUID만 IPC로 전달한다. 메인 프로세스가 저장된 task와 project를 조회하고, 프로젝트에 설정된 `.xcworkspace` 또는 `.xcodeproj`가 task worktree 실경로 안의 일반 디렉터리인지와 필수 marker 파일을 다시 검증한다. 검증된 container만 `/usr/bin/open -a Xcode`로 열기 때문에 원본 checkout이나 worktree 밖의 경로를 작업 화면에서 임의로 열 수 없다.
+
 작업을 만들 때 현재 원본 브랜치와 기준 commit을 `tasks.source_branch`, `tasks.base_commit`에 기록한다. 사용자가 작업 도중 원본에서 새 커밋을 만들어도 어느 브랜치에서 시작한 작업인지 확인할 수 있다.
 
 Renderer의 소스 제어 화면은 원본 checkout에 대해 `git status --porcelain=v1 -z`, staged·working diff, 파일별 `git add`·`git restore --staged`, 전체 stage와 `git commit`을 제공한다. `origin`과 upstream의 ahead·behind 상태를 읽고, 사용자가 요청할 때 `git fetch origin --prune`으로 원격 추적 ref를 갱신한다. 로컬만 앞서면 일반 push하고, 원격만 앞서며 checkout이 깨끗하면 `git merge --ff-only`로 동기화한다. 양쪽이 갈라졌거나 upstream이 `origin`이 아니면 자동 merge·rebase하지 않고 외부 IDE에서 방향을 결정하게 한다. 경로는 현재 status에 포함되고 저장소 안에 있는 파일만 허용한다. Git 작성자 정보는 저장소 로컬 config에만 기록한다. 강제 push, 파일 폐기, hunk 단위 stage, amend와 충돌 해결은 제공하지 않는다.
 
-`ProjectSimulatorService`는 작업 runtime과 별도로 사람이 현재 원본 앱을 빠르게 확인하는 개발 실행 세션을 관리한다. 프로젝트에 저장된 iOS adapter를 사용하며 전체 빌드와 Simulator 부팅 전에 선택한 Scheme의 build settings에서 설치 가능한 iOS 앱 target을 확인한다. Framework나 테스트 Scheme이면 즉시 중단하고 프로젝트 설정에서 앱 Scheme을 다시 선택하도록 안내한다. 사전 검사를 통과하면 원본 checkout을 전용 DerivedData에 빌드하고, 설정된 iPhone 또는 iPad Simulator를 부팅해 앱을 설치·실행한다. 재실행은 설치된 bundle identifier에 `simctl launch --terminate-running-process`만 실행하고, 종료는 해당 앱에만 `simctl terminate`를 호출한다. 프로젝트별 명령은 하나씩만 실행하며 container와 앱 산출물이 각각 저장소와 전용 DerivedData 안에 있는지 확인한다. 빌드 산출물은 설치 직후 삭제하고, 앱 종료 시 추적한 앱 프로세스만 정리하며 Simulator 기기는 종료하지 않는다. 상태 변화는 별도 IPC 이벤트로 Renderer에 전달한다.
+`ProjectSimulatorService`는 작업 runtime과 별도로 사람이 현재 원본 또는 작업 worktree 앱을 빠르게 확인하는 개발 실행 세션을 관리한다. `simctl`에서 사용 가능한 Simulator를, `devicectl`에서 Xcode에 페어링된 USB·네트워크 실기기를 읽어 하나의 실행 대상 목록으로 제공한다. 연결이 끊겼거나 Developer Mode가 꺼진 실기기는 이유와 함께 비활성 상태로 남기며, 목록은 짧게 캐시하고 사용자가 즉시 새로고침할 수 있다.
+
+프로젝트에 저장된 iOS adapter를 사용하며 전체 빌드 전에 선택한 Scheme의 build settings에서 설치 가능한 iOS 앱 target을 확인한다. Framework나 테스트 Scheme이면 즉시 중단하고 프로젝트 설정에서 앱 Scheme을 다시 선택하도록 안내한다. Simulator는 `iphonesimulator` SDK로 빌드해 `simctl install/launch/terminate`를 사용한다. 실기기는 `iphoneos` SDK와 선택한 device id로 빌드하고 `devicectl device install app`, `process launch --terminate-existing`, `process terminate`를 사용한다. 프로젝트별 명령은 하나씩만 실행하며 container와 앱 산출물이 각각 저장소와 전용 DerivedData 안에 있는지 확인한다. 빌드 산출물은 설치 직후 삭제하고, 앱 종료 시 추적한 앱 프로세스만 정리하며 Simulator 기기는 종료하지 않는다. 상태 변화는 별도 IPC 이벤트로 Renderer에 전달한다.
 
 소스 제어 변경 작업과 승인 적용은 프로젝트별 `GitOperationCoordinator`를 공유한다. 같은 프로젝트에서 둘을 동시에 시작하면 두 번째 요청을 거절해 index와 브랜치 상태가 서로 덮이지 않게 한다. 다른 프로젝트의 Git 작업은 서로 막지 않는다.
 

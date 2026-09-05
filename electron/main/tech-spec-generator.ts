@@ -2,7 +2,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import type { GeneratedTechSpec, TaskTechSpecDraft } from '../../src/shared/types'
+import type { CodexModelSelection, GeneratedTechSpec, TaskTechSpecDraft } from '../../src/shared/types'
+import { codexModelArguments } from '../../src/shared/codex-models'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
@@ -59,6 +60,7 @@ export class TechSpecGenerator {
     projectPath: string
     title: string
     prompt: string
+    model?: CodexModelSelection
   }): Promise<GeneratedTechSpec> {
     return this.run({
       ...input,
@@ -85,12 +87,14 @@ export class TechSpecGenerator {
     prompt: string
     current: TaskTechSpecDraft
     feedback: string
+    model?: CodexModelSelection
   }): Promise<GeneratedTechSpec> {
     return this.run({
       projectPath: input.projectPath,
       title: input.title,
       prompt: input.prompt,
       revision: input.current.revision + 1,
+      model: input.model,
       instructions: [
         '당신은 사람이 검토한 테크스펙을 개선하는 읽기 전용 소프트웨어 설계자입니다.',
         `작업 제목: ${input.title}`,
@@ -117,6 +121,7 @@ export class TechSpecGenerator {
     prompt: string
     revision: number
     instructions: string
+    model?: CodexModelSelection
   }): Promise<GeneratedTechSpec> {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), 'agent-monitoring-tech-spec-'))
     const schemaPath = join(temporaryDirectory, 'schema.json')
@@ -128,6 +133,7 @@ export class TechSpecGenerator {
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
           'exec',
+          ...codexModelArguments(input.model),
           '--ephemeral',
           '--sandbox',
           'read-only',

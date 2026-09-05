@@ -7,23 +7,32 @@ import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
   CodexAuthStatus,
+  CodexModelProfile,
+  CodexResolvedModelPlan,
+  ContinueTaskInput,
   CreateTaskInput,
   EventRecord,
   GenerateTechSpecInput,
   GenerateRuntimeScenarioInput,
   DeleteProjectRuntimeEnvironmentInput,
+  MoveTaskRevisionRequestInput,
   ProjectSimulatorSession,
+  ProjectRecord,
   RecommendVerificationPlanInput,
   RefineTechSpecInput,
   SourceControlCommitInput,
   SourceControlDiffInput,
   SourceControlIdentityInput,
   SourceControlPathsInput,
+  SetTaskRevisionQueuePausedInput,
   StorageCleanupInput,
   StoragePolicy,
+  TaskRevisionRequestInput,
   UpsertProjectRuntimeEnvironmentInput,
-  UpdateProjectInput
+  UpdateProjectInput,
+  UpdateTaskRevisionRequestInput
 } from '../../src/shared/types'
+import { resolveCodexModelPlan } from '../../src/shared/codex-models'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
 import { detectProjectSetupCommand } from './project-environment'
@@ -44,9 +53,33 @@ import { VerificationPlanRecommender } from './verification-plan-recommender'
 import { shutdownResources } from './shutdown'
 import { AppStore } from './store'
 import { ProjectRuntimeEnvironmentService } from './runtime-environment'
+import { openTaskInXcode } from './task-xcode'
 
 const execFileAsync = promisify(execFile)
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
+
+const codexModelSelectionSchema = z.object({
+  model: z.string().trim().min(1).max(160),
+  reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+}).strict()
+
+const codexModelProfileSchema = z.object({
+  version: z.literal(1),
+  mode: z.enum(['recommended', 'single', 'role-based']),
+  executionMode: z.enum(['independent', 'root-subagents']).optional(),
+  selection: codexModelSelectionSchema.nullable(),
+  roleSelections: z.object({
+    planning: codexModelSelectionSchema.optional(),
+    'test-designer': codexModelSelectionSchema.optional(),
+    critic: codexModelSelectionSchema.optional(),
+    implementer: codexModelSelectionSchema.optional(),
+    reviewer: codexModelSelectionSchema.optional()
+  }).strict()
+}).strict().superRefine((profile, context) => {
+  if (profile.mode !== 'recommended' && !profile.selection) {
+    context.addIssue({ code: 'custom', path: ['selection'], message: '기본 모델을 선택하세요.' })
+  }
+})
 
 const verificationPlanSchema = z.object({
   version: z.literal(1),
@@ -72,7 +105,8 @@ const createTaskSchema = z.object({
   runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
   techSpec: techSpecDraftSchema.nullable().optional(),
   verificationPlan: verificationPlanSchema,
-  publishStrategy: z.enum(['pull-request', 'direct'])
+  publishStrategy: z.enum(['pull-request', 'direct']),
+  modelProfile: codexModelProfileSchema.optional()
 }).superRefine((input, context) => {
   const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
   const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
@@ -90,13 +124,37 @@ const createTaskSchema = z.object({
   }
 })
 
+const continueTaskSchema = z.object({
+  taskId: z.string().uuid(),
+  instruction: z.string().trim().min(5).max(5_000)
+}).strict()
+
+const taskRevisionRequestSchema = z.object({
+  taskId: z.string().uuid(),
+  requestId: z.string().uuid()
+}).strict()
+
+const updateTaskRevisionRequestSchema = taskRevisionRequestSchema.extend({
+  instruction: z.string().trim().min(5).max(5_000)
+}).strict()
+
+const moveTaskRevisionRequestSchema = taskRevisionRequestSchema.extend({
+  direction: z.enum(['up', 'down'])
+}).strict()
+
+const setTaskRevisionQueuePausedSchema = z.object({
+  taskId: z.string().uuid(),
+  paused: z.boolean()
+}).strict()
+
 const updateProjectSchema = z.object({
   projectId: z.string().uuid(),
   name: z.string().trim().min(1).max(80),
   testCommand: z.string().trim().max(500),
   setupCommand: z.string().trim().max(500),
   runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional(),
-  publishStrategy: z.enum(['pull-request', 'direct']).optional()
+  publishStrategy: z.enum(['pull-request', 'direct']).optional(),
+  modelProfile: codexModelProfileSchema.nullable().optional()
 })
 
 const upsertProjectRuntimeEnvironmentSchema = z.object({
@@ -119,7 +177,8 @@ const generateRuntimeScenarioSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(2).max(120),
   prompt: z.string().trim().min(10).max(20_000),
-  techSpec: techSpecDraftSchema.nullable().optional()
+  techSpec: techSpecDraftSchema.nullable().optional(),
+  modelProfile: codexModelProfileSchema.optional()
 }).strict()
 
 const recommendVerificationPlanSchema = generateRuntimeScenarioSchema
@@ -271,6 +330,20 @@ function requireTechSpecGenerator(): TechSpecGenerator {
   return techSpecGenerator
 }
 
+async function resolveModelPlan(
+  project: ProjectRecord,
+  taskProfile: CodexModelProfile | undefined
+): Promise<CodexResolvedModelPlan> {
+  const hasTaskOverride = taskProfile !== undefined
+  const profile = taskProfile ?? project.modelProfile
+  const source = hasTaskOverride
+    ? 'task'
+    : project.modelProfile
+      ? 'project'
+      : 'codex-recommended'
+  return resolveCodexModelPlan(await requireCodexAuth().models(), profile, source)
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeProjectSimulator = projectSimulator
@@ -344,6 +417,9 @@ function registerIpc(): void {
 
   ipcMain.handle('codex-auth:cancel', () => requireCodexAuth().cancelLogin())
   ipcMain.handle('codex-auth:logout', () => requireCodexAuth().logout())
+  ipcMain.handle('codex-models:list', (_event, refresh = false) =>
+    requireCodexAuth().models(z.boolean().parse(refresh))
+  )
 
   ipcMain.handle('dashboard:snapshot', (_event, projectId?: string) => requireStore().getSnapshot(projectId))
 
@@ -378,8 +454,11 @@ function registerIpc(): void {
     return project
   })
 
-  ipcMain.handle('project:update', (_event, rawInput: UpdateProjectInput) => {
+  ipcMain.handle('project:update', async (_event, rawInput: UpdateProjectInput) => {
     const input = updateProjectSchema.parse(rawInput)
+    if (input.modelProfile) {
+      resolveCodexModelPlan(await requireCodexAuth().models(), input.modelProfile, 'project')
+    }
     return requireStore().updateProject(input)
   })
 
@@ -496,9 +575,46 @@ function registerIpc(): void {
     return requireProjectSimulator().getStatus(requireStore().getProject(validProjectId))
   })
 
-  ipcMain.handle('project-simulator:launch', (_event, projectId: string) => {
+  ipcMain.handle('project-simulator:destinations', (_event, projectId: string, refresh = false) => {
     const validProjectId = z.string().uuid().parse(projectId)
-    return requireProjectSimulator().launch(requireStore().getProject(validProjectId))
+    const validRefresh = z.boolean().parse(refresh)
+    return requireProjectSimulator().listDestinations(requireStore().getProject(validProjectId), validRefresh)
+  })
+
+  ipcMain.handle('project-simulator:launch', (_event, projectId: string, destinationId?: string) => {
+    const validProjectId = z.string().uuid().parse(projectId)
+    const validDestinationId = destinationId === undefined
+      ? undefined
+      : z.string().trim().min(1).max(512).parse(destinationId)
+    return requireProjectSimulator().launch(
+      requireStore().getProject(validProjectId),
+      undefined,
+      validDestinationId
+    )
+  })
+
+  ipcMain.handle('project-simulator:launch-task', (_event, taskId: string, destinationId?: string) => {
+    const validTaskId = z.string().uuid().parse(taskId)
+    const validDestinationId = destinationId === undefined
+      ? undefined
+      : z.string().trim().min(1).max(512).parse(destinationId)
+    const store = requireStore()
+    const task = store.getTask(validTaskId)
+    if (!task.worktreePath) {
+      throw new Error('이 작업의 격리 작업공간이 없어 작업 브랜치 앱을 실행할 수 없습니다.')
+    }
+    if (['queued', 'running', 'testing'].includes(task.status)) {
+      throw new Error('구현이나 검증이 진행 중인 작업은 완료된 뒤 작업 브랜치 앱을 실행하세요.')
+    }
+    const project = store.getProject(task.projectId)
+    return requireProjectSimulator().launch(project, {
+      path: task.worktreePath,
+      source: {
+        kind: 'task-worktree',
+        taskId: task.id,
+        branchName: task.branchName
+      }
+    }, validDestinationId)
   })
 
   ipcMain.handle('project-simulator:restart', (_event, projectId: string) => {
@@ -548,10 +664,12 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('테크스펙을 만들려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireTechSpecGenerator().generate({
       projectPath: project.path,
       title: input.title,
-      prompt: input.prompt
+      prompt: input.prompt,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -560,12 +678,14 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('테크스펙을 개선하려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireTechSpecGenerator().refine({
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
       current: input.current,
-      feedback: input.feedback
+      feedback: input.feedback,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -577,12 +697,17 @@ function registerIpc(): void {
     if (!project.runtimeAdapter) {
       throw new Error('이 프로젝트에서 iOS 실행 설정을 찾지 못했습니다. 프로젝트 설정에서 먼저 등록하세요.')
     }
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireScenarioGenerator().generate({
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
       techSpec: input.techSpec ?? null,
-      adapter: project.runtimeAdapter
+      adapter: project.runtimeAdapter,
+      model: modelPlan.roles.planning,
+      availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
+        .filter((entry) => entry.configured)
+        .map((entry) => entry.key)
     })
   })
 
@@ -591,6 +716,7 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('검증 계획을 추천받으려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireVerificationPlanRecommender().recommend({
       projectPath: project.path,
       title: input.title,
@@ -598,7 +724,8 @@ function registerIpc(): void {
       techSpec: input.techSpec ?? null,
       testCommand: project.testCommand,
       runtimeAvailable: Boolean(project.runtimeAdapter),
-      runtimeConfigSource: project.runtimeConfigSource ?? null
+      runtimeConfigSource: project.runtimeConfigSource ?? null,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -607,9 +734,10 @@ function registerIpc(): void {
     await requireRunner().removeProject(projectId)
   })
 
-  ipcMain.handle('task:create', (_event, rawInput: CreateTaskInput) => {
+  ipcMain.handle('task:create', async (_event, rawInput: CreateTaskInput) => {
     const input = createTaskSchema.parse(rawInput)
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
     const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
     if (usesTests && !project.testCommand.trim()) {
@@ -630,7 +758,8 @@ function registerIpc(): void {
       input.runtimeScenarioSummary ?? null,
       input.verificationPlan,
       input.publishStrategy,
-      input.techSpec ?? null
+      input.techSpec ?? null,
+      modelPlan
     )
   })
 
@@ -639,11 +768,77 @@ function registerIpc(): void {
     return requireRunner().getChanges(taskId)
   })
 
+  ipcMain.handle('task:regenerate-runtime-scenario', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('검증 시나리오를 최신화하려면 먼저 Codex에 로그인하세요.')
+    const store = requireStore()
+    const task = store.getTask(taskId)
+    const project = store.getProject(task.projectId)
+    const adapter = task.runtimeContract?.adapter ?? project.runtimeAdapter
+    if (!adapter) throw new Error('이 프로젝트에서 iOS 실행 설정을 찾지 못했습니다.')
+    const generated = await requireScenarioGenerator().generate({
+      projectPath: task.worktreePath ?? project.path,
+      title: task.title,
+      prompt: task.prompt,
+      techSpec: task.techSpec
+        ? {
+            version: task.techSpec.version,
+            revision: task.techSpec.revision,
+            summary: task.techSpec.summary,
+            markdown: task.techSpec.markdown,
+            openQuestions: task.techSpec.openQuestions
+          }
+        : null,
+      adapter,
+      model: task.modelPlan?.roles.planning,
+      previousContract: task.runtimeContract,
+      availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
+        .filter((entry) => entry.configured)
+        .map((entry) => entry.key)
+    })
+    return store.replaceTaskRuntimeContract(taskId, generated.contract, generated.summary)
+  })
+
   ipcMain.handle('task:run', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
     await requireRunner().run(taskId)
+  })
+
+  ipcMain.handle('task:continue', async (_event, rawInput: ContinueTaskInput) => {
+    const input = continueTaskSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
+    await requireRunner().continueTask(input.taskId, input.instruction)
+  })
+
+  ipcMain.handle('task:revision-update', (_event, rawInput: UpdateTaskRevisionRequestInput) => {
+    const input = updateTaskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().updateTaskRevisionRequest(input.taskId, input.requestId, input.instruction)
+  })
+
+  ipcMain.handle('task:revision-cancel', (_event, rawInput: TaskRevisionRequestInput) => {
+    const input = taskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().cancelTaskRevisionRequest(input.taskId, input.requestId)
+  })
+
+  ipcMain.handle('task:revision-move', (_event, rawInput: MoveTaskRevisionRequestInput) => {
+    const input = moveTaskRevisionRequestSchema.parse(rawInput)
+    return requireRunner().moveTaskRevisionRequest(input.taskId, input.requestId, input.direction)
+  })
+
+  ipcMain.handle('task:revision-queue-pause', (_event, rawInput: SetTaskRevisionQueuePausedInput) => {
+    const input = setTaskRevisionQueuePausedSchema.parse(rawInput)
+    return requireRunner().setTaskRevisionQueuePaused(input.taskId, input.paused)
+  })
+
+  ipcMain.handle('task:revision-run-next', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
+    await requireRunner().runNextTaskRevision(taskId)
   })
 
   ipcMain.handle('task:retry-verification', async (_event, taskId: string) => {
@@ -681,6 +876,13 @@ function registerIpc(): void {
   ipcMain.handle('task:discard', async (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     await requireRunner().discard(taskId)
+  })
+
+  ipcMain.handle('task:open-in-xcode', async (_event, taskId: string) => {
+    const validTaskId = z.string().uuid().parse(taskId)
+    const store = requireStore()
+    const task = store.getTask(validTaskId)
+    await openTaskInXcode(store.getProject(task.projectId), task)
   })
 
   ipcMain.handle('storage:overview', () => requireRunner().getStorageOverview())

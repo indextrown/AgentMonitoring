@@ -20,6 +20,13 @@ const environmentKeySchema = z
   .max(80)
   .regex(/^[a-z][a-z0-9-]*$/, '환경 항목 key는 소문자 kebab-case여야 합니다.')
 
+const runtimeFixtureNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .regex(/^UITEST_[A-Z0-9_]+$/, '시나리오 실행 변수는 UITEST_ 접두사를 사용해야 합니다.')
+
 const runtimeEnvironmentRequirementSchema = z.object({
   key: environmentKeySchema,
   label: z.string().trim().min(1).max(120),
@@ -43,6 +50,7 @@ const runtimeScenarioCaseSchema = z.object({
   preconditions: z.object({
     permissions: z.array(runtimePrivacyPermissionSchema).max(12).optional(),
     requiredEnvironmentKeys: z.array(environmentKeySchema).max(20).optional(),
+    launchVariables: z.record(runtimeFixtureNameSchema, z.string().max(200)).optional(),
     resetAppData: z.boolean().optional()
   }).strict(),
   steps: z.array(runtimeScenarioStepSchema).min(1).max(60)
@@ -162,6 +170,22 @@ export function legacyRuntimeCase(
         : [])
     ]
   }
+}
+
+export function legacyRuntimeContractConflicts(
+  contract: ApprovedRuntimeContractV1
+): string[] {
+  const expectations = new Map<string, Set<string>>()
+  for (const assertion of contract.runtimeScenario.assertions) {
+    if (assertion.kind !== 'accessibility') continue
+    const key = `${assertion.identifier}:${assertion.property}`
+    const values = expectations.get(key) ?? new Set<string>()
+    values.add(JSON.stringify(assertion.expected))
+    expectations.set(key, values)
+  }
+  return [...expectations.entries()]
+    .filter(([, values]) => values.size > 1)
+    .map(([key]) => key)
 }
 
 export function runtimeCaseActions(scenario: RuntimeScenarioCase): ApprovedRuntimeContractV1['runtimeScenario']['actions'] {

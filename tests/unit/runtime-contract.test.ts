@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  legacyRuntimeContractConflicts,
   requiredRuntimeEnvironmentKeys,
   runtimeContractCases,
   taskRuntimeContractSchema
@@ -56,6 +57,23 @@ describe('task runtime contract', () => {
       }
     }
     expect(() => taskRuntimeContractSchema.parse(contract)).toThrow('예상값이 서로 충돌')
+  })
+
+  it('finds contradictory expectations in legacy single-checkpoint contracts', () => {
+    const contract: ApprovedRuntimeContractV1 = {
+      version: 1,
+      adapter,
+      capabilities: { build: true, run: true, observe: ['accessibility'], act: ['ui'], verify: ['runtime-scenario'] },
+      runtimeScenario: {
+        actions: [],
+        assertions: [
+          { kind: 'accessibility', identifier: 'current-location', property: 'enabled', expected: true },
+          { kind: 'accessibility', identifier: 'current-location', property: 'enabled', expected: false }
+        ]
+      }
+    }
+
+    expect(legacyRuntimeContractConflicts(contract)).toEqual(['current-location:enabled'])
   })
 
   it('rejects undeclared environment keys', () => {

@@ -12,6 +12,43 @@ private struct RuntimeUIAction: Decodable {
     let timeoutSeconds: Double
 }
 
+private struct RuntimeAccessibilityAssertion: Decodable {
+    enum Property: String, Decodable {
+        case exists
+        case label
+        case title
+        case value
+        case placeholderValue
+        case elementType
+        case enabled
+        case selected
+    }
+
+    enum Expected: Decodable {
+        case boolean(Bool)
+        case string(String)
+
+        /// JSON의 boolean 또는 string 예상값을 읽습니다.
+        ///
+        /// - Parameter decoder: assertion 예상값을 제공하는 decoder입니다.
+        /// - Throws: 지원하지 않는 JSON 값이면 decoding 오류를 던집니다.
+        init(
+            from decoder: any Decoder
+        ) throws {
+            let container = try decoder.singleValueContainer()
+            if let value = try? container.decode(Bool.self) {
+                self = .boolean(value)
+                return
+            }
+            self = .string(try container.decode(String.self))
+        }
+    }
+
+    let identifier: String
+    let property: Property
+    let expected: Expected
+}
+
 private enum AutomationConfigurationError: LocalizedError {
     case invalidActions
     case tooManyActions
@@ -42,6 +79,7 @@ final class AccessibilitySnapshotTests: XCTestCase {
         )
 
         let actions = try decodeActions(environment: environment)
+        let assertions = try decodeAssertions(environment: environment)
         var results: [[String: Any]] = []
         var failure: [String: Any]?
         for (index, action) in actions.enumerated() {
@@ -67,6 +105,14 @@ final class AccessibilitySnapshotTests: XCTestCase {
                 "identifier": action.identifier,
                 "durationMilliseconds": Date().timeIntervalSince(startedAt) * 1_000
             ])
+        }
+
+        if failure == nil, !assertions.isEmpty {
+            _ = waitForAssertions(
+                assertions,
+                application: application,
+                timeout: 15
+            )
         }
 
         if !actions.isEmpty && failure == nil {
@@ -145,6 +191,88 @@ final class AccessibilitySnapshotTests: XCTestCase {
         return actions
     }
 
+    /// 환경 변수의 승인된 접근성 조건을 안정 상태 대기 목록으로 변환합니다.
+    ///
+    /// - Parameter environment: XCTest process에 전달된 환경 변수입니다.
+    /// - Returns: 최종 접근성 스냅샷 전에 기다릴 assertion 목록입니다.
+    /// - Throws: payload가 없거나 손상되면 decoding 오류를 던집니다.
+    private func decodeAssertions(
+        environment: [String: String]
+    ) throws -> [RuntimeAccessibilityAssertion] {
+        guard
+            let encoded = environment["AGENTMONITOR_ACCESSIBILITY_ASSERTIONS_BASE64"],
+            let data = Data(base64Encoded: encoded)
+        else {
+            throw AutomationConfigurationError.invalidActions
+        }
+        return try JSONDecoder().decode([RuntimeAccessibilityAssertion].self, from: data)
+    }
+
+    /// 승인된 접근성 조건이 모두 충족되거나 제한 시간이 끝날 때까지 UI 갱신을 기다립니다.
+    ///
+    /// - Parameters:
+    ///   - assertions: 안정 상태로 판단할 접근성 조건입니다.
+    ///   - application: 조건을 조회할 실행 중인 앱입니다.
+    ///   - timeout: 기다릴 최대 초입니다.
+    /// - Returns: 제한 시간 안에 모든 조건이 충족됐으면 `true`입니다.
+    @MainActor
+    private func waitForAssertions(
+        _ assertions: [RuntimeAccessibilityAssertion],
+        application: XCUIApplication,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if assertions.allSatisfy({ matches(assertion: $0, application: application) }) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        } while Date() < deadline
+        return assertions.allSatisfy { matches(assertion: $0, application: application) }
+    }
+
+    /// 현재 UI 요소가 하나의 접근성 조건을 만족하는지 확인합니다.
+    ///
+    /// - Parameters:
+    ///   - assertion: 확인할 identifier, 속성, 예상값입니다.
+    ///   - application: 요소를 조회할 실행 중인 앱입니다.
+    /// - Returns: 현재 UI 상태가 예상값과 같으면 `true`입니다.
+    @MainActor
+    private func matches(
+        assertion: RuntimeAccessibilityAssertion,
+        application: XCUIApplication
+    ) -> Bool {
+        let identifierPredicate = NSPredicate(format: "identifier == %@", assertion.identifier)
+        let identifierQuery = application.descendants(matching: .any).matching(identifierPredicate)
+        let labelPredicate = NSPredicate(format: "label == %@", assertion.identifier)
+        let query = identifierQuery.count > 0
+            ? identifierQuery
+            : application.descendants(matching: .any).matching(labelPredicate)
+        let element = query.firstMatch
+        if assertion.property == .exists, case let .boolean(expected) = assertion.expected {
+            return element.exists == expected
+        }
+        guard query.count == 1, element.exists else { return false }
+        switch (assertion.property, assertion.expected) {
+        case let (.enabled, .boolean(expected)):
+            return element.isEnabled == expected
+        case let (.selected, .boolean(expected)):
+            return element.isSelected == expected
+        case let (.label, .string(expected)):
+            return element.label == expected
+        case let (.title, .string(expected)):
+            return element.title == expected
+        case let (.value, .string(expected)):
+            return String(describing: element.value ?? "") == expected
+        case let (.placeholderValue, .string(expected)):
+            return element.placeholderValue == expected
+        case let (.elementType, .string(expected)):
+            return String(describing: element.elementType) == expected
+        default:
+            return false
+        }
+    }
+
     /// 정확히 일치하는 accessibility identifier 요소 하나에 action을 수행합니다.
     ///
     /// - Parameters:
@@ -158,8 +286,12 @@ final class AccessibilitySnapshotTests: XCTestCase {
         index: Int,
         application: XCUIApplication
     ) -> Bool {
-        let predicate = NSPredicate(format: "identifier == %@", action.identifier)
-        let query = application.descendants(matching: .any).matching(predicate)
+        let identifierPredicate = NSPredicate(format: "identifier == %@", action.identifier)
+        let identifierQuery = application.descendants(matching: .any).matching(identifierPredicate)
+        let labelPredicate = NSPredicate(format: "label == %@", action.identifier)
+        let query = identifierQuery.count > 0
+            ? identifierQuery
+            : application.descendants(matching: .any).matching(labelPredicate)
         let element = query.firstMatch
         guard element.waitForExistence(timeout: action.timeoutSeconds) else {
             XCTFail("UI action \(index + 1): identifier '\(action.identifier)' 요소를 찾지 못했습니다.")

@@ -20,12 +20,13 @@ export function isActiveTask(task: TaskRecord): boolean {
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   const transitions: Record<TaskStatus, TaskStatus[]> = {
     queued: ['running', 'stopped', 'discarded'],
-    running: ['testing', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'failed', 'stopped'],
-    testing: ['running', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'failed', 'stopped'],
+    running: ['testing', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'blocked_agent', 'failed', 'stopped'],
+    testing: ['running', 'awaiting_approval', 'awaiting_manual_validation', 'blocked_environment', 'blocked_agent', 'failed', 'stopped'],
     awaiting_approval: ['completed', 'awaiting_merge', 'discarded', 'running'],
     awaiting_manual_validation: ['completed', 'awaiting_merge', 'discarded', 'running'],
     awaiting_merge: ['completed', 'awaiting_approval', 'discarded'],
     blocked_environment: ['running', 'discarded'],
+    blocked_agent: ['running', 'discarded'],
     completed: [],
     failed: ['running', 'discarded'],
     stopped: ['running', 'discarded'],

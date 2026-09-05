@@ -6,7 +6,9 @@ import { parseArgsStringToArgv } from 'string-argv'
 import { z } from 'zod'
 import type {
   ApprovedRuntimeContractV1,
+  CodexModelRole,
   EventRecord,
+  IosRuntimeAdapterConfig,
   ProjectRecord,
   RuntimeSessionStatus,
   Severity,
@@ -22,6 +24,13 @@ import type {
   VerificationStepStatus
 } from '../../src/shared/types'
 import {
+  CODEX_MODEL_ROLE_LABELS,
+  codexExecutionMode,
+  codexModelArguments,
+  codexModelLabel,
+  codexSubagentArguments
+} from '../../src/shared/codex-models'
+import {
   createVerificationResult,
   isActiveTask,
   updateVerificationStep,
@@ -30,6 +39,8 @@ import {
 } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { CodexDelegationTracker } from './codex-delegation'
+import { extractCodexFailureMessage } from './codex-structured-output'
 import { GitOperationCoordinator } from './git-operation-coordinator'
 import {
   IosRuntimeStageError,
@@ -52,6 +63,7 @@ import {
 } from './runtime-acceptance'
 import { normalizeRuntimeScenarioEnvironment } from '../../src/shared/runtime-scenario-policy'
 import {
+  legacyRuntimeContractConflicts,
   requiredRuntimeEnvironmentKeys,
   runtimeCaseActions,
   taskRuntimeContractSchema
@@ -61,6 +73,13 @@ import type {
   ResolvedProjectRuntimeEnvironment
 } from './runtime-environment'
 import { syncIgnoredXcconfigFiles } from './ignored-xcconfig'
+import {
+  IosRuntimePreflightError,
+  isCoreSimulatorServiceFailureOutput,
+  prepareIosRuntimeEnvironment,
+  type IosRuntimePreflightInput,
+  type IosRuntimePreflightResult
+} from './ios-runtime-preflight'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -130,11 +149,17 @@ interface RuntimeRunResult {
   imagePaths: string[]
 }
 
+type IosRuntimePreparer = (
+  input: IosRuntimePreflightInput
+) => Promise<IosRuntimePreflightResult>
+
 const MAX_ACCESSIBILITY_REVIEW_CHARS = 60_000
 const MAX_UI_ACTION_REVIEW_CHARS = 20_000
 const MAX_DEBUG_STATE_REVIEW_CHARS = 60_000
 const MAX_RUNTIME_VERIFICATION_REVIEW_CHARS = 40_000
 const MAX_RUNTIME_REPAIR_CONTEXT_CHARS = 120_000
+const MAX_PROJECT_TEST_DIAGNOSTIC_LINES = 24
+const MAX_PROJECT_TEST_DIAGNOSTIC_CHARS = 12_000
 const TERMINAL_TASK_STATUSES = new Set<TaskRecord['status']>(['completed', 'discarded'])
 
 function isPathInside(root: string, candidate: string): boolean {
@@ -218,6 +243,16 @@ class EnvironmentPreparationError extends Error {
   }
 }
 
+class AgentProviderUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly actor: string,
+    readonly refundImplementationAttempt: boolean
+  ) {
+    super(message)
+  }
+}
+
 function redact(value: string): string {
   return redactProcessOutput(value).slice(0, 8_000)
 }
@@ -258,13 +293,28 @@ function safeSlug(value: string): string {
   return slug || 'task'
 }
 
-function eventMessage(payload: Record<string, unknown>): string | null {
+function structuredErrorMessage(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (typeof record.message === 'string') return record.message
+    if (typeof record.error === 'string') return record.error
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return '알 수 없는 오류'
+    }
+  }
+  return String(value ?? '알 수 없는 오류')
+}
+
+export function eventMessage(payload: Record<string, unknown>): string | null {
   const type = String(payload.type ?? '')
   if (type === 'thread.started') return `Codex 세션 시작 · ${String(payload.thread_id ?? '')}`
   if (type === 'turn.started') return 'Codex가 작업을 분석하고 있습니다.'
   if (type === 'turn.completed') return 'Codex 단계가 완료되었습니다.'
   if (type === 'turn.failed' || type === 'error') {
-    return `Codex 오류 · ${String(payload.message ?? payload.error ?? '알 수 없는 오류')}`
+    return `Codex 오류 · ${structuredErrorMessage(payload.message ?? payload.error)}`
   }
   if (type === 'item.completed' && payload.item && typeof payload.item === 'object') {
     const item = payload.item as Record<string, unknown>
@@ -275,6 +325,83 @@ function eventMessage(payload: Record<string, unknown>): string | null {
     if (item.type === 'file_change') return '파일 변경을 적용했습니다.'
   }
   return null
+}
+
+export function codexUsageLimitMessage(output: string): string | null {
+  if (!/(?:you(?:'|’)ve hit your usage limit|usage limit reached|rate limit reached)/i.test(output)) {
+    return null
+  }
+  const retryAt = output.match(/try again at\s+([^"}\n]+)/i)?.[1]?.trim()
+  return retryAt
+    ? `Codex 사용 한도에 도달했습니다. ${retryAt} 이후 실행을 눌러 이어서 작업하세요.`
+    : 'Codex 사용 한도에 도달했습니다. 한도가 초기화된 뒤 실행을 눌러 이어서 작업하세요.'
+}
+
+export function buildDelegatedStagePrompt(
+  actor: CodexModelRole,
+  selection: NonNullable<TaskRecord['modelPlan']>['roles'][CodexModelRole],
+  sandbox: 'read-only' | 'workspace-write',
+  prompt: string,
+  imagePaths: string[] = []
+): string {
+  const role = CODEX_MODEL_ROLE_LABELS[actor]
+  const writePolicy = sandbox === 'workspace-write'
+    ? '서브에이전트 한 명만 파일을 수정할 수 있습니다. 다른 쓰기 에이전트를 만들거나 동시에 파일을 수정하지 마세요.'
+    : '서브에이전트와 루트 모두 읽기 전용으로 조사하고 파일을 수정하지 마세요.'
+  return [
+    '당신은 AgentMonitoring의 루트 오케스트레이터입니다.',
+    `아래 작업은 직접 수행하지 말고 ${role} 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.`,
+    `서브에이전트는 model=${selection.model}, reasoning_effort=${selection.reasoningEffort} 설정을 사용해야 합니다. 실행 기본값에도 같은 설정이 지정되어 있습니다.`,
+    '기본(default) 에이전트를 새 문맥으로 생성하세요. 사용자 정의 에이전트와 전체 대화 복제는 사용하지 마세요. 위 루트 지침은 전달하지 말고 아래 역할 작업만 전달하세요.',
+    writePolicy,
+    '서브에이전트가 끝날 때까지 기다린 뒤, 서브에이전트의 최종 응답을 의미나 형식을 바꾸지 말고 그대로 최종 응답으로 반환하세요.',
+    '서브에이전트를 만들 수 없으면 작업을 대신 수행하지 말고 `SUBAGENT_FAILURE:`로 시작하는 이유를 반환하세요.',
+    `--- ${role}에게 전달할 작업 ---`,
+    '당신은 이 단계의 유일한 작업자입니다. 추가 서브에이전트를 생성하거나 다른 에이전트에 다시 위임하지 마세요.',
+    ...(imagePaths.length ? [
+      `화면 증거 파일 경로: ${JSON.stringify(imagePaths)}. 이미지 확인 도구로 각 파일을 직접 읽고 검토하세요. 읽을 수 없으면 그 이유를 최종 보고에 남기세요.`
+    ] : []),
+    prompt
+  ].join('\n\n')
+}
+
+function normalizeProjectTestDiagnosticLine(line: string): string {
+  return line
+    .replace(/^\[[^\]]+Z]\s+\[[^\]]+]\s+\[[^\]]+]\s*/, '')
+    .replace(/^\s+/, '')
+    .trimEnd()
+}
+
+function isProjectTestDiagnosticLine(line: string): boolean {
+  return [
+    /:\d+(?::\d+)?:\s+(?:error|fatal error):/i,
+    /(?:^|\s)(?:error|fatal error):\s+/i,
+    /(?:✖|×)\s+.+\b(?:failed|failure)\b/i,
+    /\btest (?:case|suite)\b.+\bfailed\b/i,
+    /\b(?:XCTAssert|Assertion failed|Issue recorded|expectation failed|#expect)\b/i,
+    /\bexecuted\s+\d+\s+tests?,\s+with\s+[1-9]\d*\s+failures?\b/i
+  ].some((pattern) => pattern.test(line))
+}
+
+export function projectTestFailureDiagnostics(output: string): string {
+  const diagnostics: string[] = []
+  const seen = new Set<string>()
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = normalizeProjectTestDiagnosticLine(rawLine)
+    if (!line || !isProjectTestDiagnosticLine(line)) continue
+    const key = line.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    diagnostics.push(line)
+    if (diagnostics.length >= MAX_PROJECT_TEST_DIAGNOSTIC_LINES) break
+  }
+  return diagnostics.join('\n').slice(0, MAX_PROJECT_TEST_DIAGNOSTIC_CHARS)
+}
+
+export function projectTestFailureReport(output: string): string {
+  const diagnostics = projectTestFailureDiagnostics(output)
+  if (diagnostics) return `핵심 실패 원인\n${diagnostics}`
+  return output.slice(-4_000).trim()
 }
 
 function runtimeContractPrompt(task: TaskRecord): string {
@@ -335,6 +462,24 @@ export function buildTaskTechSpecContext(task: TaskRecord): string {
   ].join('\n')
 }
 
+export function buildTaskRevisionRequestContext(
+  task: TaskRecord,
+  activeRequestIds?: ReadonlySet<string>
+): string {
+  const requests = (task.revisionRequests ?? []).filter((request) =>
+    !request.cancelledAt && (request.appliedAt || !activeRequestIds || activeRequestIds.has(request.id))
+  )
+  if (requests.length === 0) return ''
+  return [
+    '아래 내용은 사람이 같은 작업에 추가한 후속 수정 계약입니다.',
+    '원래 작업 목표와 승인된 검증 조건을 유지하면서 모든 요청을 함께 만족하세요.',
+    '서로 충돌하는 내용이 있으면 가장 최근 요청을 우선하되, 요구사항을 임의로 약화하지 마세요.',
+    '<task-revision-requests>',
+    ...requests.map((request, index) => `${index + 1}. ${request.instruction}`),
+    '</task-revision-requests>'
+  ].join('\n')
+}
+
 export function resolveTaskVerificationPlan(task: TaskRecord): {
   plan: TaskVerificationPlan
   legacy: boolean
@@ -363,6 +508,7 @@ function testDesignInstruction(plan: TaskVerificationPlan): string {
 
 export class AgentRunner {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly revisionQueueDrains = new Set<string>()
   private readonly managedRuntimeTaskIds = new Set<string>()
   private readonly policy: RunnerPolicy
   private readonly runtimeRoot: string
@@ -377,7 +523,8 @@ export class AgentRunner {
     private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter,
     private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator(),
     private readonly githubCommand = 'gh',
-    private readonly runtimeEnvironment?: ProjectRuntimeEnvironmentService
+    private readonly runtimeEnvironment?: ProjectRuntimeEnvironmentService,
+    private readonly iosRuntimePreparer: IosRuntimePreparer = prepareIosRuntimeEnvironment
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
     this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
@@ -515,6 +662,36 @@ export class AgentRunner {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
     let task = this.store.getTask(taskId)
+    const activeRevisionRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)
+    const activeRevisionRequestIds = new Set(activeRevisionRequest ? [activeRevisionRequest.id] : [])
+    if (activeRevisionRequest) {
+      task = this.store.markTaskRevisionRequestStarted(taskId, activeRevisionRequest.id)
+    }
+    const hasPendingHumanRevision = Boolean(activeRevisionRequest)
+    const beginsHumanRevision = ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) &&
+      hasPendingHumanRevision
+    const taskRevisionContext = buildTaskRevisionRequestContext(task, activeRevisionRequestIds)
+    const resumesFailedWork = ['failed', 'stopped'].includes(task.status)
+    const previousReviewerFindings = task.verificationResult?.reviewer.status === 'failed'
+      ? this.store.listTaskFindings(taskId)
+      : []
+    const previousTestFailure = resumesFailedWork && previousReviewerFindings.length === 0
+      ? this.store.latestTaskEvent(taskId, 'test_failed')
+      : null
+    const automatedRepairContext = previousReviewerFindings.length > 0
+      ? [
+          '이 작업은 직전 Reviewer 검토에서 수정할 문제가 남았습니다.',
+          '기존 작업공간의 변경을 유지하고 아래 지적을 모두 해결하세요.',
+          ...previousReviewerFindings.map((finding) => `[${finding.severity}] ${finding.title}`)
+        ].join('\n\n')
+      : previousTestFailure
+        ? [
+            '이 작업은 직전 실행에서 최대 시도 횟수까지 검증에 실패했습니다.',
+            '기존 작업공간의 변경을 유지하고 아래 핵심 실패 원인부터 수정하세요.',
+            previousTestFailure.message
+          ].join('\n\n')
+        : ''
+    const previousRepairContext = [taskRevisionContext, automatedRepairContext].filter(Boolean).join('\n\n')
     const project = this.store.getProject(task.projectId)
     const { plan, legacy } = resolveTaskVerificationPlan(task)
     const usesProjectTests = verificationUsesProjectTests(plan)
@@ -525,11 +702,20 @@ export class AgentRunner {
     if (usesProjectTests && !project.testCommand.trim()) {
       throw new Error('프로젝트 설정에서 검증 명령을 등록한 뒤 작업을 실행하세요.')
     }
-    if (!['queued', 'failed', 'stopped', 'blocked_environment', 'awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+    if (!['queued', 'failed', 'stopped', 'blocked_environment', 'blocked_agent', 'awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
       throw new Error(`현재 상태에서는 실행할 수 없습니다: ${task.status}`)
     }
     if (!legacy && usesRuntime && plan.runtimeSource === 'task-scenario' && !task.runtimeContract) {
       throw new Error('이 작업에 고정된 Simulator 검증 시나리오가 없습니다.')
+    }
+    if (usesRuntime && task.runtimeContract?.version === 1) {
+      const conflicts = legacyRuntimeContractConflicts(task.runtimeContract)
+      if (conflicts.length > 0) {
+        throw new Error(
+          `이전 Simulator 시나리오가 한 시점에 충돌하는 조건을 요구합니다: ${conflicts.join(', ')}. ` +
+          '작업 하단에서 검증 시나리오를 최신화한 뒤 다시 실행하세요.'
+        )
+      }
     }
 
     let resolveDone = (): void => undefined
@@ -552,6 +738,18 @@ export class AgentRunner {
         'orchestrator',
         `검증 계획 고정 · ${plan.mode} · 테스트 설계 ${plan.testDesign} · Simulator ${plan.runtimeSource}`
       )
+      if (previousRepairContext) {
+        this.emit(
+          task,
+          'agent',
+          'orchestrator',
+          hasPendingHumanRevision
+            ? `사용자의 추가 수정 요청을 같은 작업공간에서 반영합니다. · 큐 대기 ${Math.max(0, (task.revisionRequests ?? []).filter((request) => !request.appliedAt && !request.cancelledAt).length - 1)}개`
+            : previousReviewerFindings.length > 0
+              ? `미해결 Reviewer finding ${previousReviewerFindings.length}개를 복원해 첫 구현 시도부터 수정합니다.`
+              : '직전 자동 검증 실패 진단을 복원해 첫 구현 시도부터 이어갑니다.'
+        )
+      }
       const approvedRuntimeContract = runtimeContractPrompt(task)
       const setupCommand = project.setupCommand.trim() || await detectProjectSetupCommand(project.path)
       if (usesProjectTests || usesRuntime) {
@@ -564,10 +762,25 @@ export class AgentRunner {
           '격리 작업공간의 기본 의존성을 준비합니다.'
         )
       }
+      if (usesRuntime) {
+        await this.prepareRuntimeTools(
+          taskId,
+          project,
+          worktreePath,
+          control,
+          plan,
+          'AI가 코드를 수정하기 전에 Simulator 실행 환경을 확인합니다.'
+        )
+      }
       let preparedManifestFingerprint = await this.dependencyManifestFingerprint(worktreePath)
 
-      let critiqueMessage = '이 검증 계획은 새 테스트 설계를 사용하지 않습니다.'
-      const designsTests = usesProjectTests && !['existing-tests', 'skip'].includes(plan.testDesign)
+      const reusesExistingTestDesign = Boolean(automatedRepairContext) && !beginsHumanRevision
+      let critiqueMessage = reusesExistingTestDesign
+        ? '직전 실행에서 설계한 테스트를 유지하고, 저장된 실패 진단부터 수정합니다.'
+        : '이 검증 계획은 새 테스트 설계를 사용하지 않습니다.'
+      const designsTests = usesProjectTests &&
+        !reusesExistingTestDesign &&
+        !['existing-tests', 'skip'].includes(plan.testDesign)
       if (designsTests) {
         this.setVerificationStep(taskId, plan, 'test-design', 'running', 'Test Designer와 Critic이 테스트 범위를 설계하고 있습니다.')
         try {
@@ -579,8 +792,10 @@ export class AgentRunner {
             [
               `작업 목표: ${task.prompt}`,
               buildTaskTechSpecContext(task),
+              taskRevisionContext,
               '당신은 테스트 설계자입니다. 프로덕션 구현은 수정하지 마세요.',
               '기존 테스트 구조를 확인하고 이 목표의 성공·실패·경계 조건을 검증하는 테스트만 추가하거나 보완하세요.',
+              'Tuist 생성, xcodebuild, Simulator 실행은 Orchestrator가 이후 실제 환경에서 진행합니다. Codex sandbox 내의 workspace·cache·CoreSimulatorService 오류를 해결하거나 우회하려고 시도하지 마세요.',
               testDesignInstruction(plan),
               '테스트를 만들 수 없다면 이유와 필요한 테스트 훅을 최종 메시지에 기록하세요.',
               approvedRuntimeContract,
@@ -596,6 +811,7 @@ export class AgentRunner {
             [
               `작업 목표: ${task.prompt}`,
               buildTaskTechSpecContext(task),
+              taskRevisionContext,
               '당신은 읽기 전용 테스트 비평가입니다.',
               '현재 추가된 테스트가 구현 세부사항이 아니라 사용자 요구와 실패 경로를 검증하는지 평가하세요.',
               '누락된 경계 조건과 테스트를 약화해 통과할 수 있는 지점을 짧게 정리하세요.',
@@ -608,9 +824,17 @@ export class AgentRunner {
           this.setVerificationStep(taskId, plan, 'test-design', 'failed', '테스트 설계 또는 비평에 실패했습니다.')
           throw error
         }
+      } else if (reusesExistingTestDesign && usesProjectTests) {
+        this.setVerificationStep(
+          taskId,
+          plan,
+          'test-design',
+          'skipped',
+          '기존 테스트 설계를 유지하고 직전 실패 진단부터 이어서 수정합니다.'
+        )
       }
 
-      let repairContext = ''
+      let repairContext = automatedRepairContext
       let repairImagePaths: string[] = []
       let automationPassed = false
       let runtimeResult: RuntimeRunResult | null = null
@@ -634,8 +858,14 @@ export class AgentRunner {
           [
             `작업 목표: ${task.prompt}`,
             buildTaskTechSpecContext(task),
+            taskRevisionContext,
             '당신은 구현 담당자입니다. 현재 테스트와 프로젝트 규칙을 지키며 목표를 완성하세요.',
             '테스트를 삭제하거나 약화하지 마세요. 관련 없는 파일은 수정하지 마세요.',
+            task.techSpec?.openQuestions.length
+              ? '승인된 테크스펙에 남은 질문만 반복해 보고하고 구현을 멈추지 마세요. 변경 전 코드에 이미 사용 중인 값이 있다면 새 결정을 발명하지 말고 호환 기본 정책으로 명명해 양쪽 구현에 주입하고 동등성 테스트로 고정하세요. 기존 값으로도 요구사항을 충족할 수 없는 경우에만 그 이유를 구체적으로 보고하세요.'
+              : '',
+            'Codex sandbox에서 발생하는 CoreSimulatorService, 생성된 Xcode workspace, cache 권한 오류를 해결하려고 시간을 쓰지 마세요. Orchestrator가 이 단계 후 실제 테스트와 Simulator 검증을 실행하고 핵심 실패 진단을 다음 시도에 전달합니다.',
+            'Git에서 제외된 로컬 xcconfig는 AgentMonitoring이 값 자체를 노출하지 않고 작업공간에 동기화한 승인된 실행 환경입니다. 비밀값을 커밋·출력하거나 테스트 전용 가짜 credential로 대체하지 말고, 현재 빌드 설정을 그대로 사용하세요.',
             approvedRuntimeContract,
             usesProjectTests
               ? '변경 후 프로젝트에 맞는 검증을 실행하세요. 커밋, push, merge는 하지 마세요.'
@@ -680,12 +910,13 @@ export class AgentRunner {
             throw error
           }
           if (testResult.code !== 0) {
+            const failureReport = projectTestFailureReport(testResult.output)
             this.setVerificationStep(taskId, plan, 'project-tests', 'failed', `종료 코드 ${testResult.code}로 실패했습니다.`)
             this.emit(
               task,
               'test_failed',
               'test-runner',
-              `테스트 실패 · 종료 코드 ${testResult.code}\n${testResult.output.slice(-3_000)}`,
+              `테스트 실패 · 종료 코드 ${testResult.code}\n${failureReport}`,
               'high'
             )
             if (isEnvironmentFailureOutput(testResult.output)) {
@@ -696,8 +927,8 @@ export class AgentRunner {
               )
             }
             repairContext = [
-              '직전 테스트가 실패했습니다. 아래 출력의 원인을 수정하고 기존 테스트를 유지하세요.',
-              testResult.output.slice(-4_000)
+              '직전 테스트가 실패했습니다. 아래 핵심 진단을 우선 해결하고 기존 테스트를 유지하세요.',
+              failureReport
             ].join('\n\n')
             repairImagePaths = []
             continue
@@ -707,16 +938,25 @@ export class AgentRunner {
         }
 
         if (usesRuntime) {
+          await this.prepareRuntimeTools(
+            taskId,
+            project,
+            worktreePath,
+            control,
+            plan,
+            '구현 결과를 검증하기 전에 Xcode와 Simulator 상태를 다시 확인합니다.'
+          )
           this.setVerificationStep(taskId, plan, 'simulator-runtime', 'running', 'Simulator 앱 실행과 인수 검증을 진행하고 있습니다.')
           try {
-            runtimeResult = await this.runRuntimeIfConfigured(
+            runtimeResult = await this.runRuntimeWithEnvironmentRecovery(
               this.store.getTask(taskId),
               project,
               worktreePath,
               control,
               runId,
               plan.runtimeSource,
-              !legacy
+              !legacy,
+              plan
             )
             if (runtimeResult) {
               this.setVerificationStep(taskId, plan, 'simulator-runtime', 'passed', runtimeResult.summary)
@@ -767,18 +1007,27 @@ export class AgentRunner {
             this.store.getTask(taskId),
             worktreePath,
             approvedRuntimeContract,
-            runtimeResult
+            runtimeResult,
+            this.store.listTaskFindings(taskId),
+            taskRevisionContext
           )
           const reviewerFindings = parseReviewerFindings(review.finalMessage)
-          this.store.resolveTaskFindings(task.id)
-          for (const finding of reviewerFindings) {
-            this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
-          }
 
           if (reviewerFindings.length === 0) {
+            this.store.resolveTaskFindings(task.id)
             this.setVerificationStep(taskId, plan, 'reviewer', 'passed', 'Reviewer가 추가 문제를 찾지 못했습니다.')
             automationPassed = true
             break
+          }
+
+          const knownFindingTitles = new Set(
+            this.store.listTaskFindings(taskId).map((finding) => finding.title.trim().toLocaleLowerCase())
+          )
+          for (const finding of reviewerFindings) {
+            const key = finding.title.trim().toLocaleLowerCase()
+            if (knownFindingTitles.has(key)) continue
+            this.store.addFinding(task.projectId, task.id, finding.title, finding.severity)
+            knownFindingTitles.add(key)
           }
 
           this.setVerificationStep(taskId, plan, 'reviewer', 'failed', `Reviewer finding ${reviewerFindings.length}개가 남아 있습니다.`)
@@ -801,10 +1050,13 @@ export class AgentRunner {
             'stopped',
             'Reviewer 수정 요청을 다음 구현 시도에 전달하기 위해 Simulator 앱을 정리했습니다.'
           )
+          const cumulativeFindings = this.store.listTaskFindings(taskId)
           repairContext = [
             '직전 Reviewer가 자동 검증을 통과한 변경에서 다음 문제를 찾았습니다.',
-            'Reviewer 보고를 근거로 제품 코드와 테스트를 수정하세요. finding을 숨기거나 검토 기준을 약화하지 마세요.',
-            review.finalMessage || reviewerFindings.map((finding) => `[${finding.severity}] ${finding.title}`).join('\n')
+            '이전 시도에서 해결한 조건을 되돌리지 말고, 아래 누적 finding을 동시에 만족하도록 제품 코드와 테스트를 수정하세요.',
+            'finding을 숨기거나 검토 기준을 약화하지 마세요.',
+            cumulativeFindings.map((finding) => `[${finding.severity}] ${finding.title}`).join('\n'),
+            `최신 Reviewer 보고:\n${review.finalMessage || '보고 없음'}`
           ].join('\n\n')
           repairImagePaths = runtimeResult?.imagePaths ?? []
           this.emit(
@@ -825,11 +1077,24 @@ export class AgentRunner {
       if (!automationPassed) {
         this.store.transitionTask(taskId, 'failed')
         this.store.addFinding(task.projectId, task.id, `${task.title} 자동 검증이 최대 구현 시도 횟수를 초과했습니다.`, 'high')
+        if (activeRevisionRequest) {
+          this.store.markTaskRevisionRequestFailed(
+            taskId,
+            activeRevisionRequest.id,
+            '자동 검증이 최대 구현 시도 횟수를 초과했습니다.'
+          )
+        }
         return
       }
 
       if (control.stopped) throw new StoppedError()
       const finalStatus = plan.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval'
+      if (
+        hasPendingHumanRevision &&
+        this.store.getTask(taskId).verificationResult?.reviewer.status === 'passed'
+      ) {
+        this.store.markTaskRevisionRequestsApplied(taskId, [...activeRevisionRequestIds])
+      }
       this.store.transitionTask(taskId, finalStatus)
       this.emit(
         task,
@@ -845,6 +1110,108 @@ export class AgentRunner {
     } finally {
       this.activeRuns.delete(taskId)
       control.resolveDone()
+      this.scheduleTaskRevisionQueue(taskId)
+    }
+  }
+
+  async continueTask(taskId: string, instruction: string): Promise<void> {
+    const task = this.store.getTask(taskId)
+    const isActive = this.activeRuns.has(taskId)
+    if (!(isActive && isActiveTask(task)) && !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('실행 중이거나 승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    }
+    if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
+      throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
+    }
+    this.store.addTaskRevisionRequest(taskId, instruction)
+    this.scheduleTaskRevisionQueue(taskId)
+  }
+
+  updateTaskRevisionRequest(taskId: string, requestId: string, instruction: string): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    return this.store.updateTaskRevisionRequest(taskId, requestId, instruction)
+  }
+
+  cancelTaskRevisionRequest(taskId: string, requestId: string): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    const task = this.store.cancelTaskRevisionRequest(taskId, requestId)
+    this.scheduleTaskRevisionQueue(taskId)
+    return task
+  }
+
+  moveTaskRevisionRequest(taskId: string, requestId: string, direction: 'up' | 'down'): TaskRecord {
+    this.assertRevisionRequestMutable(taskId, requestId)
+    const task = this.store.getTask(taskId)
+    const activeRequestId = this.activeRuns.has(taskId)
+      ? (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)?.id
+      : undefined
+    return this.store.moveTaskRevisionRequest(taskId, requestId, direction, activeRequestId)
+  }
+
+  setTaskRevisionQueuePaused(taskId: string, paused: boolean): TaskRecord {
+    const task = this.store.getTask(taskId)
+    if (!task.worktreePath || ['completed', 'discarded', 'awaiting_merge'].includes(task.status)) {
+      throw new Error('진행 중이거나 승인을 기다리는 작업의 추가 수정 큐만 제어할 수 있습니다.')
+    }
+    const updated = this.store.setTaskRevisionQueuePaused(taskId, paused)
+    if (!paused) this.scheduleTaskRevisionQueue(taskId)
+    return updated
+  }
+
+  async runNextTaskRevision(taskId: string): Promise<void> {
+    if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
+    const task = this.store.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('승인을 기다리는 작업에서만 다음 추가 수정 요청을 실행할 수 있습니다.')
+    }
+    if (!task.revisionQueuePaused) {
+      throw new Error('추가 수정 큐를 일시정지한 뒤 한 건만 실행할 수 있습니다.')
+    }
+    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
+      throw new Error('실행할 추가 수정 요청이 없습니다.')
+    }
+    await this.run(taskId)
+  }
+
+  private assertRevisionRequestMutable(taskId: string, requestId: string): void {
+    const task = this.store.getTask(taskId)
+    const request = (task.revisionRequests ?? []).find((item) => item.id === requestId)
+    if (!request || request.appliedAt || request.cancelledAt) {
+      throw new Error('대기 중이거나 재개를 기다리는 추가 요청만 변경할 수 있습니다.')
+    }
+    const activeRequest = (task.revisionRequests ?? []).find((item) => !item.appliedAt && !item.cancelledAt)
+    if (this.activeRuns.has(taskId) && activeRequest?.id === requestId) {
+      throw new Error('현재 반영 중인 요청은 변경할 수 없습니다. 실행이 끝난 뒤 다시 시도하세요.')
+    }
+  }
+
+  private scheduleTaskRevisionQueue(taskId: string): void {
+    if (this.activeRuns.has(taskId) || this.revisionQueueDrains.has(taskId)) return
+    const task = this.store.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return
+    if (task.revisionQueuePaused) return
+    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) return
+    this.revisionQueueDrains.add(taskId)
+    void this.drainTaskRevisionQueue(taskId).then((shouldRecheck) => {
+      this.revisionQueueDrains.delete(taskId)
+      if (shouldRecheck) this.scheduleTaskRevisionQueue(taskId)
+    })
+  }
+
+  private async drainTaskRevisionQueue(taskId: string): Promise<boolean> {
+    while (true) {
+      const task = this.store.getTask(taskId)
+      if (task.revisionQueuePaused) return false
+      const nextRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt && !request.cancelledAt)
+      if (!nextRequest) return true
+      if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return false
+      try {
+        await this.run(taskId)
+      } catch {
+        return false
+      }
+      const processed = this.store.getTask(taskId).revisionRequests?.find((request) => request.id === nextRequest.id)
+      if (!processed?.appliedAt) return false
     }
   }
 
@@ -861,16 +1228,35 @@ export class AgentRunner {
     ].includes(task.status)) {
       throw new Error('중단되었거나 사람의 확인을 기다리는 작업만 구현 없이 다시 검증할 수 있습니다.')
     }
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
+      throw new Error('아직 구현하지 않은 추가 수정 요청이 있습니다. 실행을 눌러 수정부터 이어가세요.')
+    }
     if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
       throw new Error('다시 검증할 격리 작업공간을 찾을 수 없습니다.')
     }
 
     const project = this.store.getProject(task.projectId)
+    const unresolvedReviewerFindings = this.store.listTaskFindings(taskId)
+    if (unresolvedReviewerFindings.length > 0 && task.verificationResult?.reviewer.status === 'failed') {
+      throw new Error(
+        `Reviewer가 수정할 문제 ${unresolvedReviewerFindings.length}개를 남겼습니다. ` +
+        '구현 없이 같은 검증만 반복하지 말고 실행을 눌러 지적을 자동 수정하세요.'
+      )
+    }
     const { plan, legacy } = resolveTaskVerificationPlan(task)
     const usesProjectTests = verificationUsesProjectTests(plan)
     const usesRuntime = verificationUsesRuntime(plan)
     if (usesProjectTests && !project.testCommand.trim()) {
       throw new Error('프로젝트 설정에서 검증 명령을 등록한 뒤 다시 검증하세요.')
+    }
+    if (usesRuntime && task.runtimeContract?.version === 1) {
+      const conflicts = legacyRuntimeContractConflicts(task.runtimeContract)
+      if (conflicts.length > 0) {
+        throw new Error(
+          `이전 Simulator 시나리오가 한 시점에 충돌하는 조건을 요구합니다: ${conflicts.join(', ')}. ` +
+          '작업 하단에서 검증 시나리오를 최신화한 뒤 다시 검증하세요.'
+        )
+      }
     }
 
     let resolveDone = (): void => undefined
@@ -900,6 +1286,16 @@ export class AgentRunner {
           '기존 변경을 유지한 채 검증 환경을 다시 준비합니다.'
         )
       }
+      if (usesRuntime) {
+        await this.prepareRuntimeTools(
+          taskId,
+          project,
+          worktreePath,
+          control,
+          plan,
+          '기존 변경을 검증하기 전에 Xcode와 Simulator 상태를 확인합니다.'
+        )
+      }
 
       let runtimeResult: RuntimeRunResult | null = null
       if (usesProjectTests || usesRuntime) {
@@ -911,8 +1307,9 @@ export class AgentRunner {
         this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 재검증`)
         const result = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
         if (result.code !== 0) {
+          const failureReport = projectTestFailureReport(result.output)
           this.setVerificationStep(taskId, plan, 'project-tests', 'failed', `종료 코드 ${result.code}로 다시 실패했습니다.`)
-          this.emit(task, 'test_failed', 'test-runner', `재검증 실패 · 종료 코드 ${result.code}\n${result.output.slice(-3_000)}`, 'high')
+          this.emit(task, 'test_failed', 'test-runner', `재검증 실패 · 종료 코드 ${result.code}\n${failureReport}`, 'high')
           if (isEnvironmentFailureOutput(result.output)) {
             throw new EnvironmentPreparationError(
               environmentFailureMessage(result.output),
@@ -930,14 +1327,15 @@ export class AgentRunner {
 
       if (usesRuntime) {
         this.setVerificationStep(taskId, plan, 'simulator-runtime', 'running', 'Simulator 인수 검증을 다시 실행하고 있습니다.')
-        runtimeResult = await this.runRuntimeIfConfigured(
+        runtimeResult = await this.runRuntimeWithEnvironmentRecovery(
           this.store.getTask(taskId),
           project,
           worktreePath,
           control,
           runId,
           plan.runtimeSource,
-          !legacy
+          !legacy,
+          plan
         )
         this.setVerificationStep(
           taskId,
@@ -977,6 +1375,7 @@ export class AgentRunner {
     } finally {
       this.activeRuns.delete(taskId)
       control.resolveDone()
+      this.scheduleTaskRevisionQueue(taskId)
     }
   }
 
@@ -1157,6 +1556,9 @@ export class AgentRunner {
       throw new Error('검증 후 사람의 확인을 기다리는 작업만 원격에 게시할 수 있습니다.')
     }
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt && !request.cancelledAt)) {
+      throw new Error('큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.')
+    }
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
 
     await this.stopRuntimeSession(task, 'stopped', '작업 승인으로 Simulator 앱을 정리했습니다.')
@@ -1526,6 +1928,14 @@ export class AgentRunner {
       '## Summary',
       '',
       task.prompt,
+      ...(task.revisionRequests?.some((request) => !request.cancelledAt)
+        ? [
+            '',
+            '### Approval feedback',
+            '',
+            ...task.revisionRequests.filter((request) => !request.cancelledAt).map((request) => `- ${request.instruction}`)
+          ]
+        : []),
       '',
       '## Validation',
       '',
@@ -2034,7 +2444,9 @@ export class AgentRunner {
     task: TaskRecord,
     worktreePath: string,
     approvedRuntimeContract: string,
-    runtimeResult: RuntimeRunResult | null
+    runtimeResult: RuntimeRunResult | null,
+    regressionFindings: Array<{ severity: Severity; title: string }> = [],
+    revisionRequestContext = buildTaskRevisionRequestContext(task)
   ): Promise<ProcessResult> {
     const verificationBaseCommit = task.verificationBaseCommit ?? task.baseCommit
     const diffInstruction = verificationBaseCommit && GIT_COMMIT_PATTERN.test(verificationBaseCommit)
@@ -2052,6 +2464,7 @@ export class AgentRunner {
       [
         `작업 목표: ${task.prompt}`,
         buildTaskTechSpecContext(task),
+        revisionRequestContext,
         '당신은 최종 읽기 전용 Reviewer입니다.',
         diffInstruction,
         '기존 테스트와 실행 결과를 함께 검토하세요.',
@@ -2065,7 +2478,20 @@ export class AgentRunner {
         runtimeResult?.imagePaths.length
           ? '첨부된 이미지는 이 작업이 선택한 iOS Simulator에서 수집한 화면 증거입니다. 요구사항과 명백히 어긋나는 화면 결함도 검토하세요.'
           : '',
+        regressionFindings.length > 0
+          ? [
+              '이전 Reviewer가 아래 문제를 지적했습니다. 현재 변경에서 각 문제가 해결됐고, 다른 수정으로 다시 발생하지 않았는지 반드시 재검증하세요.',
+              '해결된 항목은 다시 finding으로 쓰지 말고, 남아 있거나 재발한 항목만 정해진 형식으로 보고하세요.',
+              ...regressionFindings.map((finding) => `[${finding.severity}] ${finding.title}`)
+            ].join('\n')
+          : '',
         '기능 오류, 테스트 공백, 보안·회귀 위험을 우선순위와 근거를 붙여 보고하세요.',
+        task.techSpec?.openQuestions.length
+          ? '테크스펙의 openQuestions 자체만으로 구현 결함을 만들지 마세요. 변경 전부터 쓰던 값을 호환 기본 정책으로 명시하고 양쪽 구현의 동등성을 테스트했다면, 후속 제품 결정을 기다린다는 이유만으로 실패시키지 마세요.'
+          : '',
+        '승인된 Simulator 계약은 AgentMonitoring이 등록된 로컬 프로젝트 환경에서 자동으로 재현하는 사용자 경로의 실행 증거입니다. Git에서 제외된 로컬 xcconfig는 값 자체를 노출하지 않은 채 원본 저장소에서 격리 작업공간으로 동기화되며, 이 설정으로 실행된 성공 증거는 유효합니다. 비밀값을 저장소에 커밋하거나 비밀값 없는 깨끗한 checkout에서도 동일 분기가 실행돼야 한다고 요구하지 마세요.',
+        '성공 경로를 강제로 통과시키기 위해 테스트 전용 가짜·placeholder credential을 제품 코드에 추가하는 것은 유효한 해결이 아닙니다. 등록된 로컬 설정의 실제 값을 사용하거나, 값이 없으면 명시적인 미설정 경로를 검증해야 합니다.',
+        '등록된 로컬 환경에도 필요한 비밀값이 없어 재현할 수 없는 분기는 프로젝트 테스트로 검증할 수 있으며, 계약에 없다는 이유만으로 실패시키지 마세요. 반대로 작업공간의 실제 빌드 설정으로 재현 가능한 핵심 성공 경로가 계약에 있으면 그 증거를 확인하세요.',
         '최종 메시지는 문제가 없으면 `VERDICT: PASS`를 포함하세요.',
         '문제가 있으면 각 항목을 `[critical] 제목`, `[high] 제목`, `[medium] 제목`, `[low] 제목` 형식으로 한 줄씩 작성하세요.',
         '코드는 수정하지 마세요.'
@@ -2152,6 +2578,64 @@ export class AgentRunner {
     }
   }
 
+  private async prepareRuntimeTools(
+    taskId: string,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun,
+    plan: TaskVerificationPlan,
+    reason: string
+  ): Promise<void> {
+    const task = this.store.getTask(taskId)
+    let adapter: IosRuntimeAdapterConfig | null = task.runtimeContract?.adapter ?? project.runtimeAdapter ?? null
+    if (!adapter) {
+      const manifest = await readProjectCapabilityManifest(project.path)
+      if (manifest.state === 'valid') adapter = manifest.value.adapter
+    }
+    if (!adapter) return
+
+    this.setVerificationStep(
+      taskId,
+      plan,
+      'environment-setup',
+      'running',
+      'Xcode container와 Simulator 서비스를 확인하고 있습니다.'
+    )
+    this.emit(task, 'environment_started', 'environment', reason)
+
+    try {
+      const result = await this.iosRuntimePreparer({
+        worktreePath,
+        adapter,
+        execute: (request) => this.executeRuntimeCommand(request, control)
+      })
+      const details = [
+        result.containerGenerated ? 'Tuist workspace 자동 생성' : 'Xcode container 확인',
+        result.simulatorRecovered ? 'Simulator 서비스 자동 복구' : 'Simulator 서비스 확인'
+      ].join(' · ')
+      this.setVerificationStep(taskId, plan, 'environment-setup', 'passed', details)
+      this.emit(
+        this.store.getTask(taskId),
+        'environment_passed',
+        'environment',
+        `Simulator 검증 환경 준비 완료 · ${details}`
+      )
+    } catch (error) {
+      if (error instanceof StoppedError) throw error
+      const environmentError = error instanceof IosRuntimePreflightError
+        ? new EnvironmentPreparationError(error.message, error.command, error.output)
+        : error instanceof EnvironmentPreparationError
+          ? error
+          : new EnvironmentPreparationError(
+              `Simulator 검증 환경을 준비하지 못했습니다. ${redact(String(error))}`,
+              'Simulator 실행 환경 자동 확인',
+              error instanceof Error ? error.message : String(error)
+            )
+      this.setVerificationStep(taskId, plan, 'environment-setup', 'failed', environmentError.message)
+      throw environmentError
+    }
+  }
+
   private async dependencyManifestFingerprint(worktreePath: string): Promise<string | null> {
     const [tracked, untracked] = await Promise.all([
       this.runProcess(
@@ -2203,6 +2687,12 @@ export class AgentRunner {
       this.emit(current, 'task_stopped', 'human', '작업을 중단했습니다.')
       return
     }
+    const activeRevisionRequest = (current.revisionRequests ?? []).find((request) =>
+      request.startedAt && !request.appliedAt && !request.cancelledAt
+    )
+    if (activeRevisionRequest) {
+      this.store.markTaskRevisionRequestFailed(taskId, activeRevisionRequest.id, redact(String(error)))
+    }
     if (error instanceof EnvironmentPreparationError) {
       const { plan } = resolveTaskVerificationPlan(current)
       this.setVerificationStep(taskId, plan, 'environment-setup', 'failed', error.message)
@@ -2224,6 +2714,21 @@ export class AgentRunner {
         current.id,
         `${current.title} · 검증 환경 준비 필요`,
         'high'
+      )
+      return
+    }
+    if (error instanceof AgentProviderUnavailableError) {
+      await this.stopRuntimeSession(current, 'failed', 'AI 요청이 중단돼 Simulator 앱을 종료했습니다.')
+      const nextAttempt = error.refundImplementationAttempt
+        ? Math.max(0, current.attempt - 1)
+        : current.attempt
+      if (isActiveTask(current)) this.store.transitionTask(taskId, 'blocked_agent', nextAttempt)
+      this.emit(
+        current,
+        'agent',
+        error.actor,
+        `AI 요청 대기 · ${error.message} 현재 변경과 격리 작업공간은 보존했습니다.`,
+        'low'
       )
       return
     }
@@ -2255,35 +2760,54 @@ export class AgentRunner {
   private async runCodexStage(
     task: TaskRecord,
     cwd: string,
-    actor: string,
+    actor: CodexModelRole,
     sandbox: 'read-only' | 'workspace-write',
     prompt: string,
     imagePaths: string[] = []
   ): Promise<ProcessResult> {
     const control = this.activeRuns.get(task.id)
     if (!control || control.stopped) throw new StoppedError()
-    this.emit(task, 'agent', actor, `${actor} 단계 시작`)
+    const roleModel = task.modelPlan?.roles[actor]
+    const hierarchical = Boolean(task.modelPlan) && codexExecutionMode(task.modelPlan) === 'root-subagents'
+    const rootModel = hierarchical ? task.modelPlan?.roles.planning : roleModel
+    const delegatedPrompt = hierarchical && roleModel
+      ? buildDelegatedStagePrompt(actor, roleModel, sandbox, prompt, imagePaths)
+      : prompt
+    const executionLabel = hierarchical && roleModel
+      ? `루트 ${codexModelLabel(rootModel)} → ${CODEX_MODEL_ROLE_LABELS[actor]} ${codexModelLabel(roleModel)}`
+      : codexModelLabel(roleModel)
+    this.emit(task, 'agent', actor, `${actor} 단계 시작 · ${executionLabel}`)
+    const delegation = new CodexDelegationTracker()
+    let structuredFailure: string | null = null
+    let provisionalFailure: string | null = null
 
     const result = await this.runProcess(
       this.codexCommand,
       [
         ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
         'exec',
+        ...codexModelArguments(rootModel),
+        ...(hierarchical && roleModel ? codexSubagentArguments(roleModel) : []),
         '--json',
         ...imagePaths.flatMap((path) => ['--image', path]),
         '--sandbox',
         sandbox,
         '--cd',
         cwd,
-        prompt
+        delegatedPrompt
       ],
       cwd,
       control,
       (line) => {
         try {
           const payload = JSON.parse(line) as Record<string, unknown>
+          if (payload.type === 'turn.failed') structuredFailure = extractCodexFailureMessage(line)
+          if (payload.type === 'error') provisionalFailure = extractCodexFailureMessage(line)
+          if (payload.type === 'turn.completed') provisionalFailure = null
+          const delegationMessage = delegation.consume(payload)
+          if (hierarchical && delegationMessage) this.emit(task, 'agent', actor, delegationMessage)
           const message = eventMessage(payload)
-          if (message) this.emit(task, 'agent', actor, message)
+          if (message) this.emit(task, 'agent', actor, redact(message))
         } catch {
           if (line.trim()) this.emit(task, 'agent', actor, redact(line))
         }
@@ -2291,10 +2815,41 @@ export class AgentRunner {
       this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env,
       { timeoutMs: this.policy.codexStageTimeoutMs, label: `${actor} 단계` }
     )
-    if (result.code !== 0) {
-      throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
+    const failure = structuredFailure ?? provisionalFailure
+    if (result.code !== 0 || failure) {
+      const usageLimit = codexUsageLimitMessage(`${failure ?? ''}\n${result.output}`)
+      if (usageLimit) {
+        throw new AgentProviderUnavailableError(
+          usageLimit,
+          actor,
+          actor === 'implementer'
+        )
+      }
+      if (isEnvironmentFailureOutput(result.output)) {
+        throw new EnvironmentPreparationError(
+          environmentFailureMessage(result.output),
+          `${actor} 단계에서 실행한 프로젝트 환경 명령`,
+          result.output
+        )
+      }
+      throw new Error(`${actor} 단계가 실패했습니다. ${failure ?? `종료 코드 ${result.code}`}\n${result.output.slice(-2_000)}`)
     }
-    this.emit(task, 'agent', actor, `${actor} 단계 완료`)
+    if (hierarchical && /^SUBAGENT_FAILURE:/m.test(result.finalMessage)) {
+      throw new AgentProviderUnavailableError(`${actor} 서브에이전트 위임에 실패했습니다.\n${result.finalMessage.slice(-2_000)}`, actor, actor === 'implementer')
+    }
+    if (hierarchical) {
+      const verified = await delegation.verify(this.codexHome, roleModel).catch((error: unknown) => {
+        throw new AgentProviderUnavailableError(`${actor} 위임 확인 실패 · ${String(error)}`, actor, actor === 'implementer')
+      })
+      if (control.stopped) throw new StoppedError()
+      // Use the child's recorded response. A root summary must not turn a
+      // reviewer's findings into PASS or replace the worker's diagnostics.
+      result.finalMessage = redact(verified.message)
+      this.emit(task, 'agent', actor, `서브에이전트 완료 확인${verified.model ? ` · 세션 기록 모델 ${verified.model}` : ' · 실행 기록 확인'}`)
+      this.emit(task, 'agent', actor, result.finalMessage)
+    }
+    if (!result.finalMessage.trim()) throw new Error(`${actor} 단계가 최종 응답 없이 종료됐습니다. 작업 결과를 확인한 뒤 다시 실행하세요.`)
+    this.emit(task, 'agent', actor, `${actor} 단계 완료 · ${executionLabel}`)
     return result
   }
 
@@ -2370,6 +2925,13 @@ export class AgentRunner {
           )
         }
       }
+      environment = {
+        buildSettings: environment.buildSettings,
+        launchVariables: {
+          ...(scenario.preconditions.launchVariables ?? {}),
+          ...environment.launchVariables
+        }
+      }
 
       const actions = runtimeCaseActions(scenario)
       const checkpoints = scenario.steps.flatMap((step, stepIndex) =>
@@ -2421,6 +2983,69 @@ export class AgentRunner {
       summary: `Simulator 검증 ${contract.runtimeScenarios.cases.length}개 케이스 통과 · ${summaries.join(' · ')}`,
       reviewContext: reviewContexts.join('\n\n'),
       imagePaths
+    }
+  }
+
+  private async runRuntimeWithEnvironmentRecovery(
+    task: TaskRecord,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun,
+    runId: string,
+    source: TaskVerificationPlan['runtimeSource'],
+    required: boolean,
+    plan: TaskVerificationPlan
+  ): Promise<RuntimeRunResult | null> {
+    try {
+      return await this.runRuntimeIfConfigured(
+        task,
+        project,
+        worktreePath,
+        control,
+        runId,
+        source,
+        required
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!isCoreSimulatorServiceFailureOutput(message)) throw error
+
+      this.emit(
+        this.store.getTask(task.id),
+        'environment_started',
+        'environment',
+        '검증 도중 Simulator 연결이 끊겨 서비스를 자동 복구하고 같은 검증을 한 번 다시 실행합니다.',
+        'low'
+      )
+      await this.stopRuntimeSession(
+        this.store.getTask(task.id),
+        'failed',
+        'Simulator 서비스 복구 전에 기존 실행 상태를 정리했습니다.'
+      ).catch(() => undefined)
+      await this.prepareRuntimeTools(
+        task.id,
+        project,
+        worktreePath,
+        control,
+        plan,
+        '검증 도중 끊긴 Simulator 서비스를 복구합니다.'
+      )
+      this.setVerificationStep(
+        task.id,
+        plan,
+        'simulator-runtime',
+        'running',
+        '복구된 Simulator에서 같은 인수 검증을 다시 실행하고 있습니다.'
+      )
+      return this.runRuntimeIfConfigured(
+        this.store.getTask(task.id),
+        project,
+        worktreePath,
+        control,
+        runId,
+        source,
+        required
+      )
     }
   }
 
@@ -2497,6 +3122,9 @@ export class AgentRunner {
       const captureState = Boolean(
         debugBridge && manifest.value.capabilities.observe.includes('state')
       )
+      const runtimeAssertions = manifest.value.capabilities.verify.includes('runtime-scenario')
+        ? manifest.value.runtimeScenario?.assertions ?? []
+        : []
       const result = await this.runtimeAdapter.launch({
         taskId: task.id,
         worktreePath,
@@ -2507,6 +3135,9 @@ export class AgentRunner {
         captureState,
         privacyPermissions: normalizedEnvironment.permissions,
         uiActions,
+        accessibilityAssertions: runtimeAssertions.filter(
+          (assertion) => assertion.kind === 'accessibility'
+        ),
         debugBridge,
         debugFixture,
         buildSettings: runtimeEnvironment.buildSettings,
@@ -2654,9 +3285,6 @@ export class AgentRunner {
         ].filter(Boolean).join('\n'))
       }
       let verificationSummary = ''
-      const runtimeAssertions = manifest.value.capabilities.verify.includes('runtime-scenario')
-        ? manifest.value.runtimeScenario?.assertions ?? []
-        : []
       if (runtimeAssertions.length > 0) {
         const verifyMessage = `runtime acceptance ${runtimeAssertions.length.toLocaleString('ko-KR')}개를 평가합니다.`
         this.store.setRuntimeSession(task.id, 'verifying', {
