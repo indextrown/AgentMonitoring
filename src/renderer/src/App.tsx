@@ -2625,7 +2625,7 @@ function CodexModelProfileEditor({
           <option value="root-subagents">루트 + 서브에이전트</option>
         </select>
         <small>{codexExecutionMode(profile) === 'root-subagents'
-          ? '테크스펙·검증 준비 모델이 루트가 되어 각 역할을 한 명씩 위임합니다. 호출량은 늘지만 루트가 결과 형식을 통제합니다.'
+          ? '계획 모델이 각 역할을 한 명씩 위임합니다. 생성·완료 기록과 자식의 최종 응답을 확인하며, 확인할 수 없으면 중단합니다. 토큰 사용량이 늘어날 수 있습니다.'
           : '각 역할을 선택한 모델로 바로 실행합니다. 가장 단순하고 토큰 사용량이 적습니다.'}</small>
       </label>
       <label>
@@ -4192,7 +4192,7 @@ function TaskDrawer({
         <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
         <section className="task-model-plan">
-          <div className="drawer-section-title"><strong>AI 모델</strong><span>{task.modelPlan ? '등록 시 고정됨' : 'Codex 추천 기본값'}</span></div>
+          <div className="drawer-section-title"><strong>AI 모델</strong><span>{task.modelPlan ? '요청 설정 · 등록 시 고정됨' : 'Codex 추천 기본값'}</span></div>
           {task.modelPlan ? (
             <>
             <div className={`task-model-execution ${codexExecutionMode(task.modelPlan)}`}>

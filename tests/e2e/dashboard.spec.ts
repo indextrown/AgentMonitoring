@@ -454,7 +454,8 @@ test('starts from a real-project onboarding state without seeded data', async ({
 })
 
 test('configures project and task-specific Codex models', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   await page.locator('.folder-button').click()
 
   const settings = page.locator('.settings-form')
@@ -468,11 +469,21 @@ test('configures project and task-specific Codex models', async ({ page }) => {
   await settings.getByRole('button', { name: '설정 저장' }).click()
 
   await page.getByRole('button', { name: /대시보드/ }).click()
-  await page.getByRole('button', { name: '새 작업' }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByText(/프로젝트 설정 사용 · 루트 \+ 서브에이전트 · 역할별 모델/)).toBeVisible()
   await dialog.getByLabel('이 작업만 AI 모델 변경').check()
   await expect(dialog.locator('.task-model-selector .codex-model-profile-editor')).toBeVisible()
+  await dialog.getByLabel('작업 제목').fill('고정된 역할 모델 확인')
+  await dialog.getByLabel('목표와 완료 조건').fill('문서를 검토하고 변경 결과를 설명해 주세요.')
+  await dialog.getByLabel('검증 조합').selectOption('manual-review')
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+  const drawer = page.locator('.task-drawer')
+  await expect(drawer.locator('.task-model-execution')).toContainText('루트 + 서브에이전트')
+  await expect(drawer.locator('.task-model-plan')).toContainText('요청 설정 · 등록 시 고정됨')
+  const implementer = drawer.locator('.task-model-plan-grid > div').filter({ hasText: 'Implementer' })
+  await expect(implementer).toContainText('gpt-5.6-terra')
+  await expect(implementer).toContainText('high')
 })
 
 test('creates a manual-review task without a project test command', async ({ page }) => {

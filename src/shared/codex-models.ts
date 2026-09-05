@@ -95,8 +95,12 @@ export function codexExecutionMode(
 }
 
 export function codexModelArguments(selection: CodexModelSelection | null | undefined): string[] {
-  if (!selection) return []
+  // All direct roles and pre-task generators opt out of implicit delegation.
+  // Hierarchical stages explicitly override this per invocation below.
+  const independentArguments = ['--config', 'agents.enabled=false']
+  if (!selection) return independentArguments
   return [
+    ...independentArguments,
     '--model',
     selection.model,
     '--config',

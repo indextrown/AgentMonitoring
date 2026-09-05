@@ -39,6 +39,8 @@ import {
 } from '../../src/shared/domain'
 import { AppStore } from './store'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
+import { CodexDelegationTracker } from './codex-delegation'
+import { extractCodexFailureMessage } from './codex-structured-output'
 import { GitOperationCoordinator } from './git-operation-coordinator'
 import {
   IosRuntimeStageError,
@@ -339,7 +341,8 @@ export function buildDelegatedStagePrompt(
   actor: CodexModelRole,
   selection: NonNullable<TaskRecord['modelPlan']>['roles'][CodexModelRole],
   sandbox: 'read-only' | 'workspace-write',
-  prompt: string
+  prompt: string,
+  imagePaths: string[] = []
 ): string {
   const role = CODEX_MODEL_ROLE_LABELS[actor]
   const writePolicy = sandbox === 'workspace-write'
@@ -349,10 +352,15 @@ export function buildDelegatedStagePrompt(
     '당신은 AgentMonitoring의 루트 오케스트레이터입니다.',
     `아래 작업은 직접 수행하지 말고 ${role} 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.`,
     `서브에이전트는 model=${selection.model}, reasoning_effort=${selection.reasoningEffort} 설정을 사용해야 합니다. 실행 기본값에도 같은 설정이 지정되어 있습니다.`,
+    '기본(default) 에이전트를 새 문맥으로 생성하세요. 사용자 정의 에이전트와 전체 대화 복제는 사용하지 마세요. 위 루트 지침은 전달하지 말고 아래 역할 작업만 전달하세요.',
     writePolicy,
     '서브에이전트가 끝날 때까지 기다린 뒤, 서브에이전트의 최종 응답을 의미나 형식을 바꾸지 말고 그대로 최종 응답으로 반환하세요.',
     '서브에이전트를 만들 수 없으면 작업을 대신 수행하지 말고 `SUBAGENT_FAILURE:`로 시작하는 이유를 반환하세요.',
     `--- ${role}에게 전달할 작업 ---`,
+    '당신은 이 단계의 유일한 작업자입니다. 추가 서브에이전트를 생성하거나 다른 에이전트에 다시 위임하지 마세요.',
+    ...(imagePaths.length ? [
+      `화면 증거 파일 경로: ${JSON.stringify(imagePaths)}. 이미지 확인 도구로 각 파일을 직접 읽고 검토하세요. 읽을 수 없으면 그 이유를 최종 보고에 남기세요.`
+    ] : []),
     prompt
   ].join('\n\n')
 }
@@ -2763,12 +2771,15 @@ export class AgentRunner {
     const hierarchical = Boolean(task.modelPlan) && codexExecutionMode(task.modelPlan) === 'root-subagents'
     const rootModel = hierarchical ? task.modelPlan?.roles.planning : roleModel
     const delegatedPrompt = hierarchical && roleModel
-      ? buildDelegatedStagePrompt(actor, roleModel, sandbox, prompt)
+      ? buildDelegatedStagePrompt(actor, roleModel, sandbox, prompt, imagePaths)
       : prompt
     const executionLabel = hierarchical && roleModel
       ? `루트 ${codexModelLabel(rootModel)} → ${CODEX_MODEL_ROLE_LABELS[actor]} ${codexModelLabel(roleModel)}`
       : codexModelLabel(roleModel)
     this.emit(task, 'agent', actor, `${actor} 단계 시작 · ${executionLabel}`)
+    const delegation = new CodexDelegationTracker()
+    let structuredFailure: string | null = null
+    let provisionalFailure: string | null = null
 
     const result = await this.runProcess(
       this.codexCommand,
@@ -2790,6 +2801,11 @@ export class AgentRunner {
       (line) => {
         try {
           const payload = JSON.parse(line) as Record<string, unknown>
+          if (payload.type === 'turn.failed') structuredFailure = extractCodexFailureMessage(line)
+          if (payload.type === 'error') provisionalFailure = extractCodexFailureMessage(line)
+          if (payload.type === 'turn.completed') provisionalFailure = null
+          const delegationMessage = delegation.consume(payload)
+          if (hierarchical && delegationMessage) this.emit(task, 'agent', actor, delegationMessage)
           const message = eventMessage(payload)
           if (message) this.emit(task, 'agent', actor, redact(message))
         } catch {
@@ -2799,8 +2815,9 @@ export class AgentRunner {
       this.codexHome ? buildCodexEnvironment(this.codexHome, this.codexCommand) : process.env,
       { timeoutMs: this.policy.codexStageTimeoutMs, label: `${actor} 단계` }
     )
-    if (result.code !== 0) {
-      const usageLimit = codexUsageLimitMessage(result.output)
+    const failure = structuredFailure ?? provisionalFailure
+    if (result.code !== 0 || failure) {
+      const usageLimit = codexUsageLimitMessage(`${failure ?? ''}\n${result.output}`)
       if (usageLimit) {
         throw new AgentProviderUnavailableError(
           usageLimit,
@@ -2815,11 +2832,23 @@ export class AgentRunner {
           result.output
         )
       }
-      throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
+      throw new Error(`${actor} 단계가 실패했습니다. ${failure ?? `종료 코드 ${result.code}`}\n${result.output.slice(-2_000)}`)
     }
     if (hierarchical && /^SUBAGENT_FAILURE:/m.test(result.finalMessage)) {
-      throw new Error(`${actor} 서브에이전트 위임에 실패했습니다.\n${result.finalMessage.slice(-2_000)}`)
+      throw new AgentProviderUnavailableError(`${actor} 서브에이전트 위임에 실패했습니다.\n${result.finalMessage.slice(-2_000)}`, actor, actor === 'implementer')
     }
+    if (hierarchical) {
+      const verified = await delegation.verify(this.codexHome, roleModel).catch((error: unknown) => {
+        throw new AgentProviderUnavailableError(`${actor} 위임 확인 실패 · ${String(error)}`, actor, actor === 'implementer')
+      })
+      if (control.stopped) throw new StoppedError()
+      // Use the child's recorded response. A root summary must not turn a
+      // reviewer's findings into PASS or replace the worker's diagnostics.
+      result.finalMessage = redact(verified.message)
+      this.emit(task, 'agent', actor, `서브에이전트 완료 확인${verified.model ? ` · 세션 기록 모델 ${verified.model}` : ' · 실행 기록 확인'}`)
+      this.emit(task, 'agent', actor, result.finalMessage)
+    }
+    if (!result.finalMessage.trim()) throw new Error(`${actor} 단계가 최종 응답 없이 종료됐습니다. 작업 결과를 확인한 뒤 다시 실행하세요.`)
     this.emit(task, 'agent', actor, `${actor} 단계 완료 · ${executionLabel}`)
     return result
   }

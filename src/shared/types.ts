@@ -852,7 +852,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 19
+export const AGENT_MONITORING_BRIDGE_VERSION = 20
 
 export interface AgentMonitoringBridge {
   apiVersion: number

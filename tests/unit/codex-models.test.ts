@@ -67,11 +67,14 @@ describe('Codex model profiles', () => {
 
   it('builds per-run CLI arguments without changing global config', () => {
     expect(codexModelArguments({ model: 'gpt-review', reasoningEffort: 'xhigh' })).toEqual([
+      '--config',
+      'agents.enabled=false',
       '--model',
       'gpt-review',
       '--config',
       'model_reasoning_effort="xhigh"'
     ])
+    expect(codexModelArguments(null)).toEqual(['--config', 'agents.enabled=false'])
     expect(codexSubagentArguments({ model: 'gpt-review', reasoningEffort: 'xhigh' })).toEqual([
       '--config',
       'agents.enabled=true',

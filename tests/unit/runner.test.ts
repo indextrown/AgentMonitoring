@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   AgentRunner,
+  buildDelegatedStagePrompt,
   codexUsageLimitMessage,
   eventMessage,
   parseConfiguredCommand,
@@ -981,7 +982,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
-  it('runs hierarchical stages with the planning root and one configured role subagent', async () => {
+  it.each(['VERDICT: PASS', '[high] 요구사항을 만족하지 못합니다.'])('uses the hierarchical child review even when the root reports PASS: %s', async (reviewMessage) => {
     let callsPath = ''
     const fixture = await createExecutionFixture({
       codexSource: (directory) => {
@@ -990,8 +991,10 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
 import { appendFileSync } from 'node:fs'
 const prompt = process.argv.at(-1) ?? ''
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args: process.argv.slice(2), prompt }) + '\\n')
-const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
-console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? ${JSON.stringify(reviewMessage)} : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'collab_tool_call', tool: 'spawn_agent', status: 'completed', receiver_thread_ids: ['child'] } }))
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'collab_tool_call', tool: 'wait', status: 'completed', agents_states: { child: { status: 'completed', message } } } }))
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'VERDICT: PASS' } }))
 console.log(JSON.stringify({ type: 'turn.completed' }))
 `
       },
@@ -1044,6 +1047,65 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     ]))
     expect(calls[1].prompt).toContain('Reviewer 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.')
     expect(calls[1].prompt).toContain('루트 모두 읽기 전용')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_manual_validation')
+    expect(fixture.store.getTask(fixture.taskId).verificationResult?.reviewer.status).toBe(reviewMessage === 'VERDICT: PASS' ? 'passed' : 'failed')
+    fixture.store.close()
+  })
+
+  it('passes fresh-context and screenshot instructions to the delegated worker', () => {
+    const prompt = buildDelegatedStagePrompt('reviewer', { model: 'review', reasoningEffort: 'high' }, 'read-only', '검토할 작업', ['/tmp/evidence/screen.png'])
+    expect(prompt).toContain('기본(default) 에이전트를 새 문맥으로 생성')
+    expect(prompt).toContain('추가 서브에이전트를 생성하거나 다른 에이전트에 다시 위임하지 마세요.')
+    expect(prompt).toContain('/tmp/evidence/screen.png')
+    expect(prompt).toContain('이미지 확인 도구로 각 파일을 직접 읽고 검토')
+  })
+
+  it('blocks unverified delegation without consuming an implementation attempt', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'VERDICT: PASS' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      testCommand: null,
+      verificationPlan: { version: 1, mode: 'manual-review', testDesign: 'skip', runtimeSource: 'off' },
+      modelPlan: {
+        version: 1, source: 'task', executionMode: 'root-subagents', resolvedAt: '2026-09-05T00:00:00Z',
+        roles: Object.fromEntries(['planning', 'test-designer', 'critic', 'implementer', 'reviewer'].map((role) => [role, { model: 'model', reasoningEffort: 'low' }])) as CodexResolvedModelPlan['roles']
+      }
+    })
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('생성 기록')
+    const task = fixture.store.getTask(fixture.taskId)
+    expect(task.status).toBe('blocked_agent')
+    expect(task.attempt).toBe(0)
+    expect(task.worktreePath).toBeTruthy()
+    fixture.store.close()
+  })
+
+  it('handles a terminal usage-limit event even when Codex exits with zero', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit." } }))
+`,
+      testCommand: null,
+      verificationPlan: { version: 1, mode: 'manual-review', testDesign: 'skip', runtimeSource: 'off' }
+    })
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('사용 한도')
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('blocked_agent')
+    fixture.store.close()
+  })
+
+  it('accepts a recovered stream error followed by a successful turn', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'error', message: 'stream interrupted; retrying' }))
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'VERDICT: PASS' } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      testCommand: null,
+      verificationPlan: { version: 1, mode: 'manual-review', testDesign: 'skip', runtimeSource: 'off' }
+    })
+    await fixture.runner.run(fixture.taskId)
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_manual_validation')
     fixture.store.close()
   })
 
