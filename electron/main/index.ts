@@ -501,6 +501,27 @@ function registerIpc(): void {
     return requireProjectSimulator().launch(requireStore().getProject(validProjectId))
   })
 
+  ipcMain.handle('project-simulator:launch-task', (_event, taskId: string) => {
+    const validTaskId = z.string().uuid().parse(taskId)
+    const store = requireStore()
+    const task = store.getTask(validTaskId)
+    if (!task.worktreePath) {
+      throw new Error('이 작업의 격리 작업공간이 없어 작업 브랜치 앱을 실행할 수 없습니다.')
+    }
+    if (['queued', 'running', 'testing'].includes(task.status)) {
+      throw new Error('구현이나 검증이 진행 중인 작업은 완료된 뒤 작업 브랜치 앱을 실행하세요.')
+    }
+    const project = store.getProject(task.projectId)
+    return requireProjectSimulator().launch(project, {
+      path: task.worktreePath,
+      source: {
+        kind: 'task-worktree',
+        taskId: task.id,
+        branchName: task.branchName
+      }
+    })
+  })
+
   ipcMain.handle('project-simulator:restart', (_event, projectId: string) => {
     const validProjectId = z.string().uuid().parse(projectId)
     return requireProjectSimulator().restart(requireStore().getProject(validProjectId))

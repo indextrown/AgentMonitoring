@@ -6,6 +6,7 @@ import type {
   IosRuntimeAdapterConfig,
   ProjectRecord,
   ProjectSimulatorSession,
+  ProjectSimulatorSource,
   ProjectSimulatorStatus
 } from '../../src/shared/types'
 import {
@@ -33,6 +34,11 @@ interface ProjectSimulatorRuntime {
   cwd: string
   deviceId: string
   bundleIdentifier: string
+}
+
+export interface ProjectSimulatorLaunchTarget {
+  path: string
+  source: ProjectSimulatorSource
 }
 
 export type ProjectSimulatorPublisher = (session: ProjectSimulatorSession) => void
@@ -88,6 +94,11 @@ function parseProcessId(output: string): number | null {
 function initialSession(projectId: string): ProjectSimulatorSession {
   return {
     projectId,
+    source: {
+      kind: 'project',
+      taskId: null,
+      branchName: null
+    },
     status: 'idle',
     deviceId: null,
     deviceName: null,
@@ -115,9 +126,22 @@ export class ProjectSimulatorService {
     return this.sessions.get(project.id) ?? initialSession(project.id)
   }
 
-  launch(project: ProjectRecord): Promise<ProjectSimulatorSession> {
+  launch(
+    project: ProjectRecord,
+    target: ProjectSimulatorLaunchTarget = {
+      path: project.path,
+      source: {
+        kind: 'project',
+        taskId: null,
+        branchName: null
+      }
+    }
+  ): Promise<ProjectSimulatorSession> {
     return this.runExclusive(project, async (adapter) => {
-      const projectRoot = await realpath(project.path)
+      this.update(project.id, 'preparing', `${adapter.scheme}이 실행 가능한 iOS 앱인지 확인하고 있습니다.`, {
+        source: target.source
+      })
+      const projectRoot = await realpath(target.path)
       const containerPath = await this.requireContainer(projectRoot, adapter.container)
       const projectRuntimeRoot = resolve(this.runtimeRoot, project.id)
       await rm(projectRuntimeRoot, { recursive: true, force: true })
@@ -125,7 +149,6 @@ export class ProjectSimulatorService {
       const derivedDataPath = await realpath(resolve(projectRuntimeRoot, 'DerivedData'))
       const familyLabel = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
 
-      this.update(project.id, 'preparing', `${adapter.scheme}이 실행 가능한 iOS 앱인지 확인하고 있습니다.`)
       const schemeSettings = await this.required({
         command: XCRUN_COMMAND,
         args: [

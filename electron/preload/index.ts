@@ -50,6 +50,7 @@ const bridge: AgentMonitoringBridge = {
   syncSourceControlRemote: (projectId: string) => ipcRenderer.invoke('source-control:sync', projectId),
   getProjectSimulatorStatus: (projectId: string) => ipcRenderer.invoke('project-simulator:status', projectId),
   launchProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:launch', projectId),
+  launchTaskSimulator: (taskId: string) => ipcRenderer.invoke('project-simulator:launch-task', taskId),
   restartProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:restart', projectId),
   stopProjectSimulator: (projectId: string) => ipcRenderer.invoke('project-simulator:stop', projectId),
   autoConfigureProjectRuntime: (projectId: string) =>

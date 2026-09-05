@@ -130,6 +130,7 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'syncSourceControlRemote',
   'getProjectSimulatorStatus',
   'launchProjectSimulator',
+  'launchTaskSimulator',
   'restartProjectSimulator',
   'stopProjectSimulator',
   'onProjectSimulatorChanged',
@@ -570,6 +571,18 @@ export function App(): React.JSX.Element {
     void load(task.projectId)
   }
 
+  const launchTaskSimulator = (task: TaskRecord): void => {
+    setError(null)
+    setNotice(`${task.branchName ?? '작업 브랜치'}에서 앱을 빌드하고 있습니다.`)
+    setSelectedTask(null)
+    setPage('dashboard')
+    void bridge.launchTaskSimulator(task.id)
+      .then((session) => {
+        setNotice(`${session.source.branchName ?? '작업 브랜치'} 앱을 Simulator에서 실행했습니다.`)
+      })
+      .catch((launchError) => setError(String(launchError)))
+  }
+
   const regenerateTaskRuntimeScenario = async (task: TaskRecord): Promise<void> => {
     try {
       setBusy(true)
@@ -937,6 +950,8 @@ export function App(): React.JSX.Element {
           onRun={runTask}
           onRetryVerification={retryTaskVerification}
           onRegenerateRuntimeScenario={(task) => void regenerateTaskRuntimeScenario(task)}
+          canLaunchSimulator={selectedProject?.id === selectedTask.projectId && selectedProject.runtimeAdapter?.kind === 'ios-simulator'}
+          onLaunchSimulator={launchTaskSimulator}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
           onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
@@ -1398,12 +1413,10 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
     }
   }, [project.id])
 
-  const run = async (
-    operation: (projectId: string) => Promise<ProjectSimulatorSession>
-  ): Promise<void> => {
+  const run = async (operation: () => Promise<ProjectSimulatorSession>): Promise<void> => {
     setError(null)
     try {
-      setSession(await operation(project.id))
+      setSession(await operation())
     } catch (operationError) {
       setError(String(operationError))
     }
@@ -1413,6 +1426,9 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
   const installed = Boolean(session?.deviceId && session.bundleIdentifier)
   const adapter = project.runtimeAdapter!
   const family = adapter.deviceFamily === 'iphone' ? 'iPhone' : 'iPad'
+  const taskSource = session?.source.kind === 'task-worktree' && session.source.taskId
+    ? session.source
+    : null
 
   return (
     <article className={`panel project-simulator status-${session?.status ?? 'idle'}`} aria-live="polite">
@@ -1427,6 +1443,10 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
         </div>
         <p>{session?.message ?? `${adapter.scheme} 실행 상태를 확인하고 있습니다.`}</p>
         <div className="project-simulator-meta">
+          <code className={taskSource ? 'task-source' : undefined}>
+            <GitBranch size={10} />
+            {taskSource ? `${taskSource.branchName ?? '작업 브랜치'} · 작업본` : '원본 저장소'}
+          </code>
           <code>{adapter.scheme} · {adapter.configuration}</code>
           {session?.deviceName && <code>{session.deviceName}</code>}
           {session?.bundleIdentifier && <code>{session.bundleIdentifier}</code>}
@@ -1440,18 +1460,30 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
           className="primary-button"
           type="button"
           disabled={busy}
-          onClick={() => void run(bridge.launchProjectSimulator)}
+          onClick={() => void run(() => taskSource
+            ? bridge.launchTaskSimulator(taskSource.taskId!)
+            : bridge.launchProjectSimulator(project.id))}
         >
           {busy && ['preparing', 'booting', 'building', 'installing'].includes(session?.status ?? '')
             ? <LoaderCircle className="spin" size={13} />
             : <Play size={13} />}
           {session?.status === 'running' ? '다시 빌드·실행' : '빌드·실행'}
         </button>
+        {taskSource && (
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={busy}
+            onClick={() => void run(() => bridge.launchProjectSimulator(project.id))}
+          >
+            <GitBranch size={13} /> 원본으로 실행
+          </button>
+        )}
         <button
           className="secondary-button"
           type="button"
           disabled={busy || !installed}
-          onClick={() => void run(bridge.restartProjectSimulator)}
+          onClick={() => void run(() => bridge.restartProjectSimulator(project.id))}
         >
           <RotateCcw size={13} /> 재실행
         </button>
@@ -1459,7 +1491,7 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
           className="secondary-button danger"
           type="button"
           disabled={busy || !installed || session?.status === 'stopped'}
-          onClick={() => void run(bridge.stopProjectSimulator)}
+          onClick={() => void run(() => bridge.stopProjectSimulator(project.id))}
         >
           <Square size={12} /> 종료
         </button>
@@ -3536,6 +3568,8 @@ function TaskDrawer({
   onRun,
   onRetryVerification,
   onRegenerateRuntimeScenario,
+  canLaunchSimulator,
+  onLaunchSimulator,
   onAction,
   onOpenPath,
   onOpenEvidence
@@ -3549,6 +3583,8 @@ function TaskDrawer({
   onRun: (task: TaskRecord) => void
   onRetryVerification: (task: TaskRecord) => void
   onRegenerateRuntimeScenario: (task: TaskRecord) => void
+  canLaunchSimulator: boolean
+  onLaunchSimulator: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
@@ -3778,6 +3814,7 @@ function TaskDrawer({
         )}
         </div>
         <footer>
+          {canLaunchSimulator && task.worktreePath && !['queued', 'running', 'testing'].includes(task.status) && <button className="secondary-button" onClick={() => onLaunchSimulator(task)}><SquareTerminal size={14} />작업 브랜치 앱 실행</button>}
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
           {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}

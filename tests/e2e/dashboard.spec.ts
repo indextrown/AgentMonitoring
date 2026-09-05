@@ -236,6 +236,7 @@ test('launches, restarts, and stops a connected iOS app from the dashboard', asy
   const simulator = page.locator('.project-simulator')
   await expect(simulator.getByRole('heading', { name: 'iPhone에서 앱 바로 실행' })).toBeVisible()
   await expect(simulator.getByText('실행 준비', { exact: true })).toBeVisible()
+  await expect(simulator.getByText('원본 저장소', { exact: true })).toBeVisible()
 
   await simulator.getByRole('button', { name: '빌드·실행' }).click()
   await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()
@@ -248,6 +249,32 @@ test('launches, restarts, and stops a connected iOS app from the dashboard', asy
   await simulator.getByRole('button', { name: '종료' }).click()
   await expect(simulator.getByText('앱 종료됨', { exact: true })).toBeVisible()
   await expect(simulator.getByRole('button', { name: '종료' })).toBeDisabled()
+})
+
+test('launches a verified task worktree and keeps that branch as the rebuild source', async ({ page }) => {
+  await page.goto('/?workspace=empty&contract=ios')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('작업 브랜치 실행 확인')
+  await dialog.getByLabel('목표와 완료 조건').fill('격리 작업공간에서 변경한 앱을 원본과 섞지 않고 Simulator에서 실행한다.')
+  await dialog.getByLabel('검증 조합').selectOption('manual-review')
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await drawer.getByRole('button', { name: '실행' }).click()
+  await expect(drawer.getByText('수동 검증 필요', { exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: '작업 브랜치 앱 실행' }).click()
+
+  const simulator = page.locator('.project-simulator')
+  await expect(simulator.getByText(/agentmonitor\/demo-.*· 작업본/)).toBeVisible()
+  await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()
+  await expect(simulator.getByRole('button', { name: '다시 빌드·실행' })).toBeVisible()
+  await expect(simulator.getByRole('button', { name: '원본으로 실행' })).toBeVisible()
+
+  await simulator.getByRole('button', { name: '다시 빌드·실행' }).click()
+  await expect(simulator.getByText(/agentmonitor\/demo-.*· 작업본/)).toBeVisible()
 })
 
 test('explains the manual fallback when iOS automatic connection cannot find Xcode', async ({ page }) => {

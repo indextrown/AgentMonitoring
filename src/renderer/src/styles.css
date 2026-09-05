@@ -1241,11 +1241,19 @@ kbd {
 }
 
 .project-simulator-meta code {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 3px 6px;
   border-radius: 4px;
   color: #87939e;
   background: #0c1114;
   font-size: 7px;
+}
+
+.project-simulator-meta code.task-source {
+  color: #78b5ee;
+  background: #101c28;
 }
 
 .project-simulator-error {

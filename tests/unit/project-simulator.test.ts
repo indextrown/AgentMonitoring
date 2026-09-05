@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -158,6 +158,47 @@ describe('ProjectSimulatorService', () => {
     await expect(service.launch(projectRecord(projectPath, '../Outside.xcodeproj')))
       .rejects.toThrow('프로젝트 저장소 밖')
     expect(service.getStatus(projectRecord(projectPath, '../Outside.xcodeproj')).status).toBe('failed')
+  })
+
+  it('uses the selected task worktree and reports its branch as the launch source', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-simulator-worktree-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    const worktreePath = join(directory, 'worktree')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    await mkdir(join(worktreePath, 'Demo.xcodeproj'), { recursive: true })
+    const commands: RuntimeCommandRequest[] = []
+    const execute = async (request: RuntimeCommandRequest) => {
+      commands.push(request)
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return { code: 0, output: '', stdout: appBuildSettings() }
+      }
+      if (request.args.join(' ') === 'simctl list devices available --json') {
+        return { code: 0, output: '', stdout: JSON.stringify({ devices: {} }) }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const project = projectRecord(projectPath)
+    const service = new ProjectSimulatorService(join(directory, 'runtime'), () => undefined, execute)
+
+    await expect(service.launch(project, {
+      path: worktreePath,
+      source: {
+        kind: 'task-worktree',
+        taskId: '22222222-2222-4222-8222-222222222222',
+        branchName: 'agentmonitor/task-branch'
+      }
+    })).rejects.toThrow('사용 가능한 iPhone Simulator가 없습니다')
+
+    const resolvedWorktreePath = await realpath(worktreePath)
+    expect(commands).not.toHaveLength(0)
+    expect(commands.every((request) => request.cwd === resolvedWorktreePath)).toBe(true)
+    expect(commands[0].args).toContain(join(resolvedWorktreePath, 'Demo.xcodeproj'))
+    expect(service.getStatus(project).source).toEqual({
+      kind: 'task-worktree',
+      taskId: '22222222-2222-4222-8222-222222222222',
+      branchName: 'agentmonitor/task-branch'
+    })
   })
 
   it('blocks overlapping Simulator commands for the same project', async () => {

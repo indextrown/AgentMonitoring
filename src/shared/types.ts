@@ -405,8 +405,15 @@ export type ProjectSimulatorStatus =
   | 'stopped'
   | 'failed'
 
+export interface ProjectSimulatorSource {
+  kind: 'project' | 'task-worktree'
+  taskId: string | null
+  branchName: string | null
+}
+
 export interface ProjectSimulatorSession {
   projectId: string
+  source: ProjectSimulatorSource
   status: ProjectSimulatorStatus
   deviceId: string | null
   deviceName: string | null
@@ -723,7 +730,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 12
+export const AGENT_MONITORING_BRIDGE_VERSION = 13
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -755,6 +762,7 @@ export interface AgentMonitoringBridge {
   syncSourceControlRemote: (projectId: string) => Promise<SourceControlStatus>
   getProjectSimulatorStatus: (projectId: string) => Promise<ProjectSimulatorSession>
   launchProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
+  launchTaskSimulator: (taskId: string) => Promise<ProjectSimulatorSession>
   restartProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   stopProjectSimulator: (projectId: string) => Promise<ProjectSimulatorSession>
   autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>

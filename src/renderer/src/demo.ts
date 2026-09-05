@@ -23,6 +23,11 @@ const demoSimulatorSessions = new Map<string, ProjectSimulatorSession>()
 function demoSimulatorSession(requestedProjectId: string): ProjectSimulatorSession {
   return demoSimulatorSessions.get(requestedProjectId) ?? {
     projectId: requestedProjectId,
+    source: {
+      kind: 'project',
+      taskId: null,
+      branchName: null
+    },
     status: 'idle',
     deviceId: null,
     deviceName: null,
@@ -816,6 +821,11 @@ export const demoBridge: AgentMonitoringBridge = {
   },
   getProjectSimulatorStatus: async (requestedProjectId) => demoSimulatorSession(requestedProjectId),
   launchProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
+    source: {
+      kind: 'project',
+      taskId: null,
+      branchName: null
+    },
     status: 'running',
     deviceId: 'DEMO-IPHONE-UDID',
     deviceName: 'iPhone 16 Pro',
@@ -824,6 +834,24 @@ export const demoBridge: AgentMonitoringBridge = {
     message: 'iPhone 16 Pro에서 앱을 실행하고 있습니다.',
     error: null
   }),
+  launchTaskSimulator: async (taskId) => {
+    const task = state.tasks.find((item) => item.id === taskId)
+    if (!task?.worktreePath) throw new Error('이 작업의 격리 작업공간이 없습니다.')
+    return updateDemoSimulator(task.projectId, {
+      source: {
+        kind: 'task-worktree',
+        taskId: task.id,
+        branchName: task.branchName
+      },
+      status: 'running',
+      deviceId: 'DEMO-IPHONE-UDID',
+      deviceName: 'iPhone 16 Pro',
+      bundleIdentifier: 'com.example.Demo',
+      processId: 4242,
+      message: '작업 브랜치 앱을 iPhone 16 Pro에서 실행하고 있습니다.',
+      error: null
+    })
+  },
   restartProjectSimulator: async (requestedProjectId) => updateDemoSimulator(requestedProjectId, {
     status: 'running',
     processId: 4243,
