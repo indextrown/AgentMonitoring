@@ -13,6 +13,7 @@ import {
 } from '../../electron/main/project-runtime-config'
 import {
   buildApprovedRuntimeContract,
+  buildApprovedRuntimeContractV2,
   RuntimeScenarioGenerator
 } from '../../electron/main/runtime-scenario-generator'
 
@@ -25,6 +26,68 @@ const adapter = {
 }
 
 describe('runtime scenario generation', () => {
+  it('retries a silent structured-output failure and upgrades a legacy contract', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-upgrade-'))
+    const fakeCodex = join(root, 'fake-codex.mjs')
+    try {
+      const payload = {
+        summary: '성공과 실패 상태를 독립 케이스로 나눕니다.',
+        environmentRequirements: [],
+        cases: [{
+          id: 'location-success',
+          name: '현재 위치 이동 성공',
+          permissions: [{ service: 'location', state: 'granted' }],
+          requiredEnvironmentKeys: [],
+          launchVariables: { UITEST_LOCATION_SCENARIO: 'success' },
+          resetAppData: true,
+          steps: [
+            { kind: 'action', action: { kind: 'tap', identifier: 'current-location', text: null, timeoutSeconds: 10 } },
+            { kind: 'assert', assertions: [{ name: '지도 이동 완료', identifier: 'map-screen', property: 'value', expected: '현재 위치 중심' }] }
+          ]
+        }]
+      }
+      await writeFile(fakeCodex, [
+        '#!/usr/bin/env node',
+        "if (!process.argv.at(-1)?.includes('로컬 xcconfig가 작업공간에 안전하게 동기화')) process.exit(3)",
+        "if (process.argv.includes('--output-schema')) process.exit(1)",
+        `console.log(${JSON.stringify(JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: JSON.stringify(payload) }
+        }))})`
+      ].join('\n'), 'utf8')
+      await chmod(fakeCodex, 0o700)
+
+      const generated = await new RuntimeScenarioGenerator(fakeCodex).generate({
+        projectPath: root,
+        title: '현재 위치 이동',
+        prompt: '버튼을 누르면 현재 위치로 이동합니다.',
+        adapter,
+        legacyContract: {
+          version: 1,
+          adapter,
+          capabilities: { build: true, run: true, observe: ['accessibility'], act: ['ui'], verify: ['runtime-scenario'] },
+          runtimeScenario: {
+            actions: [{ kind: 'tap', identifier: 'current-location', timeoutSeconds: 10 }],
+            assertions: [
+              { kind: 'accessibility', identifier: 'current-location', property: 'enabled', expected: true },
+              { kind: 'accessibility', identifier: 'current-location', property: 'enabled', expected: false }
+            ]
+          }
+        },
+        localBuildConfigurationAvailable: true
+      })
+
+      expect(generated.contract.version).toBe(2)
+      expect(generated.summary).toBe(payload.summary)
+      if (generated.contract.version !== 2) throw new Error('version 2 계약이 필요합니다.')
+      expect(generated.contract.runtimeScenarios.cases[0].preconditions.launchVariables).toEqual({
+        UITEST_LOCATION_SCENARIO: 'success'
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('recovers a generated scenario from Codex JSON events when the result file is missing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-fallback-'))
     const fakeCodex = join(root, 'fake-codex.mjs')
@@ -37,6 +100,7 @@ describe('runtime scenario generation', () => {
           name: '프로필 저장 성공',
           permissions: [],
           requiredEnvironmentKeys: [],
+          launchVariables: {},
           resetAppData: false,
           steps: [
             { kind: 'action', action: { kind: 'tap', identifier: 'save-profile', text: null, timeoutSeconds: 10 } },
@@ -71,6 +135,62 @@ describe('runtime scenario generation', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('등록되지 않은 환경값이 필요한 케이스를 제외하고 연속 체크포인트를 안정 상태로 정리한다', () => {
+    const contract = buildApprovedRuntimeContractV2(adapter, {
+      summary: '실행 가능한 경로만 검증합니다.',
+      environmentRequirements: [{ key: 'missing-secret', label: '미등록 비밀값', required: true }],
+      cases: [
+        {
+          id: 'blocked-case',
+          name: '미등록 환경값 케이스',
+          permissions: [],
+          requiredEnvironmentKeys: ['missing-secret'],
+          launchVariables: {},
+          resetAppData: true,
+          steps: [{
+            kind: 'assert',
+            assertions: [{ name: '화면 표시', identifier: 'screen', property: 'exists', expected: true }]
+          }]
+        },
+        {
+          id: 'runnable-case',
+          name: '실행 가능한 케이스',
+          permissions: [],
+          requiredEnvironmentKeys: [],
+          launchVariables: {
+            UITEST_SCENARIO: 'success',
+            UITEST_ACCESS_TOKEN: 'pk.fake-token',
+            UITEST_EMPTY_TOKEN: ''
+          },
+          resetAppData: true,
+          steps: [
+            {
+              kind: 'assert',
+              assertions: [{ name: '로딩', identifier: 'progress', property: 'exists', expected: true }]
+            },
+            {
+              kind: 'assert',
+              assertions: [{ name: '완료', identifier: 'complete', property: 'exists', expected: true }]
+            }
+          ]
+        }
+      ]
+    }, [])
+
+    expect(contract.version).toBe(2)
+    if (contract.version !== 2) throw new Error('version 2 계약이 필요합니다.')
+    expect(contract.environmentRequirements).toEqual([])
+    expect(contract.runtimeScenarios.cases).toHaveLength(1)
+    expect(contract.runtimeScenarios.cases[0].preconditions.launchVariables).toEqual({
+      UITEST_SCENARIO: 'success',
+      UITEST_EMPTY_TOKEN: ''
+    })
+    expect(contract.runtimeScenarios.cases[0].steps).toEqual([{
+      kind: 'assert',
+      assertions: [expect.objectContaining({ identifier: 'complete' })]
+    }])
   })
 
   it('prefers a tracked workspace and ignores the project-internal workspace', () => {

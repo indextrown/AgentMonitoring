@@ -113,15 +113,20 @@ function accessibilityMatches(
     return { matches: [], error: '접근성 트리 JSON에 root가 없습니다.' }
   }
 
-  const matches: Record<string, unknown>[] = []
+  const identifierMatches: Record<string, unknown>[] = []
+  const labelMatches: Record<string, unknown>[] = []
   const stack: unknown[] = [document.value.root]
   while (stack.length > 0) {
     const node = stack.pop()
     if (!isRecord(node)) continue
-    if (node.identifier === identifier) matches.push(node)
+    if (node.identifier === identifier) identifierMatches.push(node)
+    if (node.label === identifier) labelMatches.push(node)
     if (Array.isArray(node.children)) stack.push(...node.children)
   }
-  return { matches, error: null }
+  return {
+    matches: identifierMatches.length > 0 ? identifierMatches : labelMatches,
+    error: null
+  }
 }
 
 function result(

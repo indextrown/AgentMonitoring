@@ -984,6 +984,40 @@ export const demoBridge: AgentMonitoringBridge = {
     emit(task, 'task_created', 'human', `${task.title} 작업 등록`)
     return task
   },
+  regenerateTaskRuntimeScenario: async (taskId) => {
+    const current = state.tasks.find((task) => task.id === taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if (!current.runtimeContract || current.runtimeContract.version === 2) return current
+    const legacy = current.runtimeContract
+    const steps = [
+      ...legacy.runtimeScenario.actions.map((action) => ({ kind: 'action' as const, action })),
+      ...(legacy.runtimeScenario.assertions.length > 0
+        ? [{ kind: 'assert' as const, assertions: legacy.runtimeScenario.assertions }]
+        : [])
+    ]
+    const updated: TaskRecord = {
+      ...current,
+      runtimeContract: {
+        version: 2,
+        adapter: legacy.adapter,
+        capabilities: legacy.capabilities,
+        environmentRequirements: [],
+        runtimeScenarios: {
+          cases: [{
+            id: 'demo-updated-scenario',
+            name: '최신화된 데모 시나리오',
+            preconditions: { permissions: legacy.runtimeScenario.permissions ?? [] },
+            steps
+          }]
+        }
+      },
+      runtimeScenarioSummary: '독립 케이스와 단계별 체크포인트를 사용하는 최신 시나리오',
+      runtimeScenarioApprovedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === taskId ? updated : task) }
+    return updated
+  },
   getTaskChanges: async (taskId) => {
     const task = state.tasks.find((item) => item.id === taskId)
     const available = Boolean(task?.worktreePath)

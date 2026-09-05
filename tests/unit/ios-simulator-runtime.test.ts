@@ -128,6 +128,13 @@ describe('iOS Simulator runtime adapter', () => {
         timeoutSeconds: 12
       }
     ]
+    const accessibilityAssertions = [{
+      kind: 'accessibility' as const,
+      name: '항해 시작 버튼 활성화',
+      identifier: 'start-navigation',
+      property: 'enabled' as const,
+      expected: true
+    }]
     const execute = async (request: RuntimeCommandRequest) => {
       commands.push(request)
       if (request.args.join(' ') === 'simctl list devices available --json') {
@@ -226,6 +233,7 @@ describe('iOS Simulator runtime adapter', () => {
       captureState: true,
       privacyPermissions: [{ service: 'location', state: 'granted' }],
       uiActions,
+      accessibilityAssertions,
       debugBridge: { protocol: 'file-v1', responseTimeoutSeconds: 10 },
       debugFixture: {
         id: 'signed-in-home',
@@ -404,6 +412,7 @@ describe('iOS Simulator runtime adapter', () => {
     expect(environment.AGENTMONITOR_TARGET_BUNDLE_ID).toBe('com.example.PopPang')
     expect(environment.AGENTMONITOR_CAPTURE_ACCESSIBILITY).toBe('1')
     expect(JSON.parse(Buffer.from(environment.AGENTMONITOR_UI_ACTIONS_BASE64, 'base64').toString('utf8'))).toEqual(uiActions)
+    expect(JSON.parse(Buffer.from(environment.AGENTMONITOR_ACCESSIBILITY_ASSERTIONS_BASE64, 'base64').toString('utf8'))).toEqual(accessibilityAssertions)
   })
 
   it('reports a clear error when no iPad Simulator is available', async () => {

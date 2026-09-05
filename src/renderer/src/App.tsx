@@ -154,6 +154,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   running: '구현 중',
   testing: '테스트 중',
   blocked_environment: '환경 확인 필요',
+  blocked_agent: 'AI 사용 대기',
   awaiting_approval: '승인 대기',
   awaiting_manual_validation: '수동 검증 필요',
   awaiting_merge: 'PR 병합 대기',
@@ -338,6 +339,7 @@ function statusTone(status: TaskStatus): string {
   if (status === 'awaiting_manual_validation') return 'amber'
   if (status === 'awaiting_merge') return 'violet'
   if (status === 'blocked_environment') return 'amber'
+  if (status === 'blocked_agent') return 'amber'
   if (status === 'running' || status === 'testing') return 'blue'
   if (status === 'stopped' || status === 'discarded') return 'muted'
   return 'amber'
@@ -566,6 +568,20 @@ export function App(): React.JSX.Element {
       .then(() => load(task.projectId))
       .catch((retryError) => setError(String(retryError)))
     void load(task.projectId)
+  }
+
+  const regenerateTaskRuntimeScenario = async (task: TaskRecord): Promise<void> => {
+    try {
+      setBusy(true)
+      setSelectedTask(task)
+      await bridge.regenerateTaskRuntimeScenario(task.id)
+      setNotice('현재 코드와 실행 환경에서 재현 가능한 검증 시나리오로 다시 만들었습니다.')
+      await load(task.projectId)
+    } catch (scenarioError) {
+      setError(String(scenarioError))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const taskAction = async (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr'): Promise<void> => {
@@ -920,6 +936,7 @@ export function App(): React.JSX.Element {
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
           onRetryVerification={retryTaskVerification}
+          onRegenerateRuntimeScenario={(task) => void regenerateTaskRuntimeScenario(task)}
           onAction={taskAction}
           onOpenPath={() => selectedTask.worktreePath && void bridge.openPath(selectedTask.worktreePath)}
           onOpenEvidence={(path) => void bridge.openPath(path).catch((openError) => setError(String(openError)))}
@@ -1859,7 +1876,7 @@ function TasksPage({ tasks, onNewTask, onOpen, onRun, onAction }: { tasks: TaskR
             <code>{task.branchName ?? '—'}</code>
             <time>{timeAgo(task.updatedAt)}</time>
             <div className="row-actions">
-              {['queued', 'failed', 'stopped'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
+              {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button title="실행" onClick={() => onRun(task)}><Play size={13} /></button>}
               {isActiveTask(task) && <button title="중단" onClick={() => onAction(task, 'stop')}><Square size={12} /></button>}
               {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !isAwaitingLocalPublicationSync(task) && <button title={(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)} onClick={() => onAction(task, 'approve')}><Check size={13} /></button>}
               {(task.status === 'awaiting_merge' || isAwaitingLocalPublicationSync(task)) && <button title={isAwaitingLocalPublicationSync(task) ? '로컬 동기화 다시 시도' : 'PR 상태 확인'} onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={13} /></button>}
@@ -3351,6 +3368,17 @@ function TaskModal({
                           ))}
                         </div>
                       )}
+                      {Object.keys(scenario.preconditions.launchVariables ?? {}).length > 0 && (
+                        <div className="scenario-environment-requirements">
+                          <p>자동 적용할 UI 테스트 fixture</p>
+                          {Object.entries(scenario.preconditions.launchVariables ?? {}).map(([name, value]) => (
+                            <span className="ready" key={`${scenario.id}-${name}`}>
+                              <CheckCircle2 size={12} />
+                              <code>{name}</code> = <code>{value || '(빈 값)'}</code>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="scenario-list">
                         {scenario.steps.map((step, stepIndex) => step.kind === 'action' ? (
                           <div className="scenario-row" key={`${scenario.id}-step-${stepIndex}`}>
@@ -3507,6 +3535,7 @@ function TaskDrawer({
   onClose,
   onRun,
   onRetryVerification,
+  onRegenerateRuntimeScenario,
   onAction,
   onOpenPath,
   onOpenEvidence
@@ -3519,6 +3548,7 @@ function TaskDrawer({
   onClose: () => void
   onRun: (task: TaskRecord) => void
   onRetryVerification: (task: TaskRecord) => void
+  onRegenerateRuntimeScenario: (task: TaskRecord) => void
   onAction: (task: TaskRecord, action: 'stop' | 'approve' | 'discard' | 'refresh-publication' | 'switch-to-pr') => void
   onOpenPath: () => void
   onOpenEvidence: (path: string) => void
@@ -3728,12 +3758,31 @@ function TaskDrawer({
             <p><strong>코드 문제가 아니라 검증 환경을 먼저 준비해야 합니다</strong>현재 변경과 작업공간은 그대로 보관했습니다. 프로젝트 설정의 환경 준비 명령을 확인한 뒤 구현을 다시 시키지 않고 검증만 재실행할 수 있습니다.</p>
           </div>
         )}
+        {task.status === 'blocked_agent' && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>Codex를 다시 사용할 수 있을 때 이어서 실행하세요</strong>제품 코드 실패가 아니라 AI 제공자 요청이 중단된 상태입니다. 현재 변경과 작업공간은 보존했으며, 실행을 누르면 Implementer 단계부터 다시 이어갑니다.</p>
+          </div>
+        )}
+        {task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>Reviewer 지적을 다음 구현에 반영할 수 있습니다</strong>실행을 누르면 기존 작업공간을 유지한 채 미해결 지적을 Implementer에 전달하고 테스트부터 Reviewer까지 다시 진행합니다.</p>
+          </div>
+        )}
+        {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && (
+          <div className="approval-notice environment-blocked">
+            <AlertTriangle size={14} />
+            <p><strong>{task.runtimeContract.version === 1 ? '이전 Simulator 시나리오를 최신화할 수 있습니다' : '검증 시나리오를 다시 만들 수 있습니다'}</strong>실행할 수 없는 환경값이나 순간적인 상태로 막힌 경우, 현재 코드와 IDE에 등록된 환경을 기준으로 재생성합니다.</p>
+          </div>
+        )}
         </div>
         <footer>
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
-          {['queued', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />실행</button>}
-          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
-          {['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
+          {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
+          {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}
+          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
+          {['failed', 'stopped', 'blocked_environment', 'blocked_agent'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}

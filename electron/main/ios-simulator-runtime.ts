@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { z } from 'zod'
 import type { ProjectCapabilityManifest } from './project-capabilities'
 import type {
+  RuntimeAcceptanceAssertion,
   RuntimePrivacyPermission,
   RuntimeSessionRecord,
   RuntimeSessionStatus
@@ -38,6 +39,11 @@ export type RuntimeUiAction = NonNullable<
   ProjectCapabilityManifest['runtimeScenario']
 >['actions'][number]
 
+export type RuntimeAccessibilityAssertion = Extract<
+  RuntimeAcceptanceAssertion,
+  { kind: 'accessibility' }
+>
+
 export type RuntimeDebugBridgeContract = NonNullable<ProjectCapabilityManifest['debugBridge']>
 
 export interface IosSimulatorLaunchInput {
@@ -50,6 +56,7 @@ export interface IosSimulatorLaunchInput {
   captureState: boolean
   privacyPermissions: RuntimePrivacyPermission[]
   uiActions: RuntimeUiAction[]
+  accessibilityAssertions?: RuntimeAccessibilityAssertion[]
   debugBridge: RuntimeDebugBridgeContract | null
   debugFixture: RuntimeDebugFixture | null
   buildSettings?: Record<string, string>
@@ -465,9 +472,11 @@ export function parseUiFailureObserverOutput(
 function accessibilityTestPlan(
   bundleIdentifier: string,
   captureAccessibility: boolean,
-  uiActions: RuntimeUiAction[]
+  uiActions: RuntimeUiAction[],
+  accessibilityAssertions: RuntimeAccessibilityAssertion[]
 ): string {
   const encodedActions = Buffer.from(JSON.stringify(uiActions), 'utf8').toString('base64')
+  const encodedAssertions = Buffer.from(JSON.stringify(accessibilityAssertions), 'utf8').toString('base64')
   return `${JSON.stringify(
     {
       configurations: [
@@ -489,6 +498,11 @@ function accessibilityTestPlan(
               {
                 key: 'AGENTMONITOR_UI_ACTIONS_BASE64',
                 value: encodedActions,
+                enabled: true
+              },
+              {
+                key: 'AGENTMONITOR_ACCESSIBILITY_ASSERTIONS_BASE64',
+                value: encodedAssertions,
                 enabled: true
               }
             ]
@@ -537,6 +551,7 @@ async function prepareAccessibilityObserver(
   bundleIdentifier: string,
   captureAccessibility: boolean,
   uiActions: RuntimeUiAction[],
+  accessibilityAssertions: RuntimeAccessibilityAssertion[],
   requestedTemplateRoot?: string
 ): Promise<{ projectPath: string; derivedDataPath: string }> {
   const templateRoot = await findAccessibilityObserverTemplate(requestedTemplateRoot)
@@ -553,7 +568,12 @@ async function prepareAccessibilityObserver(
   )
   await writeFile(
     resolve(resolvedObserverRoot, `${ACCESSIBILITY_OBSERVER_NAME}.xctestplan`),
-    accessibilityTestPlan(bundleIdentifier, captureAccessibility, uiActions),
+    accessibilityTestPlan(
+      bundleIdentifier,
+      captureAccessibility,
+      uiActions,
+      accessibilityAssertions
+    ),
     'utf8'
   )
   await mkdir(resolve(resolvedObserverRoot, 'DerivedData'), { recursive: true })
@@ -1010,6 +1030,7 @@ export async function launchIosSimulatorRuntime(
       product.bundleIdentifier,
       input.captureAccessibility,
       input.uiActions,
+      input.accessibilityAssertions ?? [],
       input.accessibilityObserverTemplateRoot
     )
     const observerRequest: RuntimeCommandRequest = {

@@ -6,8 +6,12 @@ import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   AgentRunner,
+  codexUsageLimitMessage,
+  eventMessage,
   parseConfiguredCommand,
   parseReviewerFindings,
+  projectTestFailureDiagnostics,
+  projectTestFailureReport,
   runtimeIdentifierRepairContext
 } from '../../electron/main/runner'
 import {
@@ -68,6 +72,7 @@ async function createExecutionFixture(options: {
   verificationPlan?: TaskVerificationPlan
   setupCommand?: string | null
   testCommand?: string | null
+  runtimePreparer?: ConstructorParameters<typeof AgentRunner>[10]
 }): Promise<{
   directory: string
   repository: string
@@ -181,7 +186,11 @@ async function createExecutionFixture(options: {
     fakeCodex,
     undefined,
     options.policy,
-    options.runtimeAdapter
+    options.runtimeAdapter,
+    undefined,
+    'gh',
+    undefined,
+    options.runtimePreparer ?? (async () => ({ containerGenerated: false, simulatorRecovered: false }))
   )
   activeRunners.push(runner)
   return { directory, repository, store, runner, taskId: task.id }
@@ -260,6 +269,193 @@ async function createApprovalFixture(options: {
 }
 
 describe('AgentRunner', () => {
+  it('reads structured Codex errors without rendering object placeholders', () => {
+    expect(eventMessage({
+      type: 'turn.failed',
+      error: { message: "You've hit your usage limit. Try again later." }
+    })).toBe("Codex 오류 · You've hit your usage limit. Try again later.")
+    expect(codexUsageLimitMessage("You've hit your usage limit. Try again at Sep 7, 2026 3:22 PM."))
+      .toContain('Sep 7, 2026 3:22 PM')
+  })
+
+  it('extracts actionable test failures instead of returning only trailing build noise', () => {
+    const output = [
+      '[2026-09-05T05:27:01Z] [info] [TuistAutomation] Test Suite started',
+      '[2026-09-05T05:27:24Z] [info] [TuistAutomation]     ✖ testCurrentLocation, failed - 버튼이 활성화되지 않았습니다.',
+      '/tmp/AppTests.swift:42:17: error: main actor-isolated property cannot be mutated',
+      ...Array.from({ length: 800 }, (_, index) => `build noise ${index}`),
+      '** TEST FAILED **'
+    ].join('\n')
+
+    expect(projectTestFailureDiagnostics(output)).toContain(
+      '✖ testCurrentLocation, failed - 버튼이 활성화되지 않았습니다.'
+    )
+    expect(projectTestFailureDiagnostics(output)).toContain(
+      '/tmp/AppTests.swift:42:17: error: main actor-isolated property cannot be mutated'
+    )
+    expect(projectTestFailureReport(output)).not.toContain('build noise 799')
+  })
+
+  it('feeds failures located before verbose build output back to the next Implementer', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'diagnostic-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+if (prompt.includes('testCurrentLocation, failed - 버튼이 활성화되지 않았습니다.')) {
+  writeFileSync('.diagnostic-fixed', 'fixed\\n')
+}
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      makefile: `test:
+\t@if [ -f .diagnostic-fixed ]; then exit 0; fi; \\
+\t  echo '✖ testCurrentLocation, failed - 버튼이 활성화되지 않았습니다.'; \\
+\t  i=0; while [ $$i -lt 800 ]; do echo "verbose build noise $$i"; i=$$((i + 1)); done; \\
+\t  exit 1
+`,
+      maxAttempts: 2,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'awaiting_approval', attempt: 2 })
+    expect(prompts.filter((prompt) => prompt.includes('구현 담당자'))).toHaveLength(2)
+    expect(prompts.some((prompt) => prompt.includes('testCurrentLocation, failed - 버튼이 활성화되지 않았습니다.')))
+      .toBe(true)
+    fixture.store.close()
+  })
+
+  it('continues a failed task from its latest test diagnostics on the next run', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'resume-diagnostic-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+if (prompt.includes('직전 실행에서 최대 시도 횟수까지') && prompt.includes('testResume, failed - 카메라 상태가 바뀌지 않았습니다.')) {
+  writeFileSync('.resume-fixed', 'fixed\\n')
+}
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      makefile: `test:
+\t@if [ -f .resume-fixed ]; then exit 0; fi; \\
+\t  echo '✖ testResume, failed - 카메라 상태가 바뀌지 않았습니다.'; \\
+\t  exit 1
+`,
+      maxAttempts: 1,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'swift-testing',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'failed', attempt: 1 })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'awaiting_approval', attempt: 1 })
+    expect(prompts.filter((prompt) => prompt.includes('구현 담당자'))).toHaveLength(2)
+    expect(prompts.filter((prompt) => prompt.includes('당신은 테스트 설계자입니다.'))).toHaveLength(1)
+    expect(prompts.filter((prompt) => prompt.includes('당신은 읽기 전용 테스트 비평가입니다.'))).toHaveLength(1)
+    expect(prompts.some((prompt) => (
+      prompt.includes('직전 실행에서 최대 시도 횟수까지') &&
+      prompt.includes('testResume, failed - 카메라 상태가 바뀌지 않았습니다.')
+    ))).toBe(true)
+    fixture.store.close()
+  })
+
+  it('continues a failed task from unresolved Reviewer findings on the next run', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'resume-reviewer-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+if (prompt.includes('구현 담당자') && prompt.includes('하단 안전영역을 침범합니다.')) {
+  writeFileSync('.reviewer-fixed', 'fixed\\n')
+}
+const message = prompt.includes('최종 읽기 전용 Reviewer')
+  ? (existsSync('.reviewer-fixed') ? 'VERDICT: PASS' : '[medium] 하단 안전영역을 침범합니다.')
+  : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      maxAttempts: 1,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'swift-testing',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'awaiting_approval', attempt: 1 })
+    expect(fixture.store.listTaskFindings(fixture.taskId)).toHaveLength(1)
+
+    await fixture.runner.run(fixture.taskId)
+
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'awaiting_approval', attempt: 1 })
+    expect(fixture.store.listTaskFindings(fixture.taskId)).toEqual([])
+    expect(prompts.some((prompt) => (
+      prompt.includes('구현 담당자') &&
+      prompt.includes('직전 Reviewer 검토에서 수정할 문제가 남았습니다.') &&
+      prompt.includes('하단 안전영역을 침범합니다.')
+    ))).toBe(true)
+    fixture.store.close()
+  })
+
+  it('pauses on a Codex usage limit without consuming an implementation attempt', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+console.log(JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit. Try again at Sep 7, 2026 3:22 PM." } }))
+process.exitCode = 1
+`,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await expect(fixture.runner.run(fixture.taskId)).rejects.toThrow('Codex 사용 한도에 도달했습니다.')
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const events = fixture.store.getSnapshot(task.projectId).events
+    expect(task).toMatchObject({ status: 'blocked_agent', attempt: 0 })
+    expect(events.some((event) => event.message.includes('[object Object]'))).toBe(false)
+    expect(events.some((event) => event.message.includes('AI 요청 대기'))).toBe(true)
+    expect(fixture.store.getSnapshot(task.projectId).findings).toEqual([])
+    fixture.store.close()
+  })
+
   it('classifies only exact app identifier action failures as implementation-repairable', () => {
     expect(runtimeIdentifierRepairContext(new IosRuntimeStageError(
       'acting',
@@ -631,6 +827,80 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('recovers a disconnected Simulator service and reruns runtime verification in the same attempt', async () => {
+    let launchCount = 0
+    let preflightCount = 0
+    const runtimeContract: ApprovedRuntimeContract = {
+      version: 1,
+      adapter: {
+        kind: 'ios-simulator',
+        container: 'App.xcodeproj',
+        scheme: 'App',
+        configuration: 'Debug',
+        deviceFamily: 'iphone'
+      },
+      capabilities: { build: true, run: true, observe: [], act: [], verify: [] },
+      runtimeScenario: { actions: [], assertions: [] }
+    }
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      testCommand: null,
+      runtimeContract,
+      verificationPlan: {
+        version: 1,
+        mode: 'simulator-runtime',
+        testDesign: 'skip',
+        runtimeSource: 'task-scenario'
+      },
+      runtimePreparer: async () => {
+        preflightCount += 1
+        return { containerGenerated: false, simulatorRecovered: preflightCount === 3 }
+      },
+      runtimeAdapter: {
+        launch: async (input) => {
+          launchCount += 1
+          if (launchCount === 1) {
+            throw new IosRuntimeStageError(
+              'preparing',
+              'CoreSimulatorService connection became invalid'
+            )
+          }
+          return {
+            deviceId: 'IPHONE-UDID',
+            deviceName: 'iPhone 16 Pro',
+            bundleIdentifier: 'com.example.App',
+            processId: 101,
+            appPath: join(input.runtimeRoot, input.taskId, 'App.app'),
+            screenEvidence: null,
+            accessibilityEvidence: null,
+            uiActionEvidence: null,
+            debugStateEvidence: null
+          }
+        },
+        stop: async () => undefined
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({
+      status: 'awaiting_approval',
+      attempt: 1
+    })
+    expect(launchCount).toBe(2)
+    expect(preflightCount).toBe(3)
+    expect(fixture.store.getSnapshot().events.some(
+      (event) => event.message.includes('같은 검증을 한 번 다시 실행합니다')
+    )).toBe(true)
+    await fixture.runner.dispose()
+    fixture.store.close()
+  })
+
   it('uses the task approval snapshot even when the repository has no project manifest', async () => {
     let launchCount = 0
     const runtimeContract: ApprovedRuntimeContract = {
@@ -881,6 +1151,61 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(await readFile(join(repository, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
     expect(await readFile(join(repository, 'agent-codex-home.txt'), 'utf8')).toBe(codexHome)
     store.close()
+  })
+
+  it('keeps cumulative Reviewer findings so later repairs cannot reintroduce earlier regressions', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'cumulative-reviewer-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+let message = 'stage complete'
+if (prompt.includes('최종 읽기 전용 Reviewer')) {
+  if (!existsSync('.reviewed-once')) {
+    writeFileSync('.reviewed-once', 'true\\n')
+    message = '[medium] MapKit과 Mapbox 버튼 위치가 다릅니다.'
+  } else if (!existsSync('.reviewed-twice')) {
+    writeFileSync('.reviewed-twice', 'true\\n')
+    message = '[high] Mapbox 지도 정보 버튼과 겹칩니다.'
+  } else {
+    message = prompt.includes('MapKit과 Mapbox 버튼 위치가 다릅니다.') &&
+      prompt.includes('Mapbox 지도 정보 버튼과 겹칩니다.')
+      ? 'VERDICT: PASS'
+      : '[high] 이전 Reviewer 조건이 누락됐습니다.'
+  }
+}
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      maxAttempts: 3,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    const finalImplementerPrompt = prompts.filter((prompt) => prompt.includes('구현 담당자')).at(-1) ?? ''
+    const finalReviewerPrompt = prompts.filter((prompt) => prompt.includes('최종 읽기 전용 Reviewer')).at(-1) ?? ''
+    expect(fixture.store.getTask(fixture.taskId)).toMatchObject({ status: 'awaiting_approval', attempt: 3 })
+    expect(finalImplementerPrompt).toContain('MapKit과 Mapbox 버튼 위치가 다릅니다.')
+    expect(finalImplementerPrompt).toContain('Mapbox 지도 정보 버튼과 겹칩니다.')
+    expect(finalImplementerPrompt).toContain('테스트 전용 가짜 credential로 대체하지 말고')
+    expect(finalReviewerPrompt).toContain('MapKit과 Mapbox 버튼 위치가 다릅니다.')
+    expect(finalReviewerPrompt).toContain('Mapbox 지도 정보 버튼과 겹칩니다.')
+    expect(finalReviewerPrompt).toContain('Git에서 제외된 로컬 xcconfig')
+    expect(finalReviewerPrompt).toContain('비밀값 없는 깨끗한 checkout에서도 동일 분기가 실행돼야 한다고 요구하지 마세요.')
+    expect(finalReviewerPrompt).toContain('테스트 전용 가짜·placeholder credential')
+    expect(fixture.store.listTaskFindings(fixture.taskId)).toEqual([])
+    fixture.store.close()
   })
 
   it('keeps final Reviewer findings for human judgment after the implementation limit', async () => {

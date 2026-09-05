@@ -582,7 +582,10 @@ function registerIpc(): void {
       title: input.title,
       prompt: input.prompt,
       techSpec: input.techSpec ?? null,
-      adapter: project.runtimeAdapter
+      adapter: project.runtimeAdapter,
+      availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
+        .filter((entry) => entry.configured)
+        .map((entry) => entry.key)
     })
   })
 
@@ -637,6 +640,37 @@ function registerIpc(): void {
   ipcMain.handle('task:changes', (_event, taskId: string) => {
     z.string().uuid().parse(taskId)
     return requireRunner().getChanges(taskId)
+  })
+
+  ipcMain.handle('task:regenerate-runtime-scenario', async (_event, taskId: string) => {
+    z.string().uuid().parse(taskId)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('검증 시나리오를 최신화하려면 먼저 Codex에 로그인하세요.')
+    const store = requireStore()
+    const task = store.getTask(taskId)
+    const project = store.getProject(task.projectId)
+    const adapter = task.runtimeContract?.adapter ?? project.runtimeAdapter
+    if (!adapter) throw new Error('이 프로젝트에서 iOS 실행 설정을 찾지 못했습니다.')
+    const generated = await requireScenarioGenerator().generate({
+      projectPath: task.worktreePath ?? project.path,
+      title: task.title,
+      prompt: task.prompt,
+      techSpec: task.techSpec
+        ? {
+            version: task.techSpec.version,
+            revision: task.techSpec.revision,
+            summary: task.techSpec.summary,
+            markdown: task.techSpec.markdown,
+            openQuestions: task.techSpec.openQuestions
+          }
+        : null,
+      adapter,
+      previousContract: task.runtimeContract,
+      availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
+        .filter((entry) => entry.configured)
+        .map((entry) => entry.key)
+    })
+    return store.replaceTaskRuntimeContract(taskId, generated.contract, generated.summary)
   })
 
   ipcMain.handle('task:run', async (_event, taskId: string) => {

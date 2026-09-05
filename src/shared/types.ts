@@ -6,6 +6,7 @@ export type TaskStatus =
   | 'awaiting_manual_validation'
   | 'awaiting_merge'
   | 'blocked_environment'
+  | 'blocked_agent'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -188,6 +189,7 @@ export interface RuntimeEnvironmentRequirement {
 export interface RuntimeScenarioPreconditions {
   permissions?: RuntimePrivacyPermission[]
   requiredEnvironmentKeys?: string[]
+  launchVariables?: Record<string, string>
   resetAppData?: boolean
 }
 
@@ -721,7 +723,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 11
+export const AGENT_MONITORING_BRIDGE_VERSION = 12
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -764,6 +766,7 @@ export interface AgentMonitoringBridge {
   ) => Promise<VerificationPlanRecommendation>
   removeProject: (projectId: string) => Promise<void>
   createTask: (input: CreateTaskInput) => Promise<TaskRecord>
+  regenerateTaskRuntimeScenario: (taskId: string) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
   retryTaskVerification: (taskId: string) => Promise<void>

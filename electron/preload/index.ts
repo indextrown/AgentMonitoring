@@ -64,6 +64,8 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('verification-plan:recommend', input),
   removeProject: (projectId: string) => ipcRenderer.invoke('project:remove', projectId),
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke('task:create', input),
+  regenerateTaskRuntimeScenario: (taskId: string) =>
+    ipcRenderer.invoke('task:regenerate-runtime-scenario', taskId),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),
   runTask: (taskId: string) => ipcRenderer.invoke('task:run', taskId),
   retryTaskVerification: (taskId: string) => ipcRenderer.invoke('task:retry-verification', taskId),

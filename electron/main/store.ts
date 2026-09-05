@@ -799,6 +799,38 @@ export class AppStore {
     return taskFromRow(row)
   }
 
+  replaceTaskRuntimeContract(
+    taskId: string,
+    runtimeContract: ApprovedRuntimeContract,
+    runtimeScenarioSummary: string
+  ): TaskRecord {
+    const task = this.getTask(taskId)
+    if (!['failed', 'stopped', 'blocked_environment'].includes(task.status)) {
+      throw new Error('실패·중단·환경 확인 상태의 작업만 검증 시나리오를 최신화할 수 있습니다.')
+    }
+    const now = new Date().toISOString()
+    this.database.prepare(`
+      UPDATE tasks
+      SET runtime_contract_json = ?, runtime_scenario_summary = ?,
+          runtime_scenario_approved_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(runtimeContract),
+      runtimeScenarioSummary.trim(),
+      now,
+      now,
+      taskId
+    )
+    this.addEvent(
+      task.projectId,
+      taskId,
+      'agent',
+      'orchestrator',
+      '기존 단일 시점 Simulator 계약을 케이스·체크포인트 기반 최신 시나리오로 교체했습니다.'
+    )
+    return this.getTask(taskId)
+  }
+
   listTasks(projectId: string): TaskRecord[] {
     return (
       this.database
@@ -1113,6 +1145,16 @@ export class AppStore {
     return eventFromRow(row)
   }
 
+  latestTaskEvent(
+    taskId: string,
+    kind: EventKind
+  ): EventRecord | null {
+    const row = this.database
+      .prepare(`SELECT ${eventColumns} FROM events WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1`)
+      .get(taskId, kind) as Row | undefined
+    return row ? eventFromRow(row) : null
+  }
+
   addFinding(
     projectId: string,
     taskId: string | null,
@@ -1145,6 +1187,16 @@ export class AppStore {
       | undefined
     if (!row) throw new Error('버그를 찾을 수 없습니다.')
     return findingFromRow(row)
+  }
+
+  listTaskFindings(
+    taskId: string,
+    resolved = false
+  ): FindingRecord[] {
+    const rows = this.database
+      .prepare(`SELECT ${findingColumns} FROM findings WHERE task_id = ? AND resolved = ? ORDER BY created_at ASC`)
+      .all(taskId, resolved ? 1 : 0) as Row[]
+    return rows.map(findingFromRow)
   }
 
   setFindingResolved(findingId: string, resolved: boolean): FindingRecord {
