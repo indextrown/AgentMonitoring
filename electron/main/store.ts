@@ -210,6 +210,7 @@ function taskFromRow(row: Row): TaskRecord {
           id: String(request.id),
           instruction: String(request.instruction),
           createdAt: String(request.createdAt),
+          startedAt: request.startedAt ? String(request.startedAt) : null,
           appliedAt: request.appliedAt ? String(request.appliedAt) : null
         }))
       : [],
@@ -877,8 +878,8 @@ export class AppStore {
 
   addTaskRevisionRequest(taskId: string, instruction: string): TaskRecord {
     const task = this.getTask(taskId)
-    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
-      throw new Error('승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    if (!['running', 'testing', 'awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('실행 중이거나 승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
     }
     if (task.publication?.status === 'awaiting_local_sync') {
       throw new Error('원격 반영이 끝난 작업은 추가로 수정할 수 없습니다. 먼저 로컬 동기화를 완료하세요.')
@@ -892,7 +893,7 @@ export class AppStore {
     const now = new Date().toISOString()
     const nextRequests: TaskRevisionRequest[] = duplicate
       ? requests
-      : [...requests, { id: randomUUID(), instruction: normalized, createdAt: now, appliedAt: null }]
+      : [...requests, { id: randomUUID(), instruction: normalized, createdAt: now, startedAt: null, appliedAt: null }]
     this.database
       .prepare(`
         UPDATE tasks
@@ -906,16 +907,30 @@ export class AppStore {
         taskId,
         'task_revision_requested',
         'human',
-        `추가 수정 요청: ${normalized}`
+        `추가 수정 큐 등록: ${normalized}`
       )
     }
     return this.getTask(taskId)
   }
 
-  markTaskRevisionRequestsApplied(taskId: string): TaskRecord {
+  markTaskRevisionRequestStarted(taskId: string, requestId: string): TaskRecord {
     const task = this.getTask(taskId)
     const now = new Date().toISOString()
-    const requests = (task.revisionRequests ?? []).map((request) => request.appliedAt
+    const requests = (task.revisionRequests ?? []).map((request) => request.id === requestId
+      ? { ...request, startedAt: now }
+      : request)
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), now, taskId)
+    return this.getTask(taskId)
+  }
+
+  markTaskRevisionRequestsApplied(taskId: string, requestIds: readonly string[]): TaskRecord {
+    const task = this.getTask(taskId)
+    if (requestIds.length === 0) return task
+    const now = new Date().toISOString()
+    const appliedIds = new Set(requestIds)
+    const requests = (task.revisionRequests ?? []).map((request) => request.appliedAt || !appliedIds.has(request.id)
       ? request
       : { ...request, appliedAt: now })
     this.database

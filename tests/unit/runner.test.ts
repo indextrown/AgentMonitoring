@@ -46,6 +46,18 @@ async function waitForFile(path: string, timeoutMs = 3_000): Promise<string> {
   throw new Error(`fixture 파일 생성 시간을 초과했습니다: ${path}`)
 }
 
+async function waitForCondition(
+  condition: () => boolean,
+  timeoutMs = 5_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (condition()) return
+    await delay(20)
+  }
+  throw new Error('조건을 기다리는 시간을 초과했습니다.')
+}
+
 async function configureOrigin(directory: string, repository: string): Promise<string> {
   const remote = join(directory, 'github.com', 'example', 'fixture.git')
   await mkdir(dirname(remote), { recursive: true })
@@ -431,18 +443,28 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
-  it('continues approval feedback in the same worktree and reruns the selected pipeline', async () => {
+  it('queues approval feedback in order and reruns each request in the same worktree', async () => {
     let callsPath = ''
+    let firstRevisionStartedPath = ''
     const feedback = '메인 스레드 경고를 제거하고 기존 동작이 유지되는지 다시 검증해 주세요.'
+    const queuedFeedback = '수정된 화면의 접근성 레이블도 확인하고 누락된 값을 보완해 주세요.'
     const fixture = await createExecutionFixture({
       codexSource: (directory) => {
         callsPath = join(directory, 'approval-feedback-calls.jsonl')
+        firstRevisionStartedPath = join(directory, 'first-revision-started')
         return `#!/usr/bin/env node
 import { appendFileSync, writeFileSync } from 'node:fs'
 const prompt = process.argv.at(-1) ?? ''
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
 if (prompt.includes('구현 담당자') && prompt.includes(${JSON.stringify(feedback)})) {
   writeFileSync('.main-thread-warning-fixed', 'fixed\\n')
+  if (!prompt.includes(${JSON.stringify(queuedFeedback)})) {
+    writeFileSync(${JSON.stringify(firstRevisionStartedPath)}, 'started\\n')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150))
+  }
+}
+if (prompt.includes('구현 담당자') && prompt.includes(${JSON.stringify(queuedFeedback)})) {
+  writeFileSync('.accessibility-label-fixed', 'fixed\\n')
 }
 const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
@@ -461,7 +483,17 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     const initial = fixture.store.getTask(fixture.taskId)
     expect(initial.status).toBe('awaiting_approval')
 
+    fixture.store.addTaskRevisionRequest(fixture.taskId, feedback)
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow(
+      '큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.'
+    )
     await fixture.runner.continueTask(fixture.taskId, feedback)
+    await waitForFile(firstRevisionStartedPath)
+    await fixture.runner.continueTask(fixture.taskId, queuedFeedback)
+    await waitForCondition(() => {
+      const requests = fixture.store.getTask(fixture.taskId).revisionRequests ?? []
+      return requests.length === 2 && requests.every((request) => Boolean(request.appliedAt))
+    })
 
     const revised = fixture.store.getTask(fixture.taskId)
     const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
@@ -471,14 +503,55 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
       worktreePath: initial.worktreePath
     })
     expect(revised.prompt).toBe(initial.prompt)
-    expect(revised.revisionRequests?.map((request) => request.instruction)).toEqual([feedback])
-    expect(revised.revisionRequests?.[0].appliedAt).toBeTruthy()
+    expect(revised.revisionRequests?.map((request) => request.instruction)).toEqual([feedback, queuedFeedback])
+    expect(revised.revisionRequests?.every((request) => request.startedAt && request.appliedAt)).toBe(true)
     expect(await readFile(join(revised.worktreePath!, '.main-thread-warning-fixed'), 'utf8')).toBe('fixed\n')
-    expect(prompts.filter((prompt) => prompt.includes('당신은 테스트 설계자입니다.'))).toHaveLength(2)
+    expect(await readFile(join(revised.worktreePath!, '.accessibility-label-fixed'), 'utf8')).toBe('fixed\n')
+    expect(prompts.filter((prompt) => prompt.includes('당신은 테스트 설계자입니다.'))).toHaveLength(3)
     for (const role of ['당신은 테스트 설계자입니다.', '당신은 읽기 전용 테스트 비평가입니다.', '당신은 구현 담당자입니다.', '당신은 최종 읽기 전용 Reviewer입니다.']) {
       expect(prompts.some((prompt) => prompt.includes(role) && prompt.includes(feedback))).toBe(true)
+      expect(prompts.some((prompt) => prompt.includes(role) && prompt.includes(queuedFeedback))).toBe(true)
     }
+    const firstRevisionImplementer = prompts.find((prompt) =>
+      prompt.includes('당신은 구현 담당자입니다.') && prompt.includes(feedback)
+    )
+    expect(firstRevisionImplementer).not.toContain(queuedFeedback)
     expect(fixture.store.getSnapshot().events.some((event) => event.kind === 'task_revision_requested')).toBe(true)
+    fixture.store.close()
+  })
+
+  it('keeps the active revision queued when its Codex stage is blocked', async () => {
+    const feedback = 'Codex가 다시 가능해지면 같은 수정 요청을 이어서 처리해 주세요.'
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+const prompt = process.argv.at(-1) ?? ''
+if (prompt.includes(${JSON.stringify(feedback)})) {
+  console.log(JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit. Try again later." } }))
+  process.exitCode = 1
+} else {
+  const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+  console.log(JSON.stringify({ type: 'turn.completed' }))
+}
+`,
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+    await fixture.runner.continueTask(fixture.taskId, feedback)
+    await waitForCondition(() => fixture.store.getTask(fixture.taskId).status === 'blocked_agent')
+
+    const blocked = fixture.store.getTask(fixture.taskId)
+    expect(blocked.revisionRequests?.[0]).toMatchObject({
+      instruction: feedback,
+      appliedAt: null
+    })
+    expect(blocked.revisionRequests?.[0].startedAt).toBeTruthy()
     fixture.store.close()
   })
 

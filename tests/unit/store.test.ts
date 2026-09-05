@@ -184,11 +184,24 @@ describe('AppStore', () => {
     expect(updated.revisionRequests).toHaveLength(1)
     expect(updated.revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
     expect(store.getSnapshot(project.id).events.some((event) => event.kind === 'task_revision_requested')).toBe(true)
+    const firstRequestId = updated.revisionRequests![0].id
+    expect(store.markTaskRevisionRequestStarted(task.id, firstRequestId).revisionRequests?.[0].startedAt).toBeTruthy()
+    expect(store.markTaskRevisionRequestsApplied(task.id, [firstRequestId]).revisionRequests?.[0].appliedAt).toBeTruthy()
     store.close()
 
     const reopened = new AppStore(databasePath)
     expect(reopened.getTask(task.id).revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
-    expect(() => reopened.addTaskRevisionRequest(task.id, '두 번째 수정 요청도 같은 작업에 누적합니다.')).not.toThrow()
+    expect(reopened.getTask(task.id).revisionRequests?.[0].appliedAt).toBeTruthy()
+    const second = reopened.addTaskRevisionRequest(task.id, '두 번째 수정 요청도 같은 작업에 누적합니다.')
+    const secondRequestId = second.revisionRequests![1].id
+    reopened.transitionTask(task.id, 'running', 1)
+    const queued = reopened.addTaskRevisionRequest(task.id, '실행 중에 세 번째 요청을 미리 큐에 추가합니다.')
+    expect(queued.revisionRequests?.map((request) => request.instruction)).toHaveLength(3)
+    reopened.markTaskRevisionRequestStarted(task.id, secondRequestId)
+    const partiallyApplied = reopened.markTaskRevisionRequestsApplied(task.id, [secondRequestId])
+    expect(partiallyApplied.revisionRequests?.[1].appliedAt).toBeTruthy()
+    expect(partiallyApplied.revisionRequests?.[2].appliedAt).toBeNull()
+    reopened.transitionTask(task.id, 'awaiting_approval')
     reopened.setTaskPublication(task.id, {
       strategy: 'direct',
       status: 'awaiting_local_sync',
@@ -203,10 +216,6 @@ describe('AppStore', () => {
     })
     expect(() => reopened.addTaskRevisionRequest(task.id, '원격 반영 뒤에는 받을 수 없는 요청입니다.')).toThrow(
       '원격 반영이 끝난 작업은 추가로 수정할 수 없습니다.'
-    )
-    reopened.transitionTask(task.id, 'running', 1)
-    expect(() => reopened.addTaskRevisionRequest(task.id, '실행 중에는 받을 수 없는 요청입니다.')).toThrow(
-      '승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.'
     )
     reopened.close()
   })

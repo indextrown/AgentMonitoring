@@ -581,6 +581,9 @@ export function App(): React.JSX.Element {
     setSelectedTask(task)
     try {
       await bridge.continueTask({ taskId: task.id, instruction })
+      setNotice(isActiveTask(task)
+        ? '추가 수정 요청을 큐에 등록했습니다.'
+        : '추가 수정 요청을 등록하고 같은 작업에서 실행을 시작했습니다.')
       await load(task.projectId)
     } catch (continueError) {
       setError(String(continueError))
@@ -3712,8 +3715,13 @@ function TaskDrawer({
     ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
     : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
-  const hasPendingRevisionRequest = (task.revisionRequests ?? []).some((request) => !request.appliedAt)
-  const canContinueTask = ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) &&
+  const pendingRevisionRequests = (task.revisionRequests ?? []).filter((request) => !request.appliedAt)
+  const hasPendingRevisionRequest = pendingRevisionRequests.length > 0
+  const processingRevisionRequestId = isActiveTask(task)
+    ? pendingRevisionRequests.find((request) => request.startedAt)?.id ?? null
+    : null
+  const queuedRevisionCount = pendingRevisionRequests.filter((request) => request.id !== processingRevisionRequestId).length
+  const canContinueTask = (isActiveTask(task) || ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) &&
     Boolean(task.worktreePath) &&
     !awaitingLocalPublicationSync
   const [revisionInstruction, setRevisionInstruction] = useState('')
@@ -3785,27 +3793,44 @@ function TaskDrawer({
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
-        {canContinueTask && (
+        {(canContinueTask || (task.revisionRequests?.length ?? 0) > 0) && (
           <section className="task-revision-request">
             <div className="drawer-section-title">
-              <strong>추가 수정 요청</strong>
-              <span>같은 작업에서 계속</span>
+              <strong>추가 수정 큐</strong>
+              <span>
+                {processingRevisionRequestId ? '반영 중 1 · ' : ''}
+                {queuedRevisionCount > 0 ? `대기 ${queuedRevisionCount}` : processingRevisionRequestId ? '다음 요청 없음' : '같은 작업에서 계속'}
+              </span>
             </div>
-            <p>실행 결과에서 새 문제를 발견했다면 현재 worktree와 브랜치를 유지한 채 수정·검증을 다시 진행할 수 있습니다.</p>
+            <p>{isActiveTask(task)
+              ? '현재 단계는 그대로 실행합니다. 지금 추가한 요청은 큐에서 기다렸다가 같은 worktree와 브랜치의 다음 실행에서 순서대로 반영합니다.'
+              : canContinueTask
+                ? '실행 결과에서 새 문제를 발견했다면 현재 worktree와 브랜치를 유지한 채 수정·검증을 다시 진행할 수 있습니다.'
+                : hasPendingRevisionRequest
+                  ? '실행이 멈춰 미완료 요청을 보존했습니다. 환경이나 실패 원인을 해결한 뒤 실행하면 선두 요청부터 이어갑니다.'
+                  : '이 작업에서 반영하고 검증한 추가 수정 내역입니다.'}</p>
             {(task.revisionRequests?.length ?? 0) > 0 && (
               <details>
-                <summary>이전 추가 요청 {task.revisionRequests!.length}개</summary>
+                <summary>추가 수정 내역 {task.revisionRequests!.length}개</summary>
                 <ol>
                   {task.revisionRequests!.map((request) => (
                     <li key={request.id}>
                       <span>{request.instruction}</span>
-                      <time>{request.appliedAt ? `${timeAgo(request.appliedAt)} 검증 완료` : '반영 대기'}</time>
+                      <time className={request.id === processingRevisionRequestId ? 'is-processing' : !request.appliedAt ? 'is-queued' : ''}>
+                        {request.appliedAt
+                          ? `${timeAgo(request.appliedAt)} 검증 완료`
+                          : request.id === processingRevisionRequestId
+                            ? '현재 반영 중'
+                            : request.startedAt
+                              ? '재개 대기'
+                              : '큐 대기'}
+                      </time>
                     </li>
                   ))}
                 </ol>
               </details>
             )}
-            <form onSubmit={(event) => void submitRevisionRequest(event)}>
+            {canContinueTask && <form onSubmit={(event) => void submitRevisionRequest(event)}>
               <label htmlFor={`task-revision-${task.id}`}>추가로 수정할 내용</label>
               <textarea
                 id={`task-revision-${task.id}`}
@@ -3816,13 +3841,15 @@ function TaskDrawer({
                 onChange={(event) => setRevisionInstruction(event.target.value)}
               />
               <div>
-                <small>같은 브랜치 · 구현 · 기존 검증 · Reviewer · 다시 승인 대기</small>
+                <small>{isActiveTask(task)
+                  ? '현재 실행 다음에 시작 · 입력 순서 유지 · 실패 시 큐 보존'
+                  : '같은 브랜치 · 구현 · 기존 검증 · Reviewer · 다시 승인 대기'}</small>
                 <button className="primary-button" disabled={revisionInstruction.trim().length < 5 || revisionSubmitting} type="submit">
                   {revisionSubmitting ? <LoaderCircle className="spin" size={13} /> : <MessageSquare size={13} />}
-                  {revisionSubmitting ? '요청 전달 중' : '요청하고 작업 이어가기'}
+                  {revisionSubmitting ? '요청 등록 중' : isActiveTask(task) ? '큐에 추가' : '요청하고 작업 이어가기'}
                 </button>
               </div>
-            </form>
+            </form>}
           </section>
         )}
         {task.techSpec && (
@@ -4058,7 +4085,7 @@ function TaskDrawer({
           {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && !hasPendingRevisionRequest && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
           {['failed', 'stopped', 'blocked_environment', 'blocked_agent'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
-          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}
+          {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>{!hasPendingRevisionRequest && <button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button>}</>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && task.publishStrategy === 'direct' && task.publication?.status === 'failed' && <button className="secondary-button" onClick={() => onAction(task, 'switch-to-pr')}><GitBranch size={14} />PR 방식으로 전환</button>}
           {task.status === 'awaiting_merge' && !awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />PR 상태 확인</button>}
           {awaitingLocalPublicationSync && <button className="primary-button" onClick={() => onAction(task, 'refresh-publication')}><GitCompareArrows size={14} />로컬 동기화 다시 시도</button>}

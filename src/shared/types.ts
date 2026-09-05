@@ -547,6 +547,7 @@ export interface TaskRevisionRequest {
   id: string
   instruction: string
   createdAt: string
+  startedAt: string | null
   appliedAt: string | null
 }
 
@@ -758,7 +759,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 16
+export const AGENT_MONITORING_BRIDGE_VERSION = 17
 
 export interface AgentMonitoringBridge {
   apiVersion: number

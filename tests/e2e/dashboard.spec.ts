@@ -679,7 +679,7 @@ test('explains and confirms publishing an approved task through a PR', async ({ 
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })
 
-test('continues an approval-pending task with human feedback in the same task', async ({ page }) => {
+test('queues follow-up feedback while the same task is running', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
   page.once('dialog', (dialog) => dialog.accept())
@@ -699,12 +699,21 @@ test('continues an approval-pending task with human feedback in the same task', 
   await drawer.getByLabel('추가로 수정할 내용').fill(feedback)
   await drawer.getByRole('button', { name: '요청하고 작업 이어가기' }).click()
 
+  await expect(drawer.getByText('구현 중', { exact: true })).toBeVisible()
+  const queuedFeedback = '수정된 화면의 접근성 레이블도 함께 확인해 주세요.'
+  await drawer.getByLabel('추가로 수정할 내용').fill(queuedFeedback)
+  await drawer.getByRole('button', { name: '큐에 추가' }).click()
+  await expect(drawer.getByText('추가 수정 내역 2개')).toBeVisible()
+  await drawer.getByText('추가 수정 내역 2개').click()
+  await expect(drawer.getByText('현재 반영 중', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('큐 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByText(queuedFeedback, { exact: true })).toBeVisible()
+
   await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
-  await expect(drawer.getByText('이전 추가 요청 1개')).toBeVisible()
-  await drawer.getByText('이전 추가 요청 1개').click()
   await expect(drawer.getByText(feedback, { exact: true })).toBeVisible()
+  await expect(drawer.getByText('검증 완료')).toHaveCount(2)
   await expect(drawer.locator('.task-contract')).toContainText(branch ?? '')
-  await expect(drawer.locator('.drawer-events')).toContainText('추가 수정 요청:')
+  await expect(drawer.locator('.drawer-events')).toContainText('추가 수정 큐 등록:')
 })
 
 test('lets each task publish directly to the remote base branch', async ({ page }) => {

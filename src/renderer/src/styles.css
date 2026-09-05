@@ -4591,6 +4591,14 @@ kbd {
   font-size: 7px;
 }
 
+.task-revision-request li time.is-processing {
+  color: #6faee8;
+}
+
+.task-revision-request li time.is-queued {
+  color: #c19a58;
+}
+
 .task-revision-request form,
 .task-revision-request form label {
   display: grid;

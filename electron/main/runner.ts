@@ -424,11 +424,16 @@ export function buildTaskTechSpecContext(task: TaskRecord): string {
   ].join('\n')
 }
 
-export function buildTaskRevisionRequestContext(task: TaskRecord): string {
-  const requests = task.revisionRequests ?? []
+export function buildTaskRevisionRequestContext(
+  task: TaskRecord,
+  activeRequestIds?: ReadonlySet<string>
+): string {
+  const requests = (task.revisionRequests ?? []).filter((request) =>
+    request.appliedAt || !activeRequestIds || activeRequestIds.has(request.id)
+  )
   if (requests.length === 0) return ''
   return [
-    '아래 내용은 사람이 승인 전에 추가한 후속 수정 계약입니다.',
+    '아래 내용은 사람이 같은 작업에 추가한 후속 수정 계약입니다.',
     '원래 작업 목표와 승인된 검증 조건을 유지하면서 모든 요청을 함께 만족하세요.',
     '서로 충돌하는 내용이 있으면 가장 최근 요청을 우선하되, 요구사항을 임의로 약화하지 마세요.',
     '<task-revision-requests>',
@@ -465,6 +470,7 @@ function testDesignInstruction(plan: TaskVerificationPlan): string {
 
 export class AgentRunner {
   private readonly activeRuns = new Map<string, ActiveRun>()
+  private readonly revisionQueueDrains = new Set<string>()
   private readonly managedRuntimeTaskIds = new Set<string>()
   private readonly policy: RunnerPolicy
   private readonly runtimeRoot: string
@@ -618,10 +624,15 @@ export class AgentRunner {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
     let task = this.store.getTask(taskId)
-    const hasPendingHumanRevision = (task.revisionRequests ?? []).some((request) => !request.appliedAt)
+    const activeRevisionRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt)
+    const activeRevisionRequestIds = new Set(activeRevisionRequest ? [activeRevisionRequest.id] : [])
+    if (activeRevisionRequest) {
+      task = this.store.markTaskRevisionRequestStarted(taskId, activeRevisionRequest.id)
+    }
+    const hasPendingHumanRevision = Boolean(activeRevisionRequest)
     const beginsHumanRevision = ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) &&
       hasPendingHumanRevision
-    const taskRevisionContext = buildTaskRevisionRequestContext(task)
+    const taskRevisionContext = buildTaskRevisionRequestContext(task, activeRevisionRequestIds)
     const resumesFailedWork = ['failed', 'stopped'].includes(task.status)
     const previousReviewerFindings = task.verificationResult?.reviewer.status === 'failed'
       ? this.store.listTaskFindings(taskId)
@@ -695,7 +706,7 @@ export class AgentRunner {
           'agent',
           'orchestrator',
           hasPendingHumanRevision
-            ? `사용자의 추가 수정 요청 ${task.revisionRequests?.length ?? 0}개를 같은 작업공간에서 이어서 반영합니다.`
+            ? `사용자의 추가 수정 요청을 같은 작업공간에서 반영합니다. · 큐 대기 ${Math.max(0, (task.revisionRequests ?? []).filter((request) => !request.appliedAt).length - 1)}개`
             : previousReviewerFindings.length > 0
               ? `미해결 Reviewer finding ${previousReviewerFindings.length}개를 복원해 첫 구현 시도부터 수정합니다.`
               : '직전 자동 검증 실패 진단을 복원해 첫 구현 시도부터 이어갑니다.'
@@ -959,7 +970,8 @@ export class AgentRunner {
             worktreePath,
             approvedRuntimeContract,
             runtimeResult,
-            this.store.listTaskFindings(taskId)
+            this.store.listTaskFindings(taskId),
+            taskRevisionContext
           )
           const reviewerFindings = parseReviewerFindings(review.finalMessage)
 
@@ -1036,7 +1048,7 @@ export class AgentRunner {
         hasPendingHumanRevision &&
         this.store.getTask(taskId).verificationResult?.reviewer.status === 'passed'
       ) {
-        this.store.markTaskRevisionRequestsApplied(taskId)
+        this.store.markTaskRevisionRequestsApplied(taskId, [...activeRevisionRequestIds])
       }
       this.store.transitionTask(taskId, finalStatus)
       this.emit(
@@ -1053,20 +1065,49 @@ export class AgentRunner {
     } finally {
       this.activeRuns.delete(taskId)
       control.resolveDone()
+      this.scheduleTaskRevisionQueue(taskId)
     }
   }
 
   async continueTask(taskId: string, instruction: string): Promise<void> {
-    if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
     const task = this.store.getTask(taskId)
-    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
-      throw new Error('승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    const isActive = this.activeRuns.has(taskId)
+    if (!(isActive && isActiveTask(task)) && !['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('실행 중이거나 승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
     }
     if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
       throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
     }
     this.store.addTaskRevisionRequest(taskId, instruction)
-    await this.run(taskId)
+    this.scheduleTaskRevisionQueue(taskId)
+  }
+
+  private scheduleTaskRevisionQueue(taskId: string): void {
+    if (this.activeRuns.has(taskId) || this.revisionQueueDrains.has(taskId)) return
+    const task = this.store.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return
+    if (!(task.revisionRequests ?? []).some((request) => !request.appliedAt)) return
+    this.revisionQueueDrains.add(taskId)
+    void this.drainTaskRevisionQueue(taskId).then((shouldRecheck) => {
+      this.revisionQueueDrains.delete(taskId)
+      if (shouldRecheck) this.scheduleTaskRevisionQueue(taskId)
+    })
+  }
+
+  private async drainTaskRevisionQueue(taskId: string): Promise<boolean> {
+    while (true) {
+      const task = this.store.getTask(taskId)
+      const nextRequest = (task.revisionRequests ?? []).find((request) => !request.appliedAt)
+      if (!nextRequest) return true
+      if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) return false
+      try {
+        await this.run(taskId)
+      } catch {
+        return false
+      }
+      const processed = this.store.getTask(taskId).revisionRequests?.find((request) => request.id === nextRequest.id)
+      if (!processed?.appliedAt) return false
+    }
   }
 
   async retryVerification(taskId: string): Promise<void> {
@@ -1229,6 +1270,7 @@ export class AgentRunner {
     } finally {
       this.activeRuns.delete(taskId)
       control.resolveDone()
+      this.scheduleTaskRevisionQueue(taskId)
     }
   }
 
@@ -1409,6 +1451,9 @@ export class AgentRunner {
       throw new Error('검증 후 사람의 확인을 기다리는 작업만 원격에 게시할 수 있습니다.')
     }
     if (this.activeRuns.has(taskId)) throw new Error('실행 중인 작업을 먼저 중단하세요.')
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt)) {
+      throw new Error('큐에 남은 추가 수정 요청을 모두 반영한 뒤 게시하세요.')
+    }
     if (!task.worktreePath || !task.branchName) throw new Error('적용할 격리 작업공간을 찾을 수 없습니다.')
 
     await this.stopRuntimeSession(task, 'stopped', '작업 승인으로 Simulator 앱을 정리했습니다.')
@@ -2295,7 +2340,8 @@ export class AgentRunner {
     worktreePath: string,
     approvedRuntimeContract: string,
     runtimeResult: RuntimeRunResult | null,
-    regressionFindings: Array<{ severity: Severity; title: string }> = []
+    regressionFindings: Array<{ severity: Severity; title: string }> = [],
+    revisionRequestContext = buildTaskRevisionRequestContext(task)
   ): Promise<ProcessResult> {
     const verificationBaseCommit = task.verificationBaseCommit ?? task.baseCommit
     const diffInstruction = verificationBaseCommit && GIT_COMMIT_PATTERN.test(verificationBaseCommit)
@@ -2313,7 +2359,7 @@ export class AgentRunner {
       [
         `작업 목표: ${task.prompt}`,
         buildTaskTechSpecContext(task),
-        buildTaskRevisionRequestContext(task),
+        revisionRequestContext,
         '당신은 최종 읽기 전용 Reviewer입니다.',
         diffInstruction,
         '기존 테스트와 실행 결과를 함께 검토하세요.',
