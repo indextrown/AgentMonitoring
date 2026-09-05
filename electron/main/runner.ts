@@ -73,6 +73,7 @@ import type {
   ResolvedProjectRuntimeEnvironment
 } from './runtime-environment'
 import { syncIgnoredXcconfigFiles } from './ignored-xcconfig'
+import { collectProjectTestEvidence, type ProjectTestEvidence } from './project-test-evidence'
 import {
   IosRuntimePreflightError,
   isCoreSimulatorServiceFailureOutput,
@@ -524,7 +525,8 @@ export class AgentRunner {
     private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator(),
     private readonly githubCommand = 'gh',
     private readonly runtimeEnvironment?: ProjectRuntimeEnvironmentService,
-    private readonly iosRuntimePreparer: IosRuntimePreparer = prepareIosRuntimeEnvironment
+    private readonly iosRuntimePreparer: IosRuntimePreparer = prepareIosRuntimeEnvironment,
+    private readonly projectTestEvidenceCollector: typeof collectProjectTestEvidence = collectProjectTestEvidence
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
     this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
@@ -836,6 +838,17 @@ export class AgentRunner {
 
       let repairContext = automatedRepairContext
       let repairImagePaths: string[] = []
+      let previousTestFingerprint: string | null = null
+      if (previousTestFailure) {
+        const failedAt = Date.parse(previousTestFailure.createdAt)
+        const evidence = await this.previousProjectFailureEvidence(task, previousTestFailure.message) ??
+          await this.collectProjectFailure(task, project, worktreePath, control, runId, failedAt - 30_000, failedAt + 5_000, false)
+        if (evidence) {
+          repairContext += `\n\n${evidence.context}`
+          repairImagePaths = evidence.imagePaths
+          previousTestFingerprint = evidence.fingerprint
+        }
+      }
       let automationPassed = false
       let runtimeResult: RuntimeRunResult | null = null
       for (let attempt = 1; attempt <= task.maxAttempts; attempt += 1) {
@@ -903,6 +916,7 @@ export class AgentRunner {
           this.setVerificationStep(taskId, plan, 'project-tests', 'running', `${project.testCommand} 실행 중`)
           this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 실행`)
           let testResult: ProcessResult
+          const testStartedAt = Date.now()
           try {
             testResult = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
           } catch (error) {
@@ -910,7 +924,8 @@ export class AgentRunner {
             throw error
           }
           if (testResult.code !== 0) {
-            const failureReport = projectTestFailureReport(testResult.output)
+            const evidence = await this.collectProjectFailure(this.store.getTask(taskId), project, worktreePath, control, runId, testStartedAt)
+            const failureReport = [evidence ? `프로젝트 테스트 상세 증거: ${evidence.artifactPath}` : '', projectTestFailureReport(testResult.output), evidence?.context].filter(Boolean).join('\n\n')
             this.setVerificationStep(taskId, plan, 'project-tests', 'failed', `종료 코드 ${testResult.code}로 실패했습니다.`)
             this.emit(
               task,
@@ -928,9 +943,13 @@ export class AgentRunner {
             }
             repairContext = [
               '직전 테스트가 실패했습니다. 아래 핵심 진단을 우선 해결하고 기존 테스트를 유지하세요.',
+              evidence && evidence.fingerprint === previousTestFingerprint
+                ? '같은 테스트 실패가 반복됐습니다. 이전 수정은 실패 원인을 해결하지 못했습니다. 아래 실제 트리에서 예상 종류·identifier가 어디에 붙었는지 먼저 대조하고, 근거와 수정 지점을 명시하세요. 같은 추정 변경을 반복하거나 대기 시간만 늘리지 마세요.'
+                : '',
               failureReport
-            ].join('\n\n')
-            repairImagePaths = []
+            ].filter(Boolean).join('\n\n')
+            repairImagePaths = evidence?.imagePaths ?? []
+            previousTestFingerprint = evidence?.fingerprint ?? null
             continue
           }
           this.setVerificationStep(taskId, plan, 'project-tests', 'passed', '프로젝트 테스트가 모두 통과했습니다.')
@@ -1305,9 +1324,11 @@ export class AgentRunner {
       if (usesProjectTests) {
         this.setVerificationStep(taskId, plan, 'project-tests', 'running', `${project.testCommand} 다시 실행 중`)
         this.emit(task, 'test_started', 'test-runner', `${project.testCommand} 재검증`)
+        const testStartedAt = Date.now()
         const result = await this.runConfiguredCommand(project.testCommand, worktreePath, control)
         if (result.code !== 0) {
-          const failureReport = projectTestFailureReport(result.output)
+          const evidence = await this.collectProjectFailure(this.store.getTask(taskId), project, worktreePath, control, runId, testStartedAt)
+          const failureReport = [evidence ? `프로젝트 테스트 상세 증거: ${evidence.artifactPath}` : '', projectTestFailureReport(result.output), evidence?.context].filter(Boolean).join('\n\n')
           this.setVerificationStep(taskId, plan, 'project-tests', 'failed', `종료 코드 ${result.code}로 다시 실패했습니다.`)
           this.emit(task, 'test_failed', 'test-runner', `재검증 실패 · 종료 코드 ${result.code}\n${failureReport}`, 'high')
           if (isEnvironmentFailureOutput(result.output)) {
@@ -2864,6 +2885,75 @@ export class AgentRunner {
       timeoutMs: this.policy.testCommandTimeoutMs,
       label
     })
+  }
+
+  private async collectProjectFailure(
+    task: TaskRecord,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun,
+    runId: string,
+    since: number,
+    until = Date.now(),
+    recordEvidence = true
+  ): Promise<ProjectTestEvidence | null> {
+    if (process.platform !== 'darwin') return null
+    if (!task.runtimeContract && !project.runtimeAdapter && !/^(tuist|xcodebuild)\b/.test(project.testCommand)) return null
+    this.emit(task, 'agent', 'test-runner', '실패 당시 Xcode 테스트 활동과 접근성 트리를 수집합니다.')
+    const deadline = Date.now() + 60_000
+    try {
+      const evidence = await this.projectTestEvidenceCollector({
+        worktreePath,
+        commandLine: project.testCommand,
+        since,
+        until,
+        evidenceDirectory: join(this.runtimeRoot, task.id, runId, `project-tests-${task.attempt}-${randomUUID()}`),
+        execute: async (request) => {
+          if (control.stopped) throw new StoppedError()
+          const remaining = deadline - Date.now()
+          if (remaining <= 0) throw new Error('프로젝트 테스트 증거 수집 시간이 초과되었습니다.')
+          return this.runProcess(request.command, request.args, worktreePath, control, undefined, process.env, {
+            timeoutMs: Math.min(request.timeoutMs ?? 15_000, remaining), label: request.label
+          })
+        }
+      })
+      if (control.stopped) throw new StoppedError()
+      if (!evidence) {
+        this.emit(task, 'agent', 'test-runner', '이번 작업에 해당하는 상세 테스트 결과가 없어 콘솔 진단을 유지합니다.')
+        return null
+      }
+      const metadata = await stat(evidence.artifactPath)
+      if (recordEvidence) this.store.addRuntimeEvidence(task.id, {
+        kind: 'project-test', path: evidence.artifactPath, mimeType: 'application/json',
+        sizeBytes: metadata.size, createdAt: new Date().toISOString(), runId,
+        outcome: 'failed', summary: '프로젝트 테스트 실패 당시 활동·접근성 증거'
+      })
+      this.emit(task, 'agent', 'test-runner', `프로젝트 테스트 상세 증거를 다음 수정에 연결합니다. · 화면 ${evidence.imagePaths.length}개`)
+      return evidence
+    } catch (error) {
+      if (control.stopped) throw new StoppedError()
+      this.emit(task, 'agent', 'test-runner', '상세 테스트 증거를 수집하지 못했습니다. 원래 테스트 실패와 콘솔 진단은 유지합니다.', 'low')
+      return null
+    }
+  }
+
+  private async previousProjectFailureEvidence(task: TaskRecord, failureMessage: string): Promise<ProjectTestEvidence | null> {
+    const path = failureMessage.match(/^프로젝트 테스트 상세 증거: (.+)$/m)?.[1]
+    if (!path || !isPathInside(join(this.runtimeRoot, task.id), path)) return null
+    if (!this.store.listRuntimeEvidence(task.projectId).some((item) => item.taskId === task.id && item.kind === 'project-test' && item.path === path)) return null
+    try {
+      const metadata = await lstat(path)
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 200_000) return null
+      const data = JSON.parse(await readFile(path, 'utf8')) as ProjectTestEvidence
+      if (typeof data.context !== 'string' || typeof data.fingerprint !== 'string' || !Array.isArray(data.imagePaths)) return null
+      const imagePaths: string[] = []
+      for (const image of data.imagePaths.slice(0, 3)) {
+        if (typeof image !== 'string' || !isPathInside(join(this.runtimeRoot, task.id), image)) continue
+        const info = await lstat(image).catch(() => null)
+        if (info?.isFile() && !info.isSymbolicLink()) imagePaths.push(image)
+      }
+      return { ...data, context: redactProcessOutput(data.context).slice(0, 85_000), artifactPath: path, imagePaths }
+    } catch { return null }
   }
 
   private preflightRuntimeEnvironment(task: TaskRecord): void {

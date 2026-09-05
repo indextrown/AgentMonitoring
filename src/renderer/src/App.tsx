@@ -299,7 +299,8 @@ const RUNTIME_EVIDENCE_LABELS: Record<RuntimeEvidenceRecord['kind'], string> = {
   accessibility: 'Simulator 접근성 트리',
   'ui-actions': 'Simulator UI 조작 결과',
   'debug-state': 'Simulator Debug state·fixture',
-  'runtime-verification': 'Runtime 인수 검증 결과'
+  'runtime-verification': 'Runtime 인수 검증 결과',
+  'project-test': '프로젝트 테스트 실패 증거'
 }
 
 const RUNTIME_REPORT_OUTCOME_LABELS: Record<RuntimeEvidenceRecord['outcome'], string> = {
