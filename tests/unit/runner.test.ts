@@ -19,7 +19,11 @@ import {
   type IosSimulatorRuntimeAdapter
 } from '../../electron/main/ios-simulator-runtime'
 import { AppStore } from '../../electron/main/store'
-import type { ApprovedRuntimeContract, TaskVerificationPlan } from '../../src/shared/types'
+import type {
+  ApprovedRuntimeContract,
+  CodexResolvedModelPlan,
+  TaskVerificationPlan
+} from '../../src/shared/types'
 
 const execFileAsync = promisify(execFile)
 const temporaryDirectories: string[] = []
@@ -82,6 +86,7 @@ async function createExecutionFixture(options: {
   runtimeAdapter?: IosSimulatorRuntimeAdapter
   runtimeContract?: ApprovedRuntimeContract
   verificationPlan?: TaskVerificationPlan
+  modelPlan?: CodexResolvedModelPlan
   setupCommand?: string | null
   testCommand?: string | null
   runtimePreparer?: ConstructorParameters<typeof AgentRunner>[10]
@@ -189,7 +194,10 @@ async function createExecutionFixture(options: {
     options.maxAttempts ?? 1,
     options.runtimeContract ?? null,
     options.runtimeContract ? '승인된 테스트 시나리오' : null,
-    options.verificationPlan ?? null
+    options.verificationPlan ?? null,
+    undefined,
+    null,
+    options.modelPlan ?? null
   )
   const runner = new AgentRunner(
     store,
@@ -919,6 +927,60 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('passes the task model and reasoning effort to each Codex role', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'model-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      verificationPlan: {
+        version: 1,
+        mode: 'manual-review',
+        testDesign: 'skip',
+        runtimeSource: 'off'
+      },
+      modelPlan: {
+        version: 1,
+        source: 'task',
+        resolvedAt: '2026-09-05T00:00:00.000Z',
+        roles: {
+          planning: { model: 'gpt-planning', reasoningEffort: 'medium' },
+          'test-designer': { model: 'gpt-test-designer', reasoningEffort: 'high' },
+          critic: { model: 'gpt-critic', reasoningEffort: 'high' },
+          implementer: { model: 'gpt-implementer', reasoningEffort: 'high' },
+          reviewer: { model: 'gpt-reviewer', reasoningEffort: 'xhigh' }
+        }
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const calls = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string[])
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toEqual(expect.arrayContaining([
+      '--model',
+      'gpt-implementer',
+      '--config',
+      'model_reasoning_effort="high"'
+    ]))
+    expect(calls[1]).toEqual(expect.arrayContaining([
+      '--model',
+      'gpt-reviewer',
+      '--config',
+      'model_reasoning_effort="xhigh"'
+    ]))
+    fixture.store.close()
+  })
+
   it('runs a Simulator-only task without invoking Test Designer or the project test command', async () => {
     let callsPath = ''
     let launchCount = 0
@@ -1295,7 +1357,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(published.some((event) => event.actor === 'test-designer')).toBe(true)
     expect(published.some((event) => event.actor === 'critic')).toBe(true)
     expect(
-      published.filter((event) => event.actor === 'reviewer' && event.message === 'reviewer 단계 시작')
+      published.filter((event) => event.actor === 'reviewer' && event.message.startsWith('reviewer 단계 시작 · '))
     ).toHaveLength(2)
     expect(store.getSnapshot(project.id).findings).toMatchObject([
       { severity: 'medium', title: '빈 입력 회귀 검토 필요', resolved: true }

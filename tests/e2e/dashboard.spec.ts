@@ -453,6 +453,26 @@ test('starts from a real-project onboarding state without seeded data', async ({
   await expect(page.getByRole('button', { name: '첫 작업 만들기' })).toBeEnabled()
 })
 
+test('configures project and task-specific Codex models', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('.folder-button').click()
+
+  const settings = page.locator('.settings-form')
+  const profile = settings.locator('.codex-model-profile-editor')
+  await expect(profile.getByLabel('모델 사용 방식')).toHaveValue('recommended')
+  await profile.getByLabel('모델 사용 방식').selectOption('role-based')
+  await profile.locator('.codex-role-models .codex-model-selection').nth(3).getByLabel('Implementer').selectOption('gpt-5.6-terra')
+  await profile.locator('.codex-role-models .codex-model-selection').nth(3).getByLabel('추론 강도').selectOption('high')
+  await settings.getByRole('button', { name: '설정 저장' }).click()
+
+  await page.getByRole('button', { name: /대시보드/ }).click()
+  await page.getByRole('button', { name: '새 작업' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText(/프로젝트 설정 사용 · 역할별 모델/)).toBeVisible()
+  await dialog.getByLabel('이 작업만 AI 모델 변경').check()
+  await expect(dialog.locator('.task-model-selector .codex-model-profile-editor')).toBeVisible()
+})
+
 test('creates a manual-review task without a project test command', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()

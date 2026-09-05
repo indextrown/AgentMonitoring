@@ -49,6 +49,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       type: 'chatgpt', email: 'agent@example.com', planType: 'plus'
     } : null, requiresOpenaiAuth: true } })
   }
+  if (message.method === 'model/list') {
+    send({ id: message.id, result: { data: [{
+      id: 'gpt-fixture', model: 'gpt-fixture', displayName: 'GPT Fixture', description: 'fixture model',
+      hidden: false, supportedReasoningEfforts: [
+        { reasoningEffort: 'low', description: 'fast' },
+        { reasoningEffort: 'high', description: 'deep' }
+      ], defaultReasoningEffort: 'low', inputModalities: ['text', 'image'], isDefault: true, upgrade: null
+    }], nextCursor: null } })
+  }
   if (message.method === 'account/login/start') {
     send({ id: message.id, result: {
       type: 'chatgpt', loginId: 'login-fixture', authUrl: 'https://chatgpt.com/codex/auth-fixture'
@@ -90,6 +99,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       planType: 'plus'
     })
     expect((await manager.status()).state).toBe('signed_in')
+    expect(await manager.models()).toMatchObject({
+      defaultModelId: 'gpt-fixture',
+      models: [{ id: 'gpt-fixture', defaultReasoningEffort: 'low', isDefault: true }]
+    })
     expect((await manager.logout()).state).toBe('signed_out')
     expect(published.some((status) => status.state === 'signing_in')).toBe(true)
 

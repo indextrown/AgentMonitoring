@@ -2,6 +2,8 @@ import {
   AGENT_MONITORING_BRIDGE_VERSION,
   type AgentMonitoringBridge,
   type CodexAuthStatus,
+  type CodexModelCatalog,
+  type CodexReasoningEffort,
   type DashboardSnapshot,
   type EventKind,
   type EventRecord,
@@ -14,11 +16,39 @@ import {
   type TaskStatus
 } from '../../shared/types'
 import { createVerificationResult, updateVerificationStep } from '../../shared/domain'
+import { resolveCodexModelPlan } from '../../shared/codex-models'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const secondaryProjectId = '22222222-2222-4222-8222-222222222222'
 const simulatorListeners = new Set<(session: ProjectSimulatorSession) => void>()
 const demoSimulatorSessions = new Map<string, ProjectSimulatorSession>()
+const demoReasoningEfforts: CodexReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+const demoModelCatalog: CodexModelCatalog = {
+  defaultModelId: 'gpt-5.6-sol',
+  loadedAt: new Date().toISOString(),
+  models: [
+    {
+      id: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6-Sol',
+      description: '안정적인 기본 코딩 모델',
+      supportedReasoningEfforts: demoReasoningEfforts.map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+      defaultReasoningEffort: 'low',
+      inputModalities: ['text', 'image'],
+      isDefault: true,
+      upgrade: null
+    },
+    {
+      id: 'gpt-5.6-terra',
+      displayName: 'GPT-5.6-Terra',
+      description: '속도와 품질의 균형을 맞춘 모델',
+      supportedReasoningEfforts: demoReasoningEfforts.map((reasoningEffort) => ({ reasoningEffort, description: '' })),
+      defaultReasoningEffort: 'medium',
+      inputModalities: ['text', 'image'],
+      isDefault: false,
+      upgrade: null
+    }
+  ]
+}
 
 function demoSimulatorSession(requestedProjectId: string): ProjectSimulatorSession {
   return demoSimulatorSessions.get(requestedProjectId) ?? {
@@ -632,6 +662,7 @@ export const demoBridge: AgentMonitoringBridge = {
   },
   cancelCodexLogin: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
   logoutCodex: async () => updateDemoAuth({ state: 'signed_out', authMode: null, email: null, planType: null }),
+  listCodexModels: async () => demoModelCatalog,
   getSnapshot: async (requestedProjectId?: string) => {
     const selectedProject = state.projects.find((project) => project.id === requestedProjectId) ?? state.projects[0]
     if (!selectedProject) {
@@ -693,7 +724,8 @@ export const demoBridge: AgentMonitoringBridge = {
               ? 'manifest'
               : 'detected'
             : null,
-          publishStrategy: input.publishStrategy ?? project.publishStrategy ?? 'pull-request'
+          publishStrategy: input.publishStrategy ?? project.publishStrategy ?? 'pull-request',
+          modelProfile: input.modelProfile === undefined ? project.modelProfile : input.modelProfile
         }
         return updated
       })
@@ -1159,6 +1191,12 @@ export const demoBridge: AgentMonitoringBridge = {
       prompt: input.prompt,
       status: 'queued',
       provider: 'codex',
+      modelPlan: resolveCodexModelPlan(
+        demoModelCatalog,
+        input.modelProfile ?? state.projects.find((project) => project.id === input.projectId)?.modelProfile,
+        input.modelProfile ? 'task' : state.projects.find((project) => project.id === input.projectId)?.modelProfile ? 'project' : 'codex-recommended',
+        now
+      ),
       maxAttempts: input.maxAttempts,
       attempt: 0,
       branchName: null,

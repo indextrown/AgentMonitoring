@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   ApprovedRuntimeContract,
+  CodexModelProfile,
+  CodexResolvedModelPlan,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -36,6 +38,7 @@ const projectColumns = `
   runtime_adapter_json AS runtimeAdapterJson,
   runtime_config_source AS runtimeConfigSource,
   publish_strategy AS publishStrategy,
+  model_profile_json AS modelProfileJson,
   is_demo AS isDemo,
   created_at AS createdAt
 `
@@ -47,6 +50,7 @@ const taskColumns = `
   prompt,
   status,
   provider,
+  model_plan_json AS modelPlanJson,
   max_attempts AS maxAttempts,
   attempt,
   branch_name AS branchName,
@@ -141,6 +145,9 @@ function projectFromRow(row: Row): ProjectRecord {
       ? String(row.runtimeConfigSource) as ProjectRecord['runtimeConfigSource']
       : null,
     publishStrategy: row.publishStrategy === 'direct' ? 'direct' : 'pull-request',
+    modelProfile: row.modelProfileJson
+      ? JSON.parse(String(row.modelProfileJson)) as CodexModelProfile
+      : null,
     isDemo: Boolean(row.isDemo),
     createdAt: String(row.createdAt)
   }
@@ -176,6 +183,9 @@ function taskFromRow(row: Row): TaskRecord {
     prompt: String(row.prompt),
     status: String(row.status) as TaskStatus,
     provider: 'codex',
+    modelPlan: row.modelPlanJson
+      ? JSON.parse(String(row.modelPlanJson)) as CodexResolvedModelPlan
+      : null,
     maxAttempts: Number(row.maxAttempts),
     attempt: Number(row.attempt),
     branchName: row.branchName ? String(row.branchName) : null,
@@ -320,6 +330,7 @@ export class AppStore {
         runtime_adapter_json TEXT,
         runtime_config_source TEXT,
         publish_strategy TEXT NOT NULL DEFAULT 'pull-request',
+        model_profile_json TEXT,
         is_demo INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
@@ -331,6 +342,7 @@ export class AppStore {
         prompt TEXT NOT NULL,
         status TEXT NOT NULL,
         provider TEXT NOT NULL DEFAULT 'codex',
+        model_plan_json TEXT,
         max_attempts INTEGER NOT NULL DEFAULT 3,
         attempt INTEGER NOT NULL DEFAULT 0,
         branch_name TEXT,
@@ -459,12 +471,18 @@ export class AppStore {
     if (!projectColumnNames.has('publish_strategy')) {
       this.database.exec("ALTER TABLE projects ADD COLUMN publish_strategy TEXT NOT NULL DEFAULT 'pull-request'")
     }
+    if (!projectColumnNames.has('model_profile_json')) {
+      this.database.exec('ALTER TABLE projects ADD COLUMN model_profile_json TEXT')
+    }
 
     const taskColumnNames = new Set(
       (this.database.prepare('PRAGMA table_info(tasks)').all() as Row[]).map((row) => String(row.name))
     )
     if (!taskColumnNames.has('runtime_contract_json')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_contract_json TEXT')
+    }
+    if (!taskColumnNames.has('model_plan_json')) {
+      this.database.exec('ALTER TABLE tasks ADD COLUMN model_plan_json TEXT')
     }
     if (!taskColumnNames.has('runtime_scenario_summary')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN runtime_scenario_summary TEXT')
@@ -555,6 +573,7 @@ export class AppStore {
       runtimeAdapter: null,
       runtimeConfigSource: null,
       publishStrategy: 'pull-request',
+      modelProfile: null,
       isDemo: false,
       createdAt: new Date().toISOString()
     }
@@ -562,8 +581,8 @@ export class AppStore {
       .prepare(`
         INSERT INTO projects (
           id, name, path, test_command, setup_command, runtime_adapter_json, runtime_config_source,
-          publish_strategy, is_demo, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'pull-request', 0, ?)
+          publish_strategy, model_profile_json, is_demo, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, 'pull-request', NULL, 0, ?)
       `)
       .run(project.id, project.name, project.path, project.testCommand, project.setupCommand, project.createdAt)
     this.addEvent(project.id, null, 'project_created', 'human', `${project.name} 프로젝트 등록`)
@@ -587,7 +606,7 @@ export class AppStore {
       .prepare(`
         UPDATE projects
         SET name = ?, test_command = ?, setup_command = ?, runtime_adapter_json = ?, runtime_config_source = ?,
-            publish_strategy = ?
+            publish_strategy = ?, model_profile_json = ?
         WHERE id = ?
       `)
       .run(
@@ -597,6 +616,9 @@ export class AppStore {
         runtimeAdapter ? JSON.stringify(runtimeAdapter) : null,
         runtimeConfigSource,
         input.publishStrategy ?? existing.publishStrategy ?? 'pull-request',
+        input.modelProfile === undefined
+          ? existing.modelProfile ? JSON.stringify(existing.modelProfile) : null
+          : input.modelProfile ? JSON.stringify(input.modelProfile) : null,
         input.projectId
       )
     return this.getProject(input.projectId)
@@ -749,7 +771,8 @@ export class AppStore {
     runtimeScenarioSummary: string | null = null,
     verificationPlan: TaskVerificationPlan | null = null,
     publishStrategy?: TaskRecord['publishStrategy'],
-    techSpec: TaskTechSpecDraft | null = null
+    techSpec: TaskTechSpecDraft | null = null,
+    modelPlan: CodexResolvedModelPlan | null = null
   ): TaskRecord {
     const project = this.getProject(projectId)
     const resolvedPublishStrategy = publishStrategy ?? project.publishStrategy ?? 'pull-request'
@@ -764,6 +787,7 @@ export class AppStore {
       prompt: prompt.trim(),
       status: 'queued',
       provider: 'codex',
+      modelPlan,
       maxAttempts: Math.max(1, Math.min(maxAttempts, 5)),
       attempt: 0,
       branchName: null,
@@ -788,6 +812,7 @@ export class AppStore {
       .prepare(`
         INSERT INTO tasks (
           id, project_id, title, prompt, status, provider, max_attempts, attempt,
+          model_plan_json,
           branch_name, worktree_path, source_branch, base_commit, verification_base_commit,
           publish_strategy, publication_json,
           runtime_contract_json, runtime_scenario_summary,
@@ -796,6 +821,7 @@ export class AppStore {
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
+          $modelPlan,
           NULL, NULL, NULL, NULL, NULL, $publishStrategy, NULL, $runtimeContract, $runtimeScenarioSummary,
           $runtimeScenarioApprovedAt, $techSpec, $verificationPlan, $verificationResult,
           '[]', 0,
@@ -809,6 +835,7 @@ export class AppStore {
         prompt: task.prompt,
         status: task.status,
         maxAttempts: task.maxAttempts,
+        modelPlan: modelPlan ? JSON.stringify(modelPlan) : null,
         publishStrategy: resolvedPublishStrategy,
         runtimeContract: runtimeContract ? JSON.stringify(runtimeContract) : null,
         runtimeScenarioSummary: task.runtimeScenarioSummary ?? null,

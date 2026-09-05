@@ -61,6 +61,58 @@ export interface CodexAuthStatus {
   message?: string
 }
 
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+
+export type CodexModelRole =
+  | 'planning'
+  | 'test-designer'
+  | 'critic'
+  | 'implementer'
+  | 'reviewer'
+
+export interface CodexModelSelection {
+  model: string
+  reasoningEffort: CodexReasoningEffort
+}
+
+export type CodexModelProfileMode = 'recommended' | 'single' | 'role-based'
+
+export interface CodexModelProfile {
+  version: 1
+  mode: CodexModelProfileMode
+  selection: CodexModelSelection | null
+  roleSelections: Partial<Record<CodexModelRole, CodexModelSelection>>
+}
+
+export interface CodexResolvedModelPlan {
+  version: 1
+  source: 'codex-recommended' | 'project' | 'task'
+  roles: Record<CodexModelRole, CodexModelSelection>
+  resolvedAt: string
+}
+
+export interface CodexModelReasoningEffortOption {
+  reasoningEffort: CodexReasoningEffort
+  description: string
+}
+
+export interface CodexModelOption {
+  id: string
+  displayName: string
+  description: string
+  supportedReasoningEfforts: CodexModelReasoningEffortOption[]
+  defaultReasoningEffort: CodexReasoningEffort
+  inputModalities: Array<'text' | 'image'>
+  isDefault: boolean
+  upgrade: string | null
+}
+
+export interface CodexModelCatalog {
+  models: CodexModelOption[]
+  defaultModelId: string
+  loadedAt: string
+}
+
 export type IosDeviceFamily = 'iphone' | 'ipad'
 
 export interface IosRuntimeAdapterConfig {
@@ -338,6 +390,7 @@ export interface ProjectRecord {
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   runtimeConfigSource?: ProjectRuntimeConfigSource | null
   publishStrategy?: PublishStrategy
+  modelProfile?: CodexModelProfile | null
   isDemo: boolean
   createdAt: string
 }
@@ -568,6 +621,7 @@ export interface TaskRecord {
   prompt: string
   status: TaskStatus
   provider: 'codex'
+  modelPlan?: CodexResolvedModelPlan | null
   maxAttempts: number
   attempt: number
   branchName: string | null
@@ -729,6 +783,7 @@ export interface CreateTaskInput {
   techSpec?: TaskTechSpecDraft | null
   verificationPlan: TaskVerificationPlan
   publishStrategy: PublishStrategy
+  modelProfile?: CodexModelProfile
 }
 
 export interface ContinueTaskInput {
@@ -761,6 +816,7 @@ export interface UpdateProjectInput {
   setupCommand: string
   runtimeAdapter?: IosRuntimeAdapterConfig | null
   publishStrategy?: PublishStrategy
+  modelProfile?: CodexModelProfile | null
 }
 
 export interface GenerateRuntimeScenarioInput {
@@ -768,6 +824,7 @@ export interface GenerateRuntimeScenarioInput {
   title: string
   prompt: string
   techSpec?: TaskTechSpecDraft | null
+  modelProfile?: CodexModelProfile
 }
 
 export interface RecommendVerificationPlanInput {
@@ -775,12 +832,14 @@ export interface RecommendVerificationPlanInput {
   title: string
   prompt: string
   techSpec?: TaskTechSpecDraft | null
+  modelProfile?: CodexModelProfile
 }
 
 export interface GenerateTechSpecInput {
   projectId: string
   title: string
   prompt: string
+  modelProfile?: CodexModelProfile
 }
 
 export interface RefineTechSpecInput extends GenerateTechSpecInput {
@@ -788,7 +847,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 18
+export const AGENT_MONITORING_BRIDGE_VERSION = 19
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -796,6 +855,7 @@ export interface AgentMonitoringBridge {
   loginCodex: () => Promise<CodexAuthStatus>
   cancelCodexLogin: () => Promise<CodexAuthStatus>
   logoutCodex: () => Promise<CodexAuthStatus>
+  listCodexModels: (refresh?: boolean) => Promise<CodexModelCatalog>
   getSnapshot: (projectId?: string) => Promise<DashboardSnapshot>
   addProject: () => Promise<ProjectRecord | null>
   updateProject: (input: UpdateProjectInput) => Promise<ProjectRecord>

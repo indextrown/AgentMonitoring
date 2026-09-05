@@ -6,6 +6,7 @@ import { parseArgsStringToArgv } from 'string-argv'
 import { z } from 'zod'
 import type {
   ApprovedRuntimeContractV1,
+  CodexModelRole,
   EventRecord,
   IosRuntimeAdapterConfig,
   ProjectRecord,
@@ -22,6 +23,7 @@ import type {
   VerificationStepKey,
   VerificationStepStatus
 } from '../../src/shared/types'
+import { codexModelArguments, codexModelLabel } from '../../src/shared/codex-models'
 import {
   createVerificationResult,
   isActiveTask,
@@ -2729,13 +2731,15 @@ export class AgentRunner {
   ): Promise<ProcessResult> {
     const control = this.activeRuns.get(task.id)
     if (!control || control.stopped) throw new StoppedError()
-    this.emit(task, 'agent', actor, `${actor} 단계 시작`)
+    const model = task.modelPlan?.roles[actor as CodexModelRole]
+    this.emit(task, 'agent', actor, `${actor} 단계 시작 · ${codexModelLabel(model)}`)
 
     const result = await this.runProcess(
       this.codexCommand,
       [
         ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
         'exec',
+        ...codexModelArguments(model),
         '--json',
         ...imagePaths.flatMap((path) => ['--image', path]),
         '--sandbox',
@@ -2776,7 +2780,7 @@ export class AgentRunner {
       }
       throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
     }
-    this.emit(task, 'agent', actor, `${actor} 단계 완료`)
+    this.emit(task, 'agent', actor, `${actor} 단계 완료 · ${codexModelLabel(model)}`)
     return result
   }
 

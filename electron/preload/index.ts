@@ -30,6 +30,7 @@ const bridge: AgentMonitoringBridge = {
   loginCodex: () => ipcRenderer.invoke('codex-auth:login'),
   cancelCodexLogin: () => ipcRenderer.invoke('codex-auth:cancel'),
   logoutCodex: () => ipcRenderer.invoke('codex-auth:logout'),
+  listCodexModels: (refresh = false) => ipcRenderer.invoke('codex-models:list', refresh),
   getSnapshot: (projectId?: string) => ipcRenderer.invoke('dashboard:snapshot', projectId),
   addProject: () => ipcRenderer.invoke('project:add'),
   updateProject: (input: UpdateProjectInput) => ipcRenderer.invoke('project:update', input),

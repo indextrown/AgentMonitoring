@@ -12,6 +12,46 @@ afterEach(async () => {
 })
 
 describe('AppStore', () => {
+  it('persists project model profiles and immutable task model plans', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-model-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Model fixture', join(directory, 'model-fixture'))
+    const modelProfile = {
+      version: 1 as const,
+      mode: 'role-based' as const,
+      selection: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+      roleSelections: { reviewer: { model: 'gpt-review', reasoningEffort: 'high' as const } }
+    }
+    store.updateProject({
+      projectId: project.id,
+      name: project.name,
+      setupCommand: '',
+      testCommand: '',
+      modelProfile
+    })
+    const modelPlan = {
+      version: 1 as const,
+      source: 'project' as const,
+      resolvedAt: '2026-09-05T00:00:00.000Z',
+      roles: {
+        planning: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        'test-designer': { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        critic: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        implementer: { model: 'gpt-default', reasoningEffort: 'medium' as const },
+        reviewer: { model: 'gpt-review', reasoningEffort: 'high' as const }
+      }
+    }
+    const task = store.createTask(project.id, '모델 고정', '선택한 모델을 작업에 고정해서 실행한다.', 1, null, null, null, undefined, null, modelPlan)
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getProject(project.id).modelProfile).toEqual(modelProfile)
+    expect(reopened.getTask(task.id).modelPlan).toEqual(modelPlan)
+    reopened.close()
+  })
+
   it('starts with an empty workspace and persists user records', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
     temporaryDirectories.push(directory)

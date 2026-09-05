@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
   ApprovedRuntimeContractV1,
+  CodexModelSelection,
   GeneratedRuntimeScenario,
   IosRuntimeAdapterConfig,
   RuntimeAcceptanceAssertion,
@@ -14,6 +15,7 @@ import type {
   RuntimeUiAction,
   TaskTechSpecDraft
 } from '../../src/shared/types'
+import { codexModelArguments } from '../../src/shared/codex-models'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 import { execCodexFile } from './codex-exec'
 import { extractCodexFailureMessage, readCodexStructuredOutput } from './codex-structured-output'
@@ -465,6 +467,7 @@ export class RuntimeScenarioGenerator {
     previousContract?: ApprovedRuntimeContract | null
     availableEnvironmentKeys?: string[]
     localBuildConfigurationAvailable?: boolean
+    model?: CodexModelSelection
   }): Promise<GeneratedRuntimeScenario> {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), 'agent-monitoring-scenario-'))
     const schemaPath = join(temporaryDirectory, 'schema.json')
@@ -524,6 +527,7 @@ export class RuntimeScenarioGenerator {
       const baseArguments = [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
           'exec',
+          ...codexModelArguments(input.model),
           '--ephemeral',
           '--sandbox',
           'read-only',

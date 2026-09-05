@@ -61,10 +61,18 @@ import {
   isActiveTask
 } from '../../shared/domain'
 import { normalizeRuntimeScenarioEnvironment } from '../../shared/runtime-scenario-policy'
+import {
+  CODEX_MODEL_ROLES,
+  CODEX_MODEL_ROLE_LABELS,
+  RECOMMENDED_CODEX_MODEL_PROFILE
+} from '../../shared/codex-models'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
+  CodexModelCatalog,
+  CodexModelProfile,
+  CodexModelSelection,
   DashboardSnapshot,
   EventKind,
   EventRecord,
@@ -115,6 +123,7 @@ type BridgeConnectionIssue = 'missing' | 'outdated'
 const electronRuntime = navigator.userAgent.toLowerCase().includes('electron')
 const runtimeBridge = window.agentMonitoring as Partial<AgentMonitoringBridge> | undefined
 const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
+  'listCodexModels',
   'autoConfigureProjectRuntime',
   'listProjectRuntimeEnvironment',
   'upsertProjectRuntimeEnvironment',
@@ -2503,6 +2512,148 @@ function SourceControlGroup({
   )
 }
 
+function catalogDefaultSelection(catalog: CodexModelCatalog): CodexModelSelection {
+  const model = catalog.models.find((candidate) => candidate.id === catalog.defaultModelId) ?? catalog.models[0]
+  return { model: model.id, reasoningEffort: model.defaultReasoningEffort }
+}
+
+function cloneModelProfile(profile?: CodexModelProfile | null): CodexModelProfile {
+  return profile
+    ? {
+        ...profile,
+        selection: profile.selection ? { ...profile.selection } : null,
+        roleSelections: Object.fromEntries(
+          Object.entries(profile.roleSelections).map(([role, selection]) => [role, { ...selection }])
+        )
+      }
+    : { ...RECOMMENDED_CODEX_MODEL_PROFILE, roleSelections: {} }
+}
+
+function modelProfileSummary(profile: CodexModelProfile | null | undefined, catalog: CodexModelCatalog | null): string {
+  if (!profile || profile.mode === 'recommended') {
+    if (!catalog) return 'Codex 추천 기본값'
+    const selection = catalogDefaultSelection(catalog)
+    return `Codex 추천 · ${selection.model} · ${selection.reasoningEffort}`
+  }
+  if (profile.mode === 'single') return `${profile.selection?.model ?? '모델 미선택'} · ${profile.selection?.reasoningEffort ?? '-'}`
+  return `역할별 모델 · 기본 ${profile.selection?.model ?? '미선택'}`
+}
+
+function CodexModelSelectionEditor({
+  catalog,
+  selection,
+  onChange,
+  label,
+  allowInherited = false
+}: {
+  catalog: CodexModelCatalog
+  selection: CodexModelSelection | null
+  onChange: (selection: CodexModelSelection | null) => void
+  label: string
+  allowInherited?: boolean
+}): React.JSX.Element {
+  const model = selection ? catalog.models.find((candidate) => candidate.id === selection.model) : null
+  return (
+    <div className="codex-model-selection">
+      <label>
+        <span>{label}</span>
+        <select value={selection?.model ?? ''} onChange={(event) => {
+          if (!event.target.value) {
+            onChange(null)
+            return
+          }
+          const selectedModel = catalog.models.find((candidate) => candidate.id === event.target.value)!
+          onChange({ model: selectedModel.id, reasoningEffort: selectedModel.defaultReasoningEffort })
+        }}>
+          {allowInherited && <option value="">기본 모델 사용</option>}
+          {catalog.models.map((candidate) => (
+            <option value={candidate.id} key={candidate.id}>{candidate.displayName}{candidate.isDefault ? ' · 추천' : ''}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>추론 강도</span>
+        <select
+          disabled={!selection || !model}
+          value={selection?.reasoningEffort ?? ''}
+          onChange={(event) => selection && onChange({ ...selection, reasoningEffort: event.target.value as CodexModelSelection['reasoningEffort'] })}
+        >
+          {!selection && <option value="">기본값 상속</option>}
+          {model?.supportedReasoningEfforts.map((effort) => (
+            <option value={effort.reasoningEffort} key={effort.reasoningEffort}>{effort.reasoningEffort}</option>
+          ))}
+        </select>
+      </label>
+      {model?.description && <small>{model.description}</small>}
+    </div>
+  )
+}
+
+function CodexModelProfileEditor({
+  catalog,
+  profile,
+  onChange
+}: {
+  catalog: CodexModelCatalog
+  profile: CodexModelProfile
+  onChange: (profile: CodexModelProfile) => void
+}): React.JSX.Element {
+  const defaultSelection = profile.selection ?? catalogDefaultSelection(catalog)
+  const setMode = (mode: CodexModelProfile['mode']): void => {
+    onChange({
+      ...profile,
+      mode,
+      selection: mode === 'recommended' ? null : defaultSelection,
+      roleSelections: mode === 'role-based' ? profile.roleSelections : {}
+    })
+  }
+  return (
+    <div className="codex-model-profile-editor">
+      <label>
+        <span>모델 사용 방식</span>
+        <select value={profile.mode} onChange={(event) => setMode(event.target.value as CodexModelProfile['mode'])}>
+          <option value="recommended">Codex 추천 기본값</option>
+          <option value="single">모든 단계 같은 모델</option>
+          <option value="role-based">역할별 모델</option>
+        </select>
+      </label>
+      {profile.mode === 'recommended' && (
+        <div className="codex-model-recommended">
+          <Bot size={15} />
+          <div><strong>{modelProfileSummary(profile, catalog)}</strong><small>Codex가 추천 모델을 바꾸면 새 작업부터 자동으로 따라갑니다.</small></div>
+        </div>
+      )}
+      {profile.mode !== 'recommended' && (
+        <CodexModelSelectionEditor
+          catalog={catalog}
+          selection={defaultSelection}
+          label={profile.mode === 'single' ? '모든 단계 모델' : '역할 기본 모델'}
+          onChange={(selection) => onChange({ ...profile, selection })}
+        />
+      )}
+      {profile.mode === 'role-based' && (
+        <div className="codex-role-models">
+          {CODEX_MODEL_ROLES.map((role) => (
+            <CodexModelSelectionEditor
+              allowInherited
+              catalog={catalog}
+              key={role}
+              label={CODEX_MODEL_ROLE_LABELS[role]}
+              selection={profile.roleSelections[role] ?? null}
+              onChange={(selection) => {
+                const roleSelections = { ...profile.roleSelections }
+                if (selection) roleSelections[role] = selection
+                else delete roleSelections[role]
+                onChange({ ...profile, roleSelections })
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProjectsPage({
   project,
   runtimeDiscovery,
@@ -2531,6 +2682,9 @@ function ProjectsPage({
   const [testCommand, setTestCommand] = useState(project.testCommand)
   const [runtimeAdapter, setRuntimeAdapter] = useState(project.runtimeAdapter)
   const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
+  const [modelProfile, setModelProfile] = useState<CodexModelProfile>(() => cloneModelProfile(project.modelProfile))
+  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalog | null>(null)
+  const [modelCatalogError, setModelCatalogError] = useState<string | null>(null)
   const [runtimeEnvironment, setRuntimeEnvironment] = useState<ProjectRuntimeEnvironmentEntry[]>([])
   const [environmentKey, setEnvironmentKey] = useState('')
   const [environmentLabel, setEnvironmentLabel] = useState('')
@@ -2546,7 +2700,16 @@ function ProjectsPage({
     setTestCommand(project.testCommand)
     setRuntimeAdapter(project.runtimeAdapter)
     setPublishStrategy(project.publishStrategy ?? 'pull-request')
+    setModelProfile(cloneModelProfile(project.modelProfile))
   }, [project])
+  useEffect(() => {
+    let active = true
+    setModelCatalogError(null)
+    void bridge.listCodexModels()
+      .then((catalog) => { if (active) setModelCatalog(catalog) })
+      .catch((error) => { if (active) setModelCatalogError(String(error).replace(/^Error:\s*/, '')) })
+    return () => { active = false }
+  }, [project.id])
   useEffect(() => {
     let active = true
     void bridge.listProjectRuntimeEnvironment(project.id)
@@ -2617,7 +2780,7 @@ function ProjectsPage({
       )}
       <form className="panel settings-form" onSubmit={(event) => {
         event.preventDefault()
-        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter, publishStrategy })
+        void onSave({ projectId: project.id, name, setupCommand, testCommand, runtimeAdapter, publishStrategy, modelProfile })
       }}>
         <div className="setting-icon"><Settings2 size={18} /></div>
         <label><span>프로젝트 이름</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -2633,6 +2796,24 @@ function ProjectsPage({
           </select>
           <small>새 작업에 기본 적용됩니다. 작업을 등록할 때마다 바꿀 수 있습니다.</small>
         </label>
+        <section className="runtime-settings codex-model-settings">
+          <div className="runtime-settings-heading">
+            <div>
+              <strong>AI 모델</strong>
+              <small>새 작업의 테크스펙·테스트 설계·구현·검토 단계에 적용됩니다.</small>
+            </div>
+            <button className="text-button" type="button" onClick={() => {
+              setModelCatalogError(null)
+              void bridge.listCodexModels(true)
+                .then(setModelCatalog)
+                .catch((error) => setModelCatalogError(String(error).replace(/^Error:\s*/, '')))
+            }}><RotateCcw size={12} />목록 새로고침</button>
+          </div>
+          {modelCatalog
+            ? <CodexModelProfileEditor catalog={modelCatalog} profile={modelProfile} onChange={setModelProfile} />
+            : <p className="empty-copy"><LoaderCircle className="spin" size={12} />Codex 모델을 확인하고 있습니다.</p>}
+          {modelCatalogError && <p className="tech-spec-error" role="alert">{modelCatalogError}</p>}
+        </section>
         <section className="runtime-settings" id="ios-runtime-settings">
           <div className="runtime-settings-heading">
             <div>
@@ -3056,6 +3237,10 @@ function TaskModal({
 }): React.JSX.Element {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [overrideModelProfile, setOverrideModelProfile] = useState(false)
+  const [modelProfile, setModelProfile] = useState<CodexModelProfile>(() => cloneModelProfile(project.modelProfile))
+  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalog | null>(null)
+  const [modelCatalogError, setModelCatalogError] = useState<string | null>(null)
   const [useTechSpec, setUseTechSpec] = useState(false)
   const [techSpec, setTechSpec] = useState<GeneratedTechSpec | null>(null)
   const [techSpecApproved, setTechSpecApproved] = useState(false)
@@ -3082,9 +3267,10 @@ function TaskModal({
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [configuredEnvironmentKeys, setConfiguredEnvironmentKeys] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
+  const taskModelProfile = overrideModelProfile ? modelProfile : undefined
   const usesTests = mode === 'project-tests' || mode === 'both'
   const usesRuntime = mode === 'simulator-runtime' || mode === 'both'
-  const requirementsKey = `${title}\u0000${prompt}`
+  const requirementsKey = `${title}\u0000${prompt}\u0000${overrideModelProfile ? JSON.stringify(modelProfile) : 'project-default'}`
   const techSpecStale = Boolean(techSpec && techSpecSource !== requirementsKey)
   const techSpecReady = Boolean(useTechSpec && techSpec && techSpecApproved && !techSpecStale)
   const approvedTechSpec = techSpecReady && techSpec
@@ -3103,6 +3289,13 @@ function TaskModal({
     }).catch(() => undefined)
     return () => { active = false }
   }, [project.id])
+  useEffect(() => {
+    let active = true
+    void bridge.listCodexModels()
+      .then((catalog) => { if (active) setModelCatalog(catalog) })
+      .catch((error) => { if (active) setModelCatalogError(String(error).replace(/^Error:\s*/, '')) })
+    return () => { active = false }
+  }, [project.id])
 
   const invalidateDownstreamPlanning = (): void => {
     setGenerated(null)
@@ -3114,7 +3307,7 @@ function TaskModal({
     setTechSpecLoading(true)
     setTechSpecError(null)
     try {
-      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt })
+      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt, modelProfile: taskModelProfile })
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
       setTechSpecApproved(false)
@@ -3143,7 +3336,8 @@ function TaskModal({
           markdown: techSpec.markdown,
           openQuestions: techSpec.openQuestions
         },
-        feedback: techSpecFeedback
+        feedback: techSpecFeedback,
+        modelProfile: taskModelProfile
       })
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
@@ -3178,7 +3372,8 @@ function TaskModal({
         projectId: project.id,
         title,
         prompt,
-        techSpec: approvedTechSpec
+        techSpec: approvedTechSpec,
+        modelProfile: taskModelProfile
       })
       setMode(result.plan.mode)
       setTestDesign(result.plan.testDesign)
@@ -3200,7 +3395,8 @@ function TaskModal({
         projectId: project.id,
         title,
         prompt,
-        techSpec: approvedTechSpec
+        techSpec: approvedTechSpec,
+        modelProfile: taskModelProfile
       }))
     } catch (error) {
       setGenerationError(String(error).replace(/^Error:\s*/, ''))
@@ -3278,7 +3474,8 @@ function TaskModal({
         runtimeScenarioSummary: usesRuntime && runtimeSource === 'task-scenario' ? generated?.summary ?? null : null,
         techSpec: approvedTechSpec,
         verificationPlan: { version: 1, mode, testDesign, runtimeSource },
-        publishStrategy
+        publishStrategy,
+        modelProfile: taskModelProfile
       })
     } finally {
       setSubmitting(false)
@@ -3289,6 +3486,33 @@ function TaskModal({
       <form className="modal-form" onSubmit={(event) => void submit(event)}>
         <label><span>작업 제목</span><input autoFocus minLength={2} maxLength={120} required value={title} onChange={(event) => { setTitle(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="예: 네비게이션 경로 이탈 감지 구현" /></label>
         <label><span>목표와 완료 조건</span><textarea minLength={10} maxLength={20000} required rows={6} value={prompt} onChange={(event) => { setPrompt(event.target.value); setTechSpecApproved(false); invalidateDownstreamPlanning() }} placeholder="구현할 동작, 제외 범위, 통과해야 할 테스트를 구체적으로 작성한다." /></label>
+        <section className={`task-model-selector${overrideModelProfile ? ' enabled' : ''}`}>
+          <label className="tech-spec-toggle">
+            <input
+              type="checkbox"
+              checked={overrideModelProfile}
+              onChange={(event) => {
+                setOverrideModelProfile(event.target.checked)
+                setTechSpecApproved(false)
+                invalidateDownstreamPlanning()
+              }}
+            />
+            <Bot size={15} />
+            <span>
+              <strong>이 작업만 AI 모델 변경</strong>
+              <small>{overrideModelProfile ? modelProfileSummary(modelProfile, modelCatalog) : `프로젝트 설정 사용 · ${modelProfileSummary(project.modelProfile, modelCatalog)}`}</small>
+            </span>
+          </label>
+          {overrideModelProfile && modelCatalog && (
+            <CodexModelProfileEditor catalog={modelCatalog} profile={modelProfile} onChange={(profile) => {
+              setModelProfile(profile)
+              setTechSpecApproved(false)
+              invalidateDownstreamPlanning()
+            }} />
+          )}
+          {overrideModelProfile && !modelCatalog && !modelCatalogError && <p className="empty-copy"><LoaderCircle className="spin" size={12} />Codex 모델을 확인하고 있습니다.</p>}
+          {modelCatalogError && <p className="tech-spec-error" role="alert">{modelCatalogError}</p>}
+        </section>
         <section className={`tech-spec-builder${useTechSpec ? ' enabled' : ''}`}>
           <label className="tech-spec-toggle">
             <input
@@ -3946,6 +4170,16 @@ function TaskDrawer({
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        <section className="task-model-plan">
+          <div className="drawer-section-title"><strong>AI 모델</strong><span>{task.modelPlan ? '등록 시 고정됨' : 'Codex 추천 기본값'}</span></div>
+          {task.modelPlan ? (
+            <div className="task-model-plan-grid">
+              {CODEX_MODEL_ROLES.map((role) => (
+                <div key={role}><span>{CODEX_MODEL_ROLE_LABELS[role]}</span><code>{task.modelPlan!.roles[role].model}</code><small>{task.modelPlan!.roles[role].reasoningEffort}</small></div>
+              ))}
+            </div>
+          ) : <p>이 작업은 모델 고정 기능이 추가되기 전에 만들어져 실행 시점의 Codex 추천 모델을 사용합니다.</p>}
+        </section>
         {(canContinueTask || (task.revisionRequests?.length ?? 0) > 0) && (
           <section className="task-revision-request">
             <div className="drawer-section-title">

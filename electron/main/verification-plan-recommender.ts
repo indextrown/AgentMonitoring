@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type {
+  CodexModelSelection,
   ProjectRuntimeConfigSource,
   TaskTechSpecDraft,
   VerificationPlanRecommendation
 } from '../../src/shared/types'
+import { codexModelArguments } from '../../src/shared/codex-models'
 import { buildCodexEnvironment, CODEX_AUTH_ARGUMENTS } from './codex-auth'
 import { execCodexFile } from './codex-exec'
 import { readCodexStructuredOutput } from './codex-structured-output'
@@ -55,6 +57,7 @@ export class VerificationPlanRecommender {
     testCommand: string
     runtimeAvailable: boolean
     runtimeConfigSource: ProjectRuntimeConfigSource | null
+    model?: CodexModelSelection
   }): Promise<VerificationPlanRecommendation> {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), 'agent-monitoring-verification-'))
     const schemaPath = join(temporaryDirectory, 'schema.json')
@@ -86,6 +89,7 @@ export class VerificationPlanRecommender {
         [
           ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
           'exec',
+          ...codexModelArguments(input.model),
           '--ephemeral',
           '--sandbox',
           'read-only',

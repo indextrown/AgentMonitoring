@@ -7,6 +7,8 @@ import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
   CodexAuthStatus,
+  CodexModelProfile,
+  CodexResolvedModelPlan,
   ContinueTaskInput,
   CreateTaskInput,
   EventRecord,
@@ -15,6 +17,7 @@ import type {
   DeleteProjectRuntimeEnvironmentInput,
   MoveTaskRevisionRequestInput,
   ProjectSimulatorSession,
+  ProjectRecord,
   RecommendVerificationPlanInput,
   RefineTechSpecInput,
   SourceControlCommitInput,
@@ -29,6 +32,7 @@ import type {
   UpdateProjectInput,
   UpdateTaskRevisionRequestInput
 } from '../../src/shared/types'
+import { resolveCodexModelPlan } from '../../src/shared/codex-models'
 import { CodexAuthManager, resolveCodexCommand } from './codex-auth'
 import { inspectProject } from './project-inspector'
 import { detectProjectSetupCommand } from './project-environment'
@@ -54,6 +58,28 @@ import { openTaskInXcode } from './task-xcode'
 const execFileAsync = promisify(execFile)
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
 
+const codexModelSelectionSchema = z.object({
+  model: z.string().trim().min(1).max(160),
+  reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+}).strict()
+
+const codexModelProfileSchema = z.object({
+  version: z.literal(1),
+  mode: z.enum(['recommended', 'single', 'role-based']),
+  selection: codexModelSelectionSchema.nullable(),
+  roleSelections: z.object({
+    planning: codexModelSelectionSchema.optional(),
+    'test-designer': codexModelSelectionSchema.optional(),
+    critic: codexModelSelectionSchema.optional(),
+    implementer: codexModelSelectionSchema.optional(),
+    reviewer: codexModelSelectionSchema.optional()
+  }).strict()
+}).strict().superRefine((profile, context) => {
+  if (profile.mode !== 'recommended' && !profile.selection) {
+    context.addIssue({ code: 'custom', path: ['selection'], message: '기본 모델을 선택하세요.' })
+  }
+})
+
 const verificationPlanSchema = z.object({
   version: z.literal(1),
   mode: z.enum(['project-tests', 'simulator-runtime', 'both', 'manual-review']),
@@ -78,7 +104,8 @@ const createTaskSchema = z.object({
   runtimeScenarioSummary: z.string().trim().min(1).max(500).nullable().optional(),
   techSpec: techSpecDraftSchema.nullable().optional(),
   verificationPlan: verificationPlanSchema,
-  publishStrategy: z.enum(['pull-request', 'direct'])
+  publishStrategy: z.enum(['pull-request', 'direct']),
+  modelProfile: codexModelProfileSchema.optional()
 }).superRefine((input, context) => {
   const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
   const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
@@ -125,7 +152,8 @@ const updateProjectSchema = z.object({
   testCommand: z.string().trim().max(500),
   setupCommand: z.string().trim().max(500),
   runtimeAdapter: iosRuntimeAdapterSchema.nullable().optional(),
-  publishStrategy: z.enum(['pull-request', 'direct']).optional()
+  publishStrategy: z.enum(['pull-request', 'direct']).optional(),
+  modelProfile: codexModelProfileSchema.nullable().optional()
 })
 
 const upsertProjectRuntimeEnvironmentSchema = z.object({
@@ -148,7 +176,8 @@ const generateRuntimeScenarioSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(2).max(120),
   prompt: z.string().trim().min(10).max(20_000),
-  techSpec: techSpecDraftSchema.nullable().optional()
+  techSpec: techSpecDraftSchema.nullable().optional(),
+  modelProfile: codexModelProfileSchema.optional()
 }).strict()
 
 const recommendVerificationPlanSchema = generateRuntimeScenarioSchema
@@ -300,6 +329,20 @@ function requireTechSpecGenerator(): TechSpecGenerator {
   return techSpecGenerator
 }
 
+async function resolveModelPlan(
+  project: ProjectRecord,
+  taskProfile: CodexModelProfile | undefined
+): Promise<CodexResolvedModelPlan> {
+  const hasTaskOverride = taskProfile !== undefined
+  const profile = taskProfile ?? project.modelProfile
+  const source = hasTaskOverride
+    ? 'task'
+    : project.modelProfile
+      ? 'project'
+      : 'codex-recommended'
+  return resolveCodexModelPlan(await requireCodexAuth().models(), profile, source)
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeProjectSimulator = projectSimulator
@@ -373,6 +416,9 @@ function registerIpc(): void {
 
   ipcMain.handle('codex-auth:cancel', () => requireCodexAuth().cancelLogin())
   ipcMain.handle('codex-auth:logout', () => requireCodexAuth().logout())
+  ipcMain.handle('codex-models:list', (_event, refresh = false) =>
+    requireCodexAuth().models(z.boolean().parse(refresh))
+  )
 
   ipcMain.handle('dashboard:snapshot', (_event, projectId?: string) => requireStore().getSnapshot(projectId))
 
@@ -407,8 +453,11 @@ function registerIpc(): void {
     return project
   })
 
-  ipcMain.handle('project:update', (_event, rawInput: UpdateProjectInput) => {
+  ipcMain.handle('project:update', async (_event, rawInput: UpdateProjectInput) => {
     const input = updateProjectSchema.parse(rawInput)
+    if (input.modelProfile) {
+      resolveCodexModelPlan(await requireCodexAuth().models(), input.modelProfile, 'project')
+    }
     return requireStore().updateProject(input)
   })
 
@@ -614,10 +663,12 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('테크스펙을 만들려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireTechSpecGenerator().generate({
       projectPath: project.path,
       title: input.title,
-      prompt: input.prompt
+      prompt: input.prompt,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -626,12 +677,14 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('테크스펙을 개선하려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireTechSpecGenerator().refine({
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
       current: input.current,
-      feedback: input.feedback
+      feedback: input.feedback,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -643,12 +696,14 @@ function registerIpc(): void {
     if (!project.runtimeAdapter) {
       throw new Error('이 프로젝트에서 iOS 실행 설정을 찾지 못했습니다. 프로젝트 설정에서 먼저 등록하세요.')
     }
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireScenarioGenerator().generate({
       projectPath: project.path,
       title: input.title,
       prompt: input.prompt,
       techSpec: input.techSpec ?? null,
       adapter: project.runtimeAdapter,
+      model: modelPlan.roles.planning,
       availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
         .filter((entry) => entry.configured)
         .map((entry) => entry.key)
@@ -660,6 +715,7 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('검증 계획을 추천받으려면 먼저 Codex에 로그인하세요.')
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     return requireVerificationPlanRecommender().recommend({
       projectPath: project.path,
       title: input.title,
@@ -667,7 +723,8 @@ function registerIpc(): void {
       techSpec: input.techSpec ?? null,
       testCommand: project.testCommand,
       runtimeAvailable: Boolean(project.runtimeAdapter),
-      runtimeConfigSource: project.runtimeConfigSource ?? null
+      runtimeConfigSource: project.runtimeConfigSource ?? null,
+      model: modelPlan.roles.planning
     })
   })
 
@@ -676,9 +733,10 @@ function registerIpc(): void {
     await requireRunner().removeProject(projectId)
   })
 
-  ipcMain.handle('task:create', (_event, rawInput: CreateTaskInput) => {
+  ipcMain.handle('task:create', async (_event, rawInput: CreateTaskInput) => {
     const input = createTaskSchema.parse(rawInput)
     const project = requireStore().getProject(input.projectId)
+    const modelPlan = await resolveModelPlan(project, input.modelProfile)
     const usesTests = input.verificationPlan.mode === 'project-tests' || input.verificationPlan.mode === 'both'
     const usesRuntime = input.verificationPlan.mode === 'simulator-runtime' || input.verificationPlan.mode === 'both'
     if (usesTests && !project.testCommand.trim()) {
@@ -699,7 +757,8 @@ function registerIpc(): void {
       input.runtimeScenarioSummary ?? null,
       input.verificationPlan,
       input.publishStrategy,
-      input.techSpec ?? null
+      input.techSpec ?? null,
+      modelPlan
     )
   })
 
@@ -731,6 +790,7 @@ function registerIpc(): void {
           }
         : null,
       adapter,
+      model: task.modelPlan?.roles.planning,
       previousContract: task.runtimeContract,
       availableEnvironmentKeys: requireRuntimeEnvironment().list(project.id)
         .filter((entry) => entry.configured)
