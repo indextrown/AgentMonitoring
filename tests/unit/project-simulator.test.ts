@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parsePhysicalRunDestinations, ProjectSimulatorService } from '../../electron/main/project-simulator'
+import {
+  explainPhysicalDeviceFailure,
+  parsePhysicalRunDestinations,
+  ProjectSimulatorService
+} from '../../electron/main/project-simulator'
 import type { ProjectRecord } from '../../src/shared/types'
 import type { RuntimeCommandRequest } from '../../electron/main/ios-simulator-runtime'
 
@@ -109,10 +113,59 @@ describe('ProjectSimulatorService', () => {
         deviceFamily: 'iphone',
         osVersion: 'iOS 26.3',
         available: false,
-        statusLabel: '연결 안 됨',
-        detail: '실기기 · iOS 26.3 · 연결 안 됨'
+        statusLabel: '개발 터널 연결 필요',
+        detail: '실기기 · iOS 26.3 · 개발 터널 연결 필요'
       }
     ])
+  })
+
+  it('distinguishes Signing failures from physical-device connection failures', () => {
+    expect(explainPhysicalDeviceFailure(
+      'Signing for "Demo" requires a development team.',
+      'Swift 앱 빌드에 실패했습니다.'
+    )).toContain('Signing 설정 필요')
+    expect(explainPhysicalDeviceFailure(
+      'The device is not available because the CoreDevice tunnel is disconnected.',
+      '실기기 연결에 실패했습니다.'
+    )).toContain('개발 터널 연결 필요')
+    expect(explainPhysicalDeviceFailure(
+      'Developer Mode is disabled on this device.',
+      '실기기 연결에 실패했습니다.'
+    )).toContain('Developer Mode 필요')
+  })
+
+  it('shows an actionable Signing error when a physical-device build is unsigned', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-project-signing-'))
+    temporaryDirectories.push(directory)
+    const projectPath = join(directory, 'project')
+    const runtimeRoot = join(directory, 'runtime')
+    await mkdir(join(projectPath, 'Demo.xcodeproj'), { recursive: true })
+    const execute = async (request: RuntimeCommandRequest) => {
+      const jsonOutputIndex = request.args.indexOf('--json-output')
+      if (request.args.slice(0, 3).join(' ') === 'devicectl list devices' && jsonOutputIndex >= 0) {
+        await writeFile(request.args[jsonOutputIndex + 1], physicalDevicesJson())
+        return { code: 0, output: '', stdout: '' }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.includes('-showBuildSettings')) {
+        return { code: 0, output: '', stdout: appBuildSettings() }
+      }
+      if (request.args[0] === 'xcodebuild' && request.args.at(-1) === 'build') {
+        return {
+          code: 65,
+          output: 'Signing for "Demo" requires a development team.',
+          stdout: ''
+        }
+      }
+      return { code: 0, output: '', stdout: '' }
+    }
+    const service = new ProjectSimulatorService(runtimeRoot, () => undefined, execute)
+
+    await expect(service.launch(
+      projectRecord(projectPath),
+      undefined,
+      'physical:PHYSICAL-IPHONE-UDID'
+    )).rejects.toThrow('Signing 설정 필요')
+    expect(service.getStatus(projectRecord(projectPath)).error).toContain('Signing & Capabilities')
   })
 
   it('builds, launches, restarts, and stops the configured iPhone app', async () => {

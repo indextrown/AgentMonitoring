@@ -853,8 +853,8 @@ export const demoBridge: AgentMonitoringBridge = {
         deviceFamily: family,
         osVersion: 'iOS 26.2',
         available: false,
-        statusLabel: '연결 안 됨',
-        detail: '실기기 · iOS 26.2 · 연결 안 됨'
+        statusLabel: '개발 터널 연결 필요',
+        detail: '실기기 · iOS 26.2 · 개발 터널 연결 필요'
       }
     ]
   },

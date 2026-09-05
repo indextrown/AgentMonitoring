@@ -48,6 +48,40 @@ export interface ProjectSimulatorLaunchTarget {
 
 export type ProjectSimulatorPublisher = (session: ProjectSimulatorSession) => void
 
+type ProjectSimulatorFailureContext = 'generic' | 'physical-device'
+
+const SIGNING_FAILURE_PATTERNS = [
+  /requires a development team/i,
+  /No profiles for .+ were found/i,
+  /requires a provisioning profile/i,
+  /provisioning profile .+ doesn't include/i,
+  /No signing certificate/i,
+  /CodeSign error/i,
+  /code signing is required/i,
+  /Automatic signing is disabled/i
+]
+
+function matchesAny(output: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(output))
+}
+
+export function explainPhysicalDeviceFailure(output: string, fallback: string): string {
+  const detail = output.trim()
+  if (matchesAny(detail, SIGNING_FAILURE_PATTERNS)) {
+    return 'Signing 설정 필요: Xcode에서 앱 target의 Signing & Capabilities를 열고 Team과 Automatically manage signing을 확인하세요.'
+  }
+  if (/Developer Mode.+(?:disabled|not enabled)|enable Developer Mode/i.test(detail)) {
+    return 'Developer Mode 필요: iOS 기기의 설정 > 개인정보 보호 및 보안에서 Developer Mode를 켠 뒤 다시 연결하세요.'
+  }
+  if (/device.+locked|unlock (?:the )?device|passcode protected/i.test(detail)) {
+    return '기기 잠금 해제 필요: iOS 기기의 잠금을 풀고 화면을 켠 상태에서 다시 시도하세요.'
+  }
+  if (/tunnel|not connected|device.+not available|CoreDevice/i.test(detail)) {
+    return '개발 터널 연결 필요: Xcode의 Devices and Simulators에서 기기를 선택해 연결한 뒤 기기 목록을 새로고침하세요.'
+  }
+  return detail.slice(-2_000) || fallback
+}
+
 async function executeCommand(request: RuntimeCommandRequest): Promise<RuntimeCommandResult> {
   try {
     const result = await execFileAsync(request.command, request.args, {
@@ -165,12 +199,12 @@ export function parsePhysicalRunDestinations(
     const connected = tunnelState === 'connected' || servicesAvailable
     const available = pairingState === 'paired' && developerMode === 'enabled' && connected
     const statusLabel = pairingState !== 'paired'
-      ? '페어링 필요'
+      ? 'Xcode 페어링 필요'
       : developerMode !== 'enabled'
-        ? '개발자 모드 필요'
+        ? 'Developer Mode 필요'
         : connected
           ? '연결됨'
-          : '연결 안 됨'
+          : '개발 터널 연결 필요'
     const osVersion = textValue(deviceProperties.osVersionNumber)
     return [{
       id: destinationIdentifier('physical', deviceId),
@@ -316,7 +350,7 @@ export class ProjectSimulatorService {
         cwd: projectRoot,
         label: 'iOS 앱 Scheme 사전 확인',
         timeoutMs: TIMEOUTS.inspect
-      })
+      }, destination.kind === 'physical' ? 'physical-device' : 'generic')
       try {
         parseXcodeAppProduct(schemeSettings.stdout)
       } catch {
@@ -379,14 +413,14 @@ export class ProjectSimulatorService {
         cwd: projectRoot,
         label: 'Swift 앱 빌드',
         timeoutMs: TIMEOUTS.build
-      })
+      }, destination.kind === 'physical' ? 'physical-device' : 'generic')
       const buildSettings = await this.required({
         command: XCRUN_COMMAND,
         args: ['xcodebuild', ...commonArguments, '-showBuildSettings', '-json'],
         cwd: projectRoot,
         label: '앱 산출물 설정 확인',
         timeoutMs: TIMEOUTS.inspect
-      })
+      }, destination.kind === 'physical' ? 'physical-device' : 'generic')
       const product = parseXcodeAppProduct(buildSettings.stdout)
       const appPath = await this.requireBuiltApp(
         derivedDataPath,
@@ -509,7 +543,7 @@ export class ProjectSimulatorService {
       cwd: projectRoot,
       label: 'iOS 실기기 앱 설치',
       timeoutMs: TIMEOUTS.install
-    })
+    }, 'physical-device')
     return this.launchPhysicalDevice(projectRoot, deviceId, bundleIdentifier)
   }
 
@@ -522,7 +556,8 @@ export class ProjectSimulatorService {
       ['device', 'process', 'launch', '--device', deviceId, '--terminate-existing', bundleIdentifier],
       projectRoot,
       'iOS 실기기 앱 실행',
-      TIMEOUTS.launch
+      TIMEOUTS.launch,
+      'physical-device'
     )
     return nestedProcessId(JSON.parse(payload))
   }
@@ -682,7 +717,8 @@ export class ProjectSimulatorService {
     args: string[],
     cwd: string,
     label: string,
-    timeoutMs: number
+    timeoutMs: number,
+    failureContext: ProjectSimulatorFailureContext = 'generic'
   ): Promise<string> {
     await mkdir(this.runtimeRoot, { recursive: true })
     const outputDirectory = await mkdtemp(resolve(this.runtimeRoot, 'devicectl-'))
@@ -696,7 +732,9 @@ export class ProjectSimulatorService {
         timeoutMs
       })
       if (result.code !== 0) {
-        throw new Error(result.output.trim().slice(-2_000) || `${label}에 실패했습니다.`)
+        throw new Error(failureContext === 'physical-device'
+          ? explainPhysicalDeviceFailure(result.output, `${label}에 실패했습니다.`)
+          : result.output.trim().slice(-2_000) || `${label}에 실패했습니다.`)
       }
       try {
         return await readFile(outputPath, 'utf8')
@@ -708,10 +746,15 @@ export class ProjectSimulatorService {
     }
   }
 
-  private async required(request: RuntimeCommandRequest): Promise<RuntimeCommandResult> {
+  private async required(
+    request: RuntimeCommandRequest,
+    failureContext: ProjectSimulatorFailureContext = 'generic'
+  ): Promise<RuntimeCommandResult> {
     const result = await this.execute(request)
     if (result.code !== 0) {
-      throw new Error(result.output.trim().slice(-2_000) || `${request.label}에 실패했습니다.`)
+      throw new Error(failureContext === 'physical-device'
+        ? explainPhysicalDeviceFailure(result.output, `${request.label}에 실패했습니다.`)
+        : result.output.trim().slice(-2_000) || `${request.label}에 실패했습니다.`)
     }
     return result
   }

@@ -238,7 +238,8 @@ test('launches, restarts, and stops a connected iOS app from the dashboard', asy
   await expect(simulator.getByText('실행 준비', { exact: true })).toBeVisible()
   await expect(simulator.getByText('원본 저장소', { exact: true })).toBeVisible()
   await expect(simulator.getByLabel('앱 실행 기기')).toHaveValue('simulator:DEMO-IPHONE-UDID')
-  await expect(simulator.getByRole('option', { name: /오프라인 iPhone.*연결 안 됨/ })).toBeDisabled()
+  await expect(simulator.getByRole('option', { name: /오프라인 iPhone.*개발 터널 연결 필요/ })).toBeDisabled()
+  await expect(simulator.getByText('프로젝트 Signing은 실기기 빌드할 때 별도로 확인합니다.', { exact: false })).toBeVisible()
 
   await simulator.getByRole('button', { name: '빌드·실행' }).click()
   await expect(simulator.getByText('실행 중', { exact: true })).toBeVisible()

@@ -1530,7 +1530,7 @@ function ProjectSimulatorPanel({ project }: { project: ProjectRecord }): React.J
           </button>
         </div>
         <small className="project-simulator-hint">
-          Xcode에 페어링된 같은 네트워크 또는 USB 실기기도 표시합니다. 연결 상태가 바뀌면 새로고침하세요.
+          기기 목록은 페어링·Developer Mode·개발 터널 상태를 표시합니다. 프로젝트 Signing은 실기기 빌드할 때 별도로 확인합니다.
         </small>
         <div className="project-simulator-meta">
           <code className={taskSource ? 'task-source' : undefined}>
