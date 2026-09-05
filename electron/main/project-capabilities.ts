@@ -34,7 +34,7 @@ const accessibilityIdentifierSchema = z
     'identifier에는 제어 문자를 사용할 수 없습니다.'
   )
 
-const runtimeUiActionSchema = z.discriminatedUnion('kind', [
+export const runtimeUiActionSchema = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('tap'),
@@ -78,7 +78,7 @@ const runtimeStatePathSegmentSchema = z.union([
 const runtimeAssertionNameSchema = z.string().trim().min(1).max(160).optional()
 const runtimeStatePathSchema = z.array(runtimeStatePathSegmentSchema).min(1).max(16)
 
-const runtimeAcceptanceAssertionSchema = z.union([
+export const runtimeAcceptanceAssertionSchema = z.union([
   z
     .object({
       kind: z.literal('state'),
@@ -133,7 +133,7 @@ const runtimeAcceptanceAssertionSchema = z.union([
     .strict()
 ])
 
-const runtimePrivacyPermissionSchema = z
+export const runtimePrivacyPermissionSchema = z
   .object({
     service: z.enum([
       'calendar',

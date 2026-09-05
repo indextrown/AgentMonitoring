@@ -323,6 +323,44 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('makes ignored xcconfig files available to Codex and project tests', async () => {
+    const fixture = await createExecutionFixture({
+      codexSource: () => `#!/usr/bin/env node
+import { existsSync } from 'node:fs'
+if (!existsSync('Config/Secrets.xcconfig')) process.exit(2)
+const prompt = process.argv.at(-1) ?? ''
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`,
+      makefile: 'test:\n\t@test -f Config/Secrets.xcconfig\n',
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'existing-tests',
+        runtimeSource: 'off'
+      }
+    })
+    await writeFile(join(fixture.repository, '.git', 'info', 'exclude'), 'Config/Secrets.xcconfig\n')
+    await mkdir(join(fixture.repository, 'Config'), { recursive: true })
+    await writeFile(join(fixture.repository, 'Config', 'Secrets.xcconfig'), 'MAPBOX_ACCESS_TOKEN = fixture-token\n')
+
+    await fixture.runner.run(fixture.taskId)
+
+    const task = fixture.store.getTask(fixture.taskId)
+    const worktreePath = task.worktreePath!
+    expect(task.status).toBe('awaiting_approval')
+    expect(await readFile(join(worktreePath, 'Config', 'Secrets.xcconfig'), 'utf8'))
+      .toBe('MAPBOX_ACCESS_TOKEN = fixture-token\n')
+    expect(fixture.store.getSnapshot(task.projectId).events.some(
+      (event) => event.message.includes('로컬 xcconfig 1개를 작업공간에 동기화')
+    )).toBe(true)
+
+    await fixture.runner.discard(task.id)
+    await expect(stat(worktreePath)).rejects.toThrow()
+    fixture.store.close()
+  })
+
   it('prepares dependencies again when the Implementer changes a manifest', async () => {
     const fixture = await createExecutionFixture({
       codexSource: () => `#!/usr/bin/env node
@@ -1515,6 +1553,24 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     expect(fixture.store.getTask(fixture.taskId).worktreePath).toBe(fixture.worktreePath)
     await expect(readFile(join(fixture.repository, 'agent-output.txt'), 'utf8')).rejects.toThrow()
     expect(await readFile(join(fixture.worktreePath, 'agent-output.txt'), 'utf8')).toBe('implemented\n')
+    fixture.store.close()
+  })
+
+  it('blocks publishing when an ignored xcconfig was force-added in the worktree', async () => {
+    const fixture = await createApprovalFixture()
+    await writeFile(join(fixture.repository, '.git', 'info', 'exclude'), 'Config/Secrets.xcconfig\n')
+    await mkdir(join(fixture.repository, 'Config'), { recursive: true })
+    await writeFile(join(fixture.repository, 'Config', 'Secrets.xcconfig'), 'MAPBOX_ACCESS_TOKEN = source-token\n')
+    await mkdir(join(fixture.worktreePath, 'Config'), { recursive: true })
+    await writeFile(join(fixture.worktreePath, 'Config', 'Secrets.xcconfig'), 'MAPBOX_ACCESS_TOKEN = staged-token\n')
+    await execFileAsync('git', ['add', '--force', 'Config/Secrets.xcconfig'], { cwd: fixture.worktreePath })
+
+    await expect(fixture.runner.approve(fixture.taskId)).rejects.toThrow(
+      'Git 제외 상태가 아닌 xcconfig'
+    )
+    expect(fixture.store.getTask(fixture.taskId).status).toBe('awaiting_approval')
+    expect(await readFile(join(fixture.repository, 'Config', 'Secrets.xcconfig'), 'utf8'))
+      .toBe('MAPBOX_ACCESS_TOKEN = source-token\n')
     fixture.store.close()
   })
 

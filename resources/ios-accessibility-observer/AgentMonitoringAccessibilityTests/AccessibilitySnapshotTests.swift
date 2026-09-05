@@ -43,14 +43,23 @@ final class AccessibilitySnapshotTests: XCTestCase {
 
         let actions = try decodeActions(environment: environment)
         var results: [[String: Any]] = []
+        var failure: [String: Any]?
         for (index, action) in actions.enumerated() {
             let startedAt = Date()
-            guard perform(
+            let succeeded = perform(
                 action: action,
                 index: index,
                 application: application
-            ) else {
-                return
+            )
+            if !succeeded {
+                failure = [
+                    "index": index,
+                    "kind": action.kind.rawValue,
+                    "identifier": action.identifier,
+                    "completedActionCount": results.count,
+                    "message": "UI action \(index + 1): identifier '\(action.identifier)' 요소를 찾지 못했거나 중복됐습니다."
+                ]
+                break
             }
             results.append([
                 "index": index,
@@ -60,7 +69,7 @@ final class AccessibilitySnapshotTests: XCTestCase {
             ])
         }
 
-        if !actions.isEmpty {
+        if !actions.isEmpty && failure == nil {
             try emit(
                 payload: [
                     "schemaVersion": 1,
@@ -75,31 +84,44 @@ final class AccessibilitySnapshotTests: XCTestCase {
             )
         }
 
-        guard environment["AGENTMONITOR_CAPTURE_ACCESSIBILITY"] == "1" else {
-            return
+        if environment["AGENTMONITOR_CAPTURE_ACCESSIBILITY"] == "1" || failure != nil {
+            let snapshot = try application.snapshot()
+            var nodeCount = 0
+            var truncated = false
+            let root = serialize(
+                snapshot,
+                depth: 0,
+                nodeCount: &nodeCount,
+                truncated: &truncated
+            )
+            try emit(
+                payload: [
+                    "schemaVersion": 1,
+                    "bundleIdentifier": bundleIdentifier,
+                    "capturedAt": ISO8601DateFormatter().string(from: Date()),
+                    "root": root,
+                    "nodeCount": nodeCount,
+                    "truncated": truncated
+                ],
+                beginMarker: "AGENTMONITOR_ACCESSIBILITY_BEGIN",
+                endMarker: "AGENTMONITOR_ACCESSIBILITY_END",
+                maximumBytes: 512 * 1_024
+            )
         }
-        let snapshot = try application.snapshot()
-        var nodeCount = 0
-        var truncated = false
-        let root = serialize(
-            snapshot,
-            depth: 0,
-            nodeCount: &nodeCount,
-            truncated: &truncated
-        )
-        try emit(
-            payload: [
-                "schemaVersion": 1,
-                "bundleIdentifier": bundleIdentifier,
-                "capturedAt": ISO8601DateFormatter().string(from: Date()),
-                "root": root,
-                "nodeCount": nodeCount,
-                "truncated": truncated
-            ],
-            beginMarker: "AGENTMONITOR_ACCESSIBILITY_BEGIN",
-            endMarker: "AGENTMONITOR_ACCESSIBILITY_END",
-            maximumBytes: 512 * 1_024
-        )
+        if let failure {
+            try emit(
+                payload: [
+                    "schemaVersion": 1,
+                    "bundleIdentifier": bundleIdentifier,
+                    "failedAt": ISO8601DateFormatter().string(from: Date()),
+                    "failure": failure,
+                    "completedActions": results
+                ],
+                beginMarker: "AGENTMONITOR_UI_FAILURE_BEGIN",
+                endMarker: "AGENTMONITOR_UI_FAILURE_END",
+                maximumBytes: 128 * 1_024
+            )
+        }
     }
 
     /// 환경 변수에 포함된 base64 JSON을 UI action 목록으로 변환합니다.

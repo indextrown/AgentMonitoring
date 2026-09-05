@@ -5,6 +5,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseArgsStringToArgv } from 'string-argv'
 import { z } from 'zod'
 import type {
+  ApprovedRuntimeContractV1,
   EventRecord,
   ProjectRecord,
   RuntimeSessionStatus,
@@ -50,6 +51,16 @@ import {
   writeRuntimeAcceptanceEvidence
 } from './runtime-acceptance'
 import { normalizeRuntimeScenarioEnvironment } from '../../src/shared/runtime-scenario-policy'
+import {
+  requiredRuntimeEnvironmentKeys,
+  runtimeCaseActions,
+  taskRuntimeContractSchema
+} from './runtime-contract'
+import type {
+  ProjectRuntimeEnvironmentService,
+  ResolvedProjectRuntimeEnvironment
+} from './runtime-environment'
+import { syncIgnoredXcconfigFiles } from './ignored-xcconfig'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -268,6 +279,16 @@ function eventMessage(payload: Record<string, unknown>): string | null {
 
 function runtimeContractPrompt(task: TaskRecord): string {
   if (!task.runtimeContract) return '이 작업에는 별도로 승인된 Simulator 검증 시나리오가 없습니다.'
+  if (task.runtimeContract.version === 2) {
+    return [
+      '아래 JSON은 사람이 작업 등록 전에 승인한 고정 Simulator 검증 계약입니다.',
+      '각 케이스의 accessibility identifier를 제품 코드에 구현하되, 계약 자체를 수정하거나 검증을 우회하지 마세요.',
+      'environmentRequirements에는 실제 비밀값이 아니라 프로젝트 설정에서 참조할 key만 포함됩니다.',
+      '```json',
+      JSON.stringify(task.runtimeContract, null, 2),
+      '```'
+    ].join('\n')
+  }
   const normalizedEnvironment = normalizeRuntimeScenarioEnvironment(task.runtimeContract.runtimeScenario)
   const runtimeContract = {
     ...task.runtimeContract,
@@ -355,7 +376,8 @@ export class AgentRunner {
     policy: Partial<RunnerPolicy> = {},
     private readonly runtimeAdapter: IosSimulatorRuntimeAdapter = iosSimulatorRuntimeAdapter,
     private readonly gitCoordinator: GitOperationCoordinator = new GitOperationCoordinator(),
-    private readonly githubCommand = 'gh'
+    private readonly githubCommand = 'gh',
+    private readonly runtimeEnvironment?: ProjectRuntimeEnvironmentService
   ) {
     this.policy = { ...DEFAULT_RUNNER_POLICY, ...policy }
     this.runtimeRoot = resolve(this.worktreesRoot, '..', 'runtime-sessions')
@@ -520,6 +542,7 @@ export class AgentRunner {
 
     try {
       const worktreePath = await this.prepareWorktree(task)
+      this.preflightRuntimeEnvironment(task)
       task = this.store.transitionTask(taskId, 'running', 0)
       task = this.store.setTaskVerificationResult(taskId, createVerificationResult(plan))
       this.emit(task, 'task_started', 'orchestrator', `${task.title} 실행 시작`)
@@ -723,7 +746,11 @@ export class AgentRunner {
                 ? error.repairContext
                 : identifierRepairContext
             ].join('\n\n')
-            repairImagePaths = error instanceof RuntimeAcceptanceStageError ? error.imagePaths : []
+            repairImagePaths = error instanceof RuntimeAcceptanceStageError
+              ? error.imagePaths
+              : error instanceof IosRuntimeStageError && error.failureEvidence?.screenEvidence
+                ? [error.failureEvidence.screenEvidence.path]
+                : []
             this.emit(
               currentTask,
               'runtime_repair_started',
@@ -856,6 +883,7 @@ export class AgentRunner {
 
     try {
       const worktreePath = task.worktreePath
+      this.preflightRuntimeEnvironment(task)
       task = this.store.transitionTask(taskId, 'running', task.attempt)
       this.store.setTaskVerificationResult(taskId, createVerificationResult(plan))
       this.setVerificationStep(taskId, plan, 'test-design', 'skipped', '기존 구현과 테스트 설계를 유지하고 검증만 다시 실행합니다.')
@@ -1136,6 +1164,7 @@ export class AgentRunner {
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
     const worktreePath = resolve(task.worktreePath)
+    await this.syncIgnoredXcconfigs(task, projectRoot, worktreePath)
     const targetBranch = await this.requireGit(
       ['symbolic-ref', '--quiet', '--short', 'HEAD'],
       projectRoot,
@@ -1921,17 +1950,13 @@ export class AgentRunner {
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {
-    if (task.worktreePath) {
-      try {
-        await stat(task.worktreePath)
-        return task.worktreePath
-      } catch {
-        // A missing worktree is recreated below.
-      }
-    }
-
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
+    if (task.worktreePath && await pathExists(task.worktreePath)) {
+      await this.syncIgnoredXcconfigs(task, projectRoot, task.worktreePath)
+      return task.worktreePath
+    }
+
     const root = resolve(this.worktreesRoot, task.projectId)
     await mkdir(root, { recursive: true })
     const worktreePath = resolve(root, task.id)
@@ -1961,8 +1986,33 @@ export class AgentRunner {
       sourceBranch.output.trim(),
       baseCommit.output.trim()
     )
+    await this.syncIgnoredXcconfigs(task, projectRoot, worktreePath)
     this.emit(task, 'agent', 'git', `격리 작업공간 생성 · ${basename(worktreePath)} · ${branchName}`)
     return worktreePath
+  }
+
+  private async syncIgnoredXcconfigs(
+    task: TaskRecord,
+    projectRoot: string,
+    worktreePath: string
+  ): Promise<void> {
+    try {
+      const result = await syncIgnoredXcconfigFiles(projectRoot, worktreePath)
+      if (result.paths.length > 0) {
+        this.emit(
+          task,
+          'agent',
+          'environment',
+          `Git에서 제외된 로컬 xcconfig ${result.paths.length}개를 작업공간에 동기화했습니다.`
+        )
+      }
+    } catch (error) {
+      throw new EnvironmentPreparationError(
+        error instanceof Error ? error.message : String(error),
+        '로컬 xcconfig 동기화',
+        ''
+      )
+    }
   }
 
   private setVerificationStep(
@@ -2261,6 +2311,119 @@ export class AgentRunner {
     })
   }
 
+  private preflightRuntimeEnvironment(task: TaskRecord): void {
+    if (!task.runtimeContract || task.runtimeContract.version !== 2) return
+    const contract = taskRuntimeContractSchema.parse(task.runtimeContract)
+    if (contract.version !== 2) return
+    const requiredKeys = requiredRuntimeEnvironmentKeys(contract)
+    if (requiredKeys.length === 0) return
+    if (!this.runtimeEnvironment) {
+      throw new EnvironmentPreparationError(
+        `필수 실행 환경값을 설정하세요: ${requiredKeys.join(', ')}`,
+        '프로젝트 설정 > Simulator 실행 환경',
+        ''
+      )
+    }
+    try {
+      this.runtimeEnvironment.resolve(task.projectId, requiredKeys)
+    } catch (error) {
+      throw new EnvironmentPreparationError(
+        error instanceof Error ? error.message : String(error),
+        '프로젝트 설정 > Simulator 실행 환경',
+        ''
+      )
+    }
+  }
+
+  private async runRuntimeContractV2(
+    task: TaskRecord,
+    project: ProjectRecord,
+    worktreePath: string,
+    control: ActiveRun,
+    runId: string,
+    required: boolean
+  ): Promise<RuntimeRunResult | null> {
+    const contract = taskRuntimeContractSchema.parse(task.runtimeContract)
+    if (contract.version !== 2) throw new Error('runtime 계약 version 2를 읽지 못했습니다.')
+    const summaries: string[] = []
+    const reviewContexts: string[] = []
+    const imagePaths: string[] = []
+
+    for (const [caseIndex, scenario] of contract.runtimeScenarios.cases.entries()) {
+      const requiredKeys = scenario.preconditions.requiredEnvironmentKeys ?? []
+      let environment: ResolvedProjectRuntimeEnvironment = { buildSettings: {}, launchVariables: {} }
+      if (requiredKeys.length > 0) {
+        if (!this.runtimeEnvironment) {
+          throw new EnvironmentPreparationError(
+            `필수 실행 환경값을 설정하세요: ${requiredKeys.join(', ')}`,
+            '프로젝트 설정 > Simulator 실행 환경',
+            ''
+          )
+        }
+        try {
+          environment = this.runtimeEnvironment.resolve(project.id, requiredKeys)
+        } catch (error) {
+          throw new EnvironmentPreparationError(
+            error instanceof Error ? error.message : String(error),
+            '프로젝트 설정 > Simulator 실행 환경',
+            ''
+          )
+        }
+      }
+
+      const actions = runtimeCaseActions(scenario)
+      const checkpoints = scenario.steps.flatMap((step, stepIndex) =>
+        step.kind === 'assert' ? [{ stepIndex, assertions: step.assertions }] : []
+      )
+      const runs = checkpoints.length > 0
+        ? checkpoints
+        : [{ stepIndex: scenario.steps.length, assertions: [] }]
+      for (const [checkpointIndex, checkpoint] of runs.entries()) {
+        const actionCount = scenario.steps.slice(0, checkpoint.stepIndex)
+          .filter((step) => step.kind === 'action').length
+        const checkpointActions = actions.slice(0, actionCount)
+        const legacyContract: ApprovedRuntimeContractV1 = {
+          version: 1,
+          adapter: contract.adapter,
+          capabilities: contract.capabilities,
+          runtimeScenario: {
+            permissions: scenario.preconditions.permissions ?? [],
+            actions: checkpointActions,
+            assertions: checkpoint.assertions
+          }
+        }
+        this.emit(
+          task,
+          'runtime_started',
+          'runtime',
+          `검증 케이스 ${caseIndex + 1}/${contract.runtimeScenarios.cases.length} · ${scenario.name} · 체크포인트 ${checkpointIndex + 1}/${runs.length}`
+        )
+        const result = await this.runRuntimeIfConfigured(
+          { ...task, runtimeContract: legacyContract },
+          project,
+          worktreePath,
+          control,
+          runId,
+          'task-scenario',
+          required,
+          environment,
+          scenario.preconditions.resetAppData === true
+        )
+        if (result) {
+          summaries.push(`${scenario.name}: 통과`)
+          reviewContexts.push(`검증 케이스 '${scenario.name}'\n${result.reviewContext}`)
+          imagePaths.push(...result.imagePaths)
+        }
+      }
+    }
+
+    return {
+      summary: `Simulator 검증 ${contract.runtimeScenarios.cases.length}개 케이스 통과 · ${summaries.join(' · ')}`,
+      reviewContext: reviewContexts.join('\n\n'),
+      imagePaths
+    }
+  }
+
   private async runRuntimeIfConfigured(
     task: TaskRecord,
     project: ProjectRecord,
@@ -2268,9 +2431,14 @@ export class AgentRunner {
     control: ActiveRun,
     runId: string,
     source: TaskVerificationPlan['runtimeSource'],
-    required: boolean
+    required: boolean,
+    runtimeEnvironment: ResolvedProjectRuntimeEnvironment = { buildSettings: {}, launchVariables: {} },
+    resetAppData = false
   ): Promise<RuntimeRunResult | null> {
     if (source === 'off') return null
+    if (source === 'task-scenario' && task.runtimeContract?.version === 2) {
+      return this.runRuntimeContractV2(task, project, worktreePath, control, runId, required)
+    }
     const manifest = source === 'task-scenario'
       ? task.runtimeContract
         ? { state: 'valid' as const, value: projectCapabilityManifestSchema.parse(task.runtimeContract) }
@@ -2341,6 +2509,9 @@ export class AgentRunner {
         uiActions,
         debugBridge,
         debugFixture,
+        buildSettings: runtimeEnvironment.buildSettings,
+        launchVariables: runtimeEnvironment.launchVariables,
+        resetAppData,
         execute: (request) => this.executeRuntimeCommand(request, control),
         onProgress: (status, message, update = {}) => {
           this.store.setRuntimeSession(task.id, status, { ...update, message })
@@ -2596,9 +2767,62 @@ export class AgentRunner {
       const runtimeError = error instanceof IosRuntimeStageError
         ? error
         : new IosRuntimeStageError('failed', redact(String(error)))
+      this.storeRuntimeFailureEvidence(task, runId, runtimeError)
       this.emit(task, 'runtime_failed', 'runtime', runtimeError.message, 'high')
       throw runtimeError
     }
+  }
+
+  private storeRuntimeFailureEvidence(
+    task: TaskRecord,
+    runId: string,
+    error: IosRuntimeStageError
+  ): void {
+    const evidence = error.failureEvidence
+    if (!evidence) return
+    if (evidence.screenEvidence) {
+      this.store.addRuntimeEvidence(task.id, {
+        runId,
+        kind: 'screen',
+        path: evidence.screenEvidence.path,
+        mimeType: evidence.screenEvidence.mimeType,
+        sizeBytes: evidence.screenEvidence.sizeBytes,
+        createdAt: evidence.screenEvidence.capturedAt,
+        outcome: 'failed',
+        summary: 'UI 조작 실패 시점 Simulator 화면'
+      })
+    }
+    if (evidence.accessibilityEvidence) {
+      this.store.addRuntimeEvidence(task.id, {
+        runId,
+        kind: 'accessibility',
+        path: evidence.accessibilityEvidence.path,
+        mimeType: evidence.accessibilityEvidence.mimeType,
+        sizeBytes: evidence.accessibilityEvidence.sizeBytes,
+        createdAt: evidence.accessibilityEvidence.capturedAt,
+        outcome: 'failed',
+        summary: `UI 조작 실패 시점 접근성 요소 ${evidence.accessibilityEvidence.nodeCount}개`
+      })
+    }
+    if (evidence.uiActionEvidence) {
+      this.store.addRuntimeEvidence(task.id, {
+        runId,
+        kind: 'ui-actions',
+        path: evidence.uiActionEvidence.path,
+        mimeType: evidence.uiActionEvidence.mimeType,
+        sizeBytes: evidence.uiActionEvidence.sizeBytes,
+        createdAt: evidence.uiActionEvidence.executedAt,
+        outcome: 'failed',
+        summary: `실패 전 UI 조작 ${evidence.uiActionEvidence.actionCount}단계 완료`
+      })
+    }
+    this.emit(
+      task,
+      'runtime_observed',
+      'runtime',
+      'UI 조작 실패 시점의 화면·접근성 트리·완료된 조작을 증거로 저장했습니다.',
+      'high'
+    )
   }
 
   private async executeRuntimeCommand(
@@ -2611,7 +2835,7 @@ export class AgentRunner {
       request.cwd,
       control,
       undefined,
-      process.env,
+      request.environment ?? process.env,
       { timeoutMs: request.timeoutMs, label: request.label }
     )
   }

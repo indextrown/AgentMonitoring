@@ -8,6 +8,7 @@ import type {
   FindingRecord,
   NoteRecord,
   ProjectRecord,
+  ProjectRuntimeEnvironmentEntry,
   RuntimeEvidenceRecord,
   RuntimeArtifactRetentionDays,
   RuntimeSessionRecord,
@@ -390,6 +391,20 @@ export class AppStore {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS project_runtime_environment (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        build_setting TEXT,
+        launch_variable TEXT,
+        encrypted_value BLOB,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id, key)
+      );
+
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -405,6 +420,8 @@ export class AppStore {
         ON runtime_sessions(project_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_runtime_evidence_task_created
         ON runtime_evidence(task_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_project_runtime_environment_project
+        ON project_runtime_environment(project_id, updated_at DESC);
     `)
 
     const projectColumnNames = new Set(
@@ -583,6 +600,112 @@ export class AppStore {
         projectId
       })
     return this.getProject(projectId)
+  }
+
+  listProjectRuntimeEnvironment(projectId: string): ProjectRuntimeEnvironmentEntry[] {
+    this.getProject(projectId)
+    const rows = this.database.prepare(`
+      SELECT id, project_id AS projectId, key, label, scope,
+             build_setting AS buildSetting, launch_variable AS launchVariable,
+             encrypted_value AS encryptedValue, updated_at AS updatedAt
+      FROM project_runtime_environment
+      WHERE project_id = ?
+      ORDER BY created_at, key
+    `).all(projectId) as Row[]
+    return rows.map((row) => ({
+      id: String(row.id),
+      projectId: String(row.projectId),
+      key: String(row.key),
+      label: String(row.label),
+      scope: String(row.scope) as ProjectRuntimeEnvironmentEntry['scope'],
+      buildSetting: row.buildSetting ? String(row.buildSetting) : null,
+      launchVariable: row.launchVariable ? String(row.launchVariable) : null,
+      configured: row.encryptedValue instanceof Uint8Array && row.encryptedValue.byteLength > 0,
+      updatedAt: String(row.updatedAt)
+    }))
+  }
+
+  getProjectRuntimeEnvironmentSecret(
+    projectId: string,
+    key: string
+  ): { entry: ProjectRuntimeEnvironmentEntry; encryptedValue: Buffer | null } | null {
+    const row = this.database.prepare(`
+      SELECT id, project_id AS projectId, key, label, scope,
+             build_setting AS buildSetting, launch_variable AS launchVariable,
+             encrypted_value AS encryptedValue, updated_at AS updatedAt
+      FROM project_runtime_environment
+      WHERE project_id = ? AND key = ?
+    `).get(projectId, key) as Row | undefined
+    if (!row) return null
+    const encryptedValue = row.encryptedValue instanceof Uint8Array
+      ? Buffer.from(row.encryptedValue)
+      : null
+    return {
+      entry: {
+        id: String(row.id),
+        projectId: String(row.projectId),
+        key: String(row.key),
+        label: String(row.label),
+        scope: String(row.scope) as ProjectRuntimeEnvironmentEntry['scope'],
+        buildSetting: row.buildSetting ? String(row.buildSetting) : null,
+        launchVariable: row.launchVariable ? String(row.launchVariable) : null,
+        configured: Boolean(encryptedValue?.byteLength),
+        updatedAt: String(row.updatedAt)
+      },
+      encryptedValue
+    }
+  }
+
+  upsertProjectRuntimeEnvironment(input: {
+    projectId: string
+    id?: string
+    key: string
+    label: string
+    scope: ProjectRuntimeEnvironmentEntry['scope']
+    buildSetting: string | null
+    launchVariable: string | null
+    encryptedValue?: Buffer
+  }): ProjectRuntimeEnvironmentEntry[] {
+    this.getProject(input.projectId)
+    const existing = input.id
+      ? this.database.prepare('SELECT id, encrypted_value AS encryptedValue FROM project_runtime_environment WHERE id = ? AND project_id = ?').get(input.id, input.projectId) as Row | undefined
+      : this.database.prepare('SELECT id, encrypted_value AS encryptedValue FROM project_runtime_environment WHERE project_id = ? AND key = ?').get(input.projectId, input.key) as Row | undefined
+    const id = existing ? String(existing.id) : randomUUID()
+    const now = new Date().toISOString()
+    const encryptedValue = input.encryptedValue ?? (
+      existing?.encryptedValue instanceof Uint8Array ? Buffer.from(existing.encryptedValue) : null
+    )
+    this.database.prepare(`
+      INSERT INTO project_runtime_environment (
+        id, project_id, key, label, scope, build_setting, launch_variable,
+        encrypted_value, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        key = excluded.key,
+        label = excluded.label,
+        scope = excluded.scope,
+        build_setting = excluded.build_setting,
+        launch_variable = excluded.launch_variable,
+        encrypted_value = excluded.encrypted_value,
+        updated_at = excluded.updated_at
+    `).run(
+      id,
+      input.projectId,
+      input.key,
+      input.label,
+      input.scope,
+      input.buildSetting,
+      input.launchVariable,
+      encryptedValue,
+      now,
+      now
+    )
+    return this.listProjectRuntimeEnvironment(input.projectId)
+  }
+
+  deleteProjectRuntimeEnvironment(projectId: string, id: string): ProjectRuntimeEnvironmentEntry[] {
+    this.database.prepare('DELETE FROM project_runtime_environment WHERE id = ? AND project_id = ?').run(id, projectId)
+    return this.listProjectRuntimeEnvironment(projectId)
   }
 
   deleteProject(projectId: string): ProjectRecord {

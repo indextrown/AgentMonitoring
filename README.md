@@ -162,8 +162,8 @@ AgentMonitoring은 내장 코드 편집기나 사람 승인 없는 자동 merge�
 | 프로젝트 연결 | ChatGPT 로그인, 로컬 Git 저장소 등록, 브랜치·변경 파일·언어·빌드 도구 검사, 환경 준비·검증 명령 설정 |
 | 작업 관리 | 새 작업 등록, 선택형 테크스펙 생성·수정·승인, 실시간 상태와 역할별 로그, 중단·재실행, 검색, 버그·메모·활동 기록 |
 | 에이전트 실행 | 승인된 테크스펙 전달, AI 검증 계획 추천, 작업별 조건부 파이프라인, Test Designer·Critic·Implementer·Reviewer 역할 분리, 작업별 worktree |
-| Swift 앱 실행·검증 | Xcode 프로젝트·Scheme 자동 감지, 대시보드에서 iPhone·iPad Simulator 앱 빌드·실행·재실행·종료, 작업별 설치·조작·검증 |
-| 결과와 자가 수정 | 단계별 통과·실패·건너뜀 표시, 환경 오류 분리, 프로젝트 테스트, 화면·접근성·Debug 상태 수집, 합격 조건 판정, 제한된 재시도 |
+| Swift 앱 실행·검증 | Xcode 프로젝트·Scheme 자동 감지, iPhone·iPad Simulator 앱 빌드·실행·재실행·종료, 암호화한 로컬 환경값 주입, 독립된 작업별 검증 케이스 |
+| 결과와 자가 수정 | 단계별 통과·실패·건너뜀 표시, 환경·계약 오류 사전 차단, 프로젝트 테스트, 실패 시점 화면·접근성·조작 증거 수집, 제품 코드 실패만 제한적으로 재시도 |
 | 소스 제어 | 원본 저장소의 변경 파일과 diff 확인, 파일별 스테이징·해제, staged 파일만 커밋, 모든 변경 한 번에 커밋, origin fetch·일반 push·fast-forward 동기화와 ahead·behind 확인 |
 | 검토와 게시 | 변경 파일·Git patch·Reviewer finding·시도별 증거 확인, 최신 원격 반영·재검증, 작업 브랜치 push·GitHub PR 생성 또는 작업 시작 브랜치 직접 push, 로컬 fast-forward 동기화 |
 
@@ -218,6 +218,8 @@ AgentMonitoring은 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HO
 3. 브랜치, 변경 파일, 언어와 빌드 도구 감지 결과를 확인하세요.
 4. 프로젝트 설정에서 환경 준비 명령과 검증 명령을 확인하세요. Tuist의 `Tuist/Package.swift`가 있으면 환경 준비 명령으로 `tuist install`을 자동 저장해요.
 5. 프로젝트 테스트를 사용할 계획이면 추천 검증 명령을 선택하거나 직접 입력하세요.
+6. 원본 저장소에 Git에서 제외한 `.xcconfig`가 있으면 AgentMonitoring이 작업공간의 같은 경로로 자동 복사해요. 별도 설정 없이 Codex, 환경 준비 명령, 프로젝트 테스트와 Simulator 빌드가 함께 읽을 수 있어요.
+7. `.xcconfig`를 사용하지 않거나 작업마다 다른 값이 필요하면 **Simulator 실행 환경**에 항목 key, 주입할 Build setting·앱 환경변수와 값을 등록하세요. 실제 값은 저장 후 다시 표시되지 않아요.
 
 ![프로젝트 준비 상태](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
 
@@ -304,10 +306,13 @@ Swift 저장소를 연결하면 AgentMonitoring이 `.xcworkspace`와 `.xcodeproj
 
 Build, Run, Observe, Act가 회색이면 **iOS 자동 연결**을 누르세요. 이미 잘못된 Scheme이 연결됐다면 프로젝트 설정에서 **실행 설정 다시 찾기**를 누르세요. AgentMonitoring이 앱 Scheme을 다시 확인하고 네 영역을 연결해요. 앱 Scheme이 여러 개면 목록에서 하나를 고른 뒤 설정을 저장하세요. 찾지 못하면 container와 Scheme을 직접 입력할 수 있어요. 실행 기기는 iPhone과 iPad 중에서 선택할 수 있어요.
 
-새 작업에서는 Codex가 자연어 목표를 다음 두 종류의 조건으로 바꿔요.
+새 작업에서는 Codex가 자연어 목표를 독립된 검증 케이스로 바꿔요. 토큰이 있는 정상 경로, 권한 거부 경로와 실패 화면처럼 실행 조건이 다른 상태는 별도 케이스에서 앱을 다시 실행해 검증해요. 각 케이스 안에서는 조작과 확인 시점을 순서대로 고정하므로, 버튼을 누른 직후의 상태와 최종 상태를 한 화면에서 동시에 기대하지 않아요.
+
+각 케이스에는 다음 조건이 들어갈 수 있어요.
 
 - 사용자 조작: 정확한 accessibility identifier를 이용한 `tap`, `type-text`
-- 합격 조건: 화면 요소의 존재, label, value, enabled·selected 상태
+- 체크포인트 합격 조건: 해당 시점 화면 요소의 존재, label, value, enabled·selected 상태
+- 사전 조건: 개인정보 권한, 앱 데이터 초기화와 프로젝트 설정에서 읽을 실행 환경 key
 
 사람이 내용을 검토하고 승인하면 전체 조건을 작업별 스냅샷으로 저장해요. 이후 프로젝트 설정이나 worktree 코드가 바뀌어도 해당 작업의 기준은 바뀌지 않아요.
 
@@ -331,7 +336,7 @@ Build, Run, Observe, Act가 회색이면 **iOS 자동 연결**을 누르세요. 
 
 ## 실패하면 어떻게 되나요?
 
-프로젝트 테스트나 Simulator 합격 조건이 실패하면 현재 시도의 로그와 증거를 보존해요. 남은 시도 횟수가 있으면 Implementer가 그 증거를 받아 코드를 수정하고 프로젝트 테스트부터 다시 실행해요.
+프로젝트 테스트나 Simulator 합격 조건이 실패하면 현재 시도의 로그와 증거를 보존해요. UI 요소를 찾지 못한 경우에도 실패 시점의 화면, 접근성 트리와 이미 완료한 조작을 먼저 저장해요. 남은 시도 횟수가 있으면 Implementer가 그 증거를 받아 코드를 수정하고 프로젝트 테스트부터 다시 실행해요.
 
 의존성 설치, 네트워크나 인증처럼 코드로 고칠 수 없는 문제가 발생하면 작업을 **환경 확인 필요**에서 멈춰요. 이 실패는 최대 구현 시도 횟수를 소모하지 않으며, 같은 오류 때문에 Implementer를 반복 호출하지 않아요. 작업공간과 현재 변경도 그대로 남아요.
 
@@ -377,6 +382,8 @@ AgentMonitoring은 Electron의 `userData` 아래에 다음 데이터를 저장�
 | 데이터 | 저장 위치와 내용 |
 | --- | --- |
 | 관리 정보 | SQLite에 프로젝트, 작업, 이벤트, 버그, 메모와 증거 위치를 저장해요. |
+| Git 제외 `.xcconfig` | 작업 시작과 재실행 때 원본 저장소에서 격리 worktree의 같은 경로로 복사해요. Git 제외 상태를 다시 확인하므로 변경 내역, 커밋과 PR에는 들어가지 않으며 worktree를 정리할 때 함께 삭제해요. |
+| Simulator 실행 환경 | 항목 이름과 주입 대상만 일반 데이터로 저장해요. 실제 값은 Electron `safeStorage`와 macOS Keychain 기반으로 암호화하며 저장소·작업 계약·로그에는 넣지 않아요. |
 | 작업 코드 | `worktrees/<project-id>/<task-id>`에 격리 worktree를 만들어요. |
 | Swift 빌드 | 실행 중 `runtime-sessions/<task-id>/DerivedData`에 작업별 산출물을 저장하고, 완료·폐기하면 바로 삭제해요. |
 | 실행 증거 | `runtime-sessions/<task-id>/evidence`에 화면과 JSON 결과를 저장해요. |

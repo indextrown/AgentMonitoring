@@ -6,6 +6,7 @@ import {
   type EventKind,
   type EventRecord,
   type ProjectRecord,
+  type ProjectRuntimeEnvironmentEntry,
   type ProjectSimulatorSession,
   type SourceControlFile,
   type SourceControlStatus,
@@ -381,6 +382,7 @@ let state: DashboardSnapshot = searchParams.get('workspace') === 'empty'
     }
   : buildSnapshot()
 let runtimeArtifactRetentionDays: 0 | 7 | 30 | 90 = 30
+const demoRuntimeEnvironment = new Map<string, ProjectRuntimeEnvironmentEntry[]>()
 let demoSourceControlFiles: SourceControlFile[] = [
   {
     path: 'Projects/Shared/Featcher/Project.swift',
@@ -575,6 +577,33 @@ export const demoBridge: AgentMonitoringBridge = {
     }
     if (!updated) throw new Error('프로젝트를 찾을 수 없습니다.')
     return updated
+  },
+  listProjectRuntimeEnvironment: async (requestedProjectId) =>
+    demoRuntimeEnvironment.get(requestedProjectId) ?? [],
+  upsertProjectRuntimeEnvironment: async (input) => {
+    const entries = demoRuntimeEnvironment.get(input.projectId) ?? []
+    const existing = entries.find((entry) => entry.id === input.id || entry.key === input.key)
+    const updated: ProjectRuntimeEnvironmentEntry = {
+      id: existing?.id ?? crypto.randomUUID(),
+      projectId: input.projectId,
+      key: input.key,
+      label: input.label,
+      scope: input.scope,
+      buildSetting: input.scope === 'launch' ? null : input.buildSetting ?? null,
+      launchVariable: input.scope === 'build' ? null : input.launchVariable ?? null,
+      configured: input.value !== undefined || existing?.configured === true,
+      updatedAt: new Date().toISOString()
+    }
+    const next = existing
+      ? entries.map((entry) => entry.id === existing.id ? updated : entry)
+      : [...entries, updated]
+    demoRuntimeEnvironment.set(input.projectId, next)
+    return next
+  },
+  deleteProjectRuntimeEnvironment: async (input) => {
+    const next = (demoRuntimeEnvironment.get(input.projectId) ?? []).filter((entry) => entry.id !== input.id)
+    demoRuntimeEnvironment.set(input.projectId, next)
+    return next
   },
   autoConfigureProjectRuntime: async (projectIdToConfigure) => {
     const discoveryMode = searchParams.get('runtime-discovery')
