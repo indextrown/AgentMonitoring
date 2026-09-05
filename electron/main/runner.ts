@@ -60,6 +60,7 @@ import type {
   ProjectRuntimeEnvironmentService,
   ResolvedProjectRuntimeEnvironment
 } from './runtime-environment'
+import { syncIgnoredXcconfigFiles } from './ignored-xcconfig'
 
 const ALLOWED_TEST_COMMANDS = new Set([
   'pnpm',
@@ -1163,6 +1164,7 @@ export class AgentRunner {
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
     const worktreePath = resolve(task.worktreePath)
+    await this.syncIgnoredXcconfigs(task, projectRoot, worktreePath)
     const targetBranch = await this.requireGit(
       ['symbolic-ref', '--quiet', '--short', 'HEAD'],
       projectRoot,
@@ -1948,17 +1950,13 @@ export class AgentRunner {
   }
 
   private async prepareWorktree(task: TaskRecord): Promise<string> {
-    if (task.worktreePath) {
-      try {
-        await stat(task.worktreePath)
-        return task.worktreePath
-      } catch {
-        // A missing worktree is recreated below.
-      }
-    }
-
     const project = this.store.getProject(task.projectId)
     const projectRoot = resolve(project.path)
+    if (task.worktreePath && await pathExists(task.worktreePath)) {
+      await this.syncIgnoredXcconfigs(task, projectRoot, task.worktreePath)
+      return task.worktreePath
+    }
+
     const root = resolve(this.worktreesRoot, task.projectId)
     await mkdir(root, { recursive: true })
     const worktreePath = resolve(root, task.id)
@@ -1988,8 +1986,33 @@ export class AgentRunner {
       sourceBranch.output.trim(),
       baseCommit.output.trim()
     )
+    await this.syncIgnoredXcconfigs(task, projectRoot, worktreePath)
     this.emit(task, 'agent', 'git', `격리 작업공간 생성 · ${basename(worktreePath)} · ${branchName}`)
     return worktreePath
+  }
+
+  private async syncIgnoredXcconfigs(
+    task: TaskRecord,
+    projectRoot: string,
+    worktreePath: string
+  ): Promise<void> {
+    try {
+      const result = await syncIgnoredXcconfigFiles(projectRoot, worktreePath)
+      if (result.paths.length > 0) {
+        this.emit(
+          task,
+          'agent',
+          'environment',
+          `Git에서 제외된 로컬 xcconfig ${result.paths.length}개를 작업공간에 동기화했습니다.`
+        )
+      }
+    } catch (error) {
+      throw new EnvironmentPreparationError(
+        error instanceof Error ? error.message : String(error),
+        '로컬 xcconfig 동기화',
+        ''
+      )
+    }
   }
 
   private setVerificationStep(

@@ -218,7 +218,8 @@ AgentMonitoring은 사용자 전역 `~/.codex`와 분리된 앱 전용 `CODEX_HO
 3. 브랜치, 변경 파일, 언어와 빌드 도구 감지 결과를 확인하세요.
 4. 프로젝트 설정에서 환경 준비 명령과 검증 명령을 확인하세요. Tuist의 `Tuist/Package.swift`가 있으면 환경 준비 명령으로 `tuist install`을 자동 저장해요.
 5. 프로젝트 테스트를 사용할 계획이면 추천 검증 명령을 선택하거나 직접 입력하세요.
-6. 토큰이나 Git에서 제외한 로컬 설정이 필요한 앱은 **Simulator 실행 환경**에 항목 key, 주입할 Build setting·앱 환경변수와 값을 등록하세요. 실제 값은 저장 후 다시 표시되지 않아요.
+6. 원본 저장소에 Git에서 제외한 `.xcconfig`가 있으면 AgentMonitoring이 작업공간의 같은 경로로 자동 복사해요. 별도 설정 없이 Codex, 환경 준비 명령, 프로젝트 테스트와 Simulator 빌드가 함께 읽을 수 있어요.
+7. `.xcconfig`를 사용하지 않거나 작업마다 다른 값이 필요하면 **Simulator 실행 환경**에 항목 key, 주입할 Build setting·앱 환경변수와 값을 등록하세요. 실제 값은 저장 후 다시 표시되지 않아요.
 
 ![프로젝트 준비 상태](./tests/e2e/dashboard.spec.ts-snapshots/project-readiness-chromium-desktop-darwin.png)
 
@@ -381,6 +382,7 @@ AgentMonitoring은 Electron의 `userData` 아래에 다음 데이터를 저장�
 | 데이터 | 저장 위치와 내용 |
 | --- | --- |
 | 관리 정보 | SQLite에 프로젝트, 작업, 이벤트, 버그, 메모와 증거 위치를 저장해요. |
+| Git 제외 `.xcconfig` | 작업 시작과 재실행 때 원본 저장소에서 격리 worktree의 같은 경로로 복사해요. Git 제외 상태를 다시 확인하므로 변경 내역, 커밋과 PR에는 들어가지 않으며 worktree를 정리할 때 함께 삭제해요. |
 | Simulator 실행 환경 | 항목 이름과 주입 대상만 일반 데이터로 저장해요. 실제 값은 Electron `safeStorage`와 macOS Keychain 기반으로 암호화하며 저장소·작업 계약·로그에는 넣지 않아요. |
 | 작업 코드 | `worktrees/<project-id>/<task-id>`에 격리 worktree를 만들어요. |
 | Swift 빌드 | 실행 중 `runtime-sessions/<task-id>/DerivedData`에 작업별 산출물을 저장하고, 완료·폐기하면 바로 삭제해요. |
