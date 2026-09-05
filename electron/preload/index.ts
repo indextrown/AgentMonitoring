@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../src/shared/types'
 import type {
+  TechSpecProgress,
   AgentMonitoringBridge,
   CodexAuthStatus,
   ContinueTaskInput,
@@ -69,6 +70,13 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('tech-spec:generate', input),
   refineTechSpec: (input: RefineTechSpecInput) =>
     ipcRenderer.invoke('tech-spec:refine', input),
+  cancelTechSpec: (requestId: string) => ipcRenderer.invoke('tech-spec:cancel', requestId),
+  releaseTechSpecDraft: (projectId: string, draftId: string) => ipcRenderer.invoke('tech-spec:release', { projectId, draftId }),
+  onTechSpecProgress: (listener: (progress: TechSpecProgress) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: TechSpecProgress): void => listener(progress)
+    ipcRenderer.on('tech-spec:progress', handler)
+    return () => ipcRenderer.removeListener('tech-spec:progress', handler)
+  },
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) =>
     ipcRenderer.invoke('runtime-scenario:generate', input),
   recommendVerificationPlan: (input: RecommendVerificationPlanInput) =>

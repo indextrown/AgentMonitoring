@@ -13,7 +13,10 @@ import {
   type SourceControlFile,
   type SourceControlStatus,
   type TaskRecord,
-  type TaskStatus
+  type TaskStatus,
+  type GenerateTechSpecInput,
+  type TechSpecProgress,
+  type GeneratedTechSpec
 } from '../../shared/types'
 import { createVerificationResult, updateVerificationStep } from '../../shared/domain'
 import { resolveCodexModelPlan } from '../../shared/codex-models'
@@ -22,6 +25,26 @@ const projectId = '11111111-1111-4111-8111-111111111111'
 const secondaryProjectId = '22222222-2222-4222-8222-222222222222'
 const simulatorListeners = new Set<(session: ProjectSimulatorSession) => void>()
 const demoSimulatorSessions = new Map<string, ProjectSimulatorSession>()
+const planningListeners = new Set<(progress: TechSpecProgress) => void>()
+const planningDrafts = new Set<string>()
+const cancelledPlanning = new Set<string>()
+
+async function demoPlanning(input: GenerateTechSpecInput, result: GeneratedTechSpec): Promise<GeneratedTechSpec> {
+  const startedAt = Date.now()
+  const slow = new URLSearchParams(location.search).get('planning') === 'slow'
+  for (const stage of ['investigating', 'writing'] as const) {
+    for (const listener of planningListeners) listener({
+      requestId: input.requestId, stage, startedAt, updatedAt: Date.now(),
+      message: stage === 'writing' ? '테크스펙 작성 중' : '관련 코드 읽기·검색 중',
+      preview: stage === 'writing' ? result.markdown.slice(0, 250) : '',
+      model: '데모 모델', effort: 'low', reusedConversation: planningDrafts.has(input.draftId), reusedRepository: planningDrafts.has(input.draftId)
+    })
+    await new Promise((resolve) => setTimeout(resolve, slow ? 1_500 : 30))
+    if (cancelledPlanning.delete(input.requestId)) throw new Error('테크스펙 생성을 취소했습니다.')
+  }
+  planningDrafts.add(input.draftId)
+  return result
+}
 const demoReasoningEfforts: CodexReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const demoModelCatalog: CodexModelCatalog = {
   defaultModelId: 'gpt-5.6-sol',
@@ -1065,7 +1088,10 @@ export const demoBridge: AgentMonitoringBridge = {
     message: `${demoSimulatorSession(requestedProjectId).deviceName ?? 'iOS 기기'}에서 앱을 종료했습니다.`,
     error: null
   }),
-  generateTechSpec: async (input) => ({
+  cancelTechSpec: async (requestId) => { cancelledPlanning.add(requestId) },
+  releaseTechSpecDraft: async (_projectId, draftId) => { planningDrafts.delete(draftId) },
+  onTechSpecProgress: (listener) => { planningListeners.add(listener); return () => { planningListeners.delete(listener) } },
+  generateTechSpec: async (input) => demoPlanning(input, {
     version: 1,
     revision: 1,
     summary: `${input.title} 구현 범위와 검증 기준을 정리했습니다.`,
@@ -1096,7 +1122,7 @@ export const demoBridge: AgentMonitoringBridge = {
     openQuestions: ['오류 상태에서 사용자에게 보여줄 문구를 기존 디자인과 동일하게 유지할까요?'],
     changeSummary: '요구사항과 현재 프로젝트를 기준으로 최초 초안을 만들었습니다.'
   }),
-  refineTechSpec: async (input) => ({
+  refineTechSpec: async (input) => demoPlanning(input, {
     version: 1,
     revision: input.current.revision + 1,
     summary: input.current.summary,
