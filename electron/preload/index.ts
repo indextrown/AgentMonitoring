@@ -3,6 +3,7 @@ import { AGENT_MONITORING_BRIDGE_VERSION } from '../../src/shared/types'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
+  ContinueTaskInput,
   CreateTaskInput,
   DeleteProjectRuntimeEnvironmentInput,
   EventRecord,
@@ -73,6 +74,7 @@ const bridge: AgentMonitoringBridge = {
     ipcRenderer.invoke('task:regenerate-runtime-scenario', taskId),
   getTaskChanges: (taskId: string) => ipcRenderer.invoke('task:changes', taskId),
   runTask: (taskId: string) => ipcRenderer.invoke('task:run', taskId),
+  continueTask: (input: ContinueTaskInput) => ipcRenderer.invoke('task:continue', input),
   retryTaskVerification: (taskId: string) => ipcRenderer.invoke('task:retry-verification', taskId),
   stopTask: (taskId: string) => ipcRenderer.invoke('task:stop', taskId),
   approveTask: (taskId: string) => ipcRenderer.invoke('task:approve', taskId),

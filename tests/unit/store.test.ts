@@ -159,6 +159,58 @@ describe('AppStore', () => {
     reopened.close()
   })
 
+  it('persists approval feedback without replacing the original task contract', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, 'test.sqlite')
+    const store = new AppStore(databasePath)
+    const project = store.addProject('Revision project', join(directory, 'revision-project'))
+    const task = store.createTask(
+      project.id,
+      '메인 스레드 경고 수정',
+      '기존 기능을 구현하고 승인된 검증 조건을 모두 통과한다.',
+      2
+    )
+    store.setTaskWorkspace(task.id, 'agentmonitor/revision', join(directory, 'worktree'), 'main')
+    store.transitionTask(task.id, 'running', 1)
+    store.transitionTask(task.id, 'awaiting_approval')
+
+    const updated = store.addTaskRevisionRequest(
+      task.id,
+      '메인 스레드 경고의 원인을 제거하고 기존 검증을 다시 실행해 주세요.'
+    )
+
+    expect(updated.prompt).toBe(task.prompt)
+    expect(updated.revisionRequests).toHaveLength(1)
+    expect(updated.revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
+    expect(store.getSnapshot(project.id).events.some((event) => event.kind === 'task_revision_requested')).toBe(true)
+    store.close()
+
+    const reopened = new AppStore(databasePath)
+    expect(reopened.getTask(task.id).revisionRequests?.[0].instruction).toContain('메인 스레드 경고')
+    expect(() => reopened.addTaskRevisionRequest(task.id, '두 번째 수정 요청도 같은 작업에 누적합니다.')).not.toThrow()
+    reopened.setTaskPublication(task.id, {
+      strategy: 'direct',
+      status: 'awaiting_local_sync',
+      remoteName: 'origin',
+      baseBranch: 'main',
+      remoteBranch: 'main',
+      pullRequestUrl: null,
+      publishedCommit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      mergeCommit: null,
+      message: '원격 반영 후 로컬 동기화 대기',
+      updatedAt: new Date().toISOString()
+    })
+    expect(() => reopened.addTaskRevisionRequest(task.id, '원격 반영 뒤에는 받을 수 없는 요청입니다.')).toThrow(
+      '원격 반영이 끝난 작업은 추가로 수정할 수 없습니다.'
+    )
+    reopened.transitionTask(task.id, 'running', 1)
+    expect(() => reopened.addTaskRevisionRequest(task.id, '실행 중에는 받을 수 없는 요청입니다.')).toThrow(
+      '승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.'
+    )
+    reopened.close()
+  })
+
   it('recovers interrupted tasks and manages findings, notes, and project records', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agent-monitoring-store-'))
     temporaryDirectories.push(directory)

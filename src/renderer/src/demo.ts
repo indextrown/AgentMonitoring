@@ -1152,6 +1152,41 @@ export const demoBridge: AgentMonitoringBridge = {
     updateTask(taskId, plan?.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval')
     emit(task, 'agent', 'reviewer', '최종 검토가 끝났습니다. 승인을 기다립니다.')
   },
+  continueTask: async (input) => {
+    const current = state.tasks.find((task) => task.id === input.taskId)
+    if (!current) throw new Error('작업을 찾을 수 없습니다.')
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(current.status)) {
+      throw new Error('승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    }
+    if (!current.worktreePath) throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
+    const instruction = input.instruction.trim()
+    const requests = current.revisionRequests ?? []
+    const nextRequests = requests.at(-1)?.instruction === instruction && !requests.at(-1)?.appliedAt
+      ? requests
+      : [...requests, { id: crypto.randomUUID(), instruction, createdAt: new Date().toISOString(), appliedAt: null }]
+    const updated: TaskRecord = {
+      ...current,
+      publication: null,
+      revisionRequests: nextRequests,
+      updatedAt: new Date().toISOString()
+    }
+    state = { ...state, tasks: state.tasks.map((task) => task.id === input.taskId ? updated : task) }
+    if (nextRequests.length !== requests.length) {
+      emit(updated, 'task_revision_requested', 'human', `추가 수정 요청: ${instruction}`)
+    }
+    await demoBridge.runTask(input.taskId)
+    const appliedAt = new Date().toISOString()
+    state = {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === input.taskId
+        ? {
+            ...task,
+            revisionRequests: (task.revisionRequests ?? []).map((request) => ({ ...request, appliedAt })),
+            updatedAt: appliedAt
+          }
+        : task)
+    }
+  },
   retryTaskVerification: async (taskId) => {
     const task = updateTask(taskId, 'running')
     updateTaskVerification(taskId, 'test-design', 'skipped', '기존 구현과 테스트를 유지하고 검증만 다시 실행합니다.')

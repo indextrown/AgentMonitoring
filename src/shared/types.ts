@@ -29,6 +29,7 @@ export type EventKind =
   | 'note_updated'
   | 'note_deleted'
   | 'task_completed'
+  | 'task_revision_requested'
   | 'task_stopped'
   | 'task_timed_out'
   | 'task_recovered'
@@ -542,6 +543,13 @@ export interface TaskPublication {
   updatedAt: string | null
 }
 
+export interface TaskRevisionRequest {
+  id: string
+  instruction: string
+  createdAt: string
+  appliedAt: string | null
+}
+
 export interface TaskRecord {
   id: string
   projectId: string
@@ -564,6 +572,7 @@ export interface TaskRecord {
   techSpec?: TaskTechSpec | null
   verificationPlan?: TaskVerificationPlan | null
   verificationResult?: TaskVerificationResult | null
+  revisionRequests?: TaskRevisionRequest[]
   createdAt: string
   updatedAt: string
 }
@@ -710,6 +719,11 @@ export interface CreateTaskInput {
   publishStrategy: PublishStrategy
 }
 
+export interface ContinueTaskInput {
+  taskId: string
+  instruction: string
+}
+
 export interface UpdateProjectInput {
   projectId: string
   name: string
@@ -744,7 +758,7 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 15
+export const AGENT_MONITORING_BRIDGE_VERSION = 16
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -792,6 +806,7 @@ export interface AgentMonitoringBridge {
   regenerateTaskRuntimeScenario: (taskId: string) => Promise<TaskRecord>
   getTaskChanges: (taskId: string) => Promise<TaskChanges>
   runTask: (taskId: string) => Promise<void>
+  continueTask: (input: ContinueTaskInput) => Promise<void>
   retryTaskVerification: (taskId: string) => Promise<void>
   stopTask: (taskId: string) => Promise<void>
   approveTask: (taskId: string) => Promise<TaskApprovalResult>

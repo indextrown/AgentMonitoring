@@ -15,6 +15,7 @@ import type {
   RuntimeSessionStatus,
   Severity,
   TaskRecord,
+  TaskRevisionRequest,
   TaskStatus,
   TaskTechSpec,
   TaskTechSpecDraft,
@@ -61,6 +62,7 @@ const taskColumns = `
   tech_spec_json AS techSpecJson,
   verification_plan_json AS verificationPlanJson,
   verification_result_json AS verificationResultJson,
+  revision_requests_json AS revisionRequestsJson,
   created_at AS createdAt,
   updated_at AS updatedAt
 `
@@ -203,6 +205,14 @@ function taskFromRow(row: Row): TaskRecord {
       : null,
     verificationPlan,
     verificationResult,
+    revisionRequests: row.revisionRequestsJson
+      ? (JSON.parse(String(row.revisionRequestsJson)) as Array<Partial<TaskRevisionRequest>>).map((request) => ({
+          id: String(request.id),
+          instruction: String(request.instruction),
+          createdAt: String(request.createdAt),
+          appliedAt: request.appliedAt ? String(request.appliedAt) : null
+        }))
+      : [],
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt)
   }
@@ -328,6 +338,7 @@ export class AppStore {
         tech_spec_json TEXT,
         verification_plan_json TEXT,
         verification_result_json TEXT,
+        revision_requests_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -475,6 +486,9 @@ export class AppStore {
     }
     if (!taskColumnNames.has('publication_json')) {
       this.database.exec('ALTER TABLE tasks ADD COLUMN publication_json TEXT')
+    }
+    if (!taskColumnNames.has('revision_requests_json')) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN revision_requests_json TEXT NOT NULL DEFAULT '[]'")
     }
 
     const runtimeEvidenceColumnNames = new Set(
@@ -753,6 +767,7 @@ export class AppStore {
       techSpec: approvedTechSpec,
       verificationPlan,
       verificationResult: verificationPlan ? createVerificationResult(verificationPlan, now) : null,
+      revisionRequests: [],
       createdAt: now,
       updatedAt: now
     }
@@ -764,11 +779,13 @@ export class AppStore {
           publish_strategy, publication_json,
           runtime_contract_json, runtime_scenario_summary,
           runtime_scenario_approved_at, tech_spec_json, verification_plan_json, verification_result_json,
+          revision_requests_json,
           created_at, updated_at
         ) VALUES (
           $id, $projectId, $title, $prompt, $status, 'codex', $maxAttempts, 0,
           NULL, NULL, NULL, NULL, NULL, $publishStrategy, NULL, $runtimeContract, $runtimeScenarioSummary,
           $runtimeScenarioApprovedAt, $techSpec, $verificationPlan, $verificationResult,
+          '[]',
           $createdAt, $updatedAt
         )
       `)
@@ -855,6 +872,55 @@ export class AppStore {
     this.database
       .prepare('UPDATE tasks SET status = ?, attempt = ?, updated_at = ? WHERE id = ?')
       .run(status, nextAttempt, now, taskId)
+    return this.getTask(taskId)
+  }
+
+  addTaskRevisionRequest(taskId: string, instruction: string): TaskRecord {
+    const task = this.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    }
+    if (task.publication?.status === 'awaiting_local_sync') {
+      throw new Error('원격 반영이 끝난 작업은 추가로 수정할 수 없습니다. 먼저 로컬 동기화를 완료하세요.')
+    }
+    const normalized = instruction.trim()
+    if (normalized.length < 5 || normalized.length > 5_000) {
+      throw new Error('추가 수정 요청은 5자 이상 5,000자 이하로 작성하세요.')
+    }
+    const requests = task.revisionRequests ?? []
+    const duplicate = requests.at(-1)?.instruction === normalized && !requests.at(-1)?.appliedAt
+    const now = new Date().toISOString()
+    const nextRequests: TaskRevisionRequest[] = duplicate
+      ? requests
+      : [...requests, { id: randomUUID(), instruction: normalized, createdAt: now, appliedAt: null }]
+    this.database
+      .prepare(`
+        UPDATE tasks
+        SET revision_requests_json = ?, publication_json = NULL, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(JSON.stringify(nextRequests), now, taskId)
+    if (!duplicate) {
+      this.addEvent(
+        task.projectId,
+        taskId,
+        'task_revision_requested',
+        'human',
+        `추가 수정 요청: ${normalized}`
+      )
+    }
+    return this.getTask(taskId)
+  }
+
+  markTaskRevisionRequestsApplied(taskId: string): TaskRecord {
+    const task = this.getTask(taskId)
+    const now = new Date().toISOString()
+    const requests = (task.revisionRequests ?? []).map((request) => request.appliedAt
+      ? request
+      : { ...request, appliedAt: now })
+    this.database
+      .prepare('UPDATE tasks SET revision_requests_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(requests), now, taskId)
     return this.getTask(taskId)
   }
 

@@ -7,6 +7,7 @@ import { z } from 'zod'
 import type {
   ApprovedRuntimeContract,
   CodexAuthStatus,
+  ContinueTaskInput,
   CreateTaskInput,
   EventRecord,
   GenerateTechSpecInput,
@@ -90,6 +91,11 @@ const createTaskSchema = z.object({
     context.addIssue({ code: 'custom', path: ['runtimeContract'], message: '작업 시나리오를 생성하고 확인하세요.' })
   }
 })
+
+const continueTaskSchema = z.object({
+  taskId: z.string().uuid(),
+  instruction: z.string().trim().min(5).max(5_000)
+}).strict()
 
 const updateProjectSchema = z.object({
   projectId: z.string().uuid(),
@@ -716,6 +722,13 @@ function registerIpc(): void {
     const auth = await requireCodexAuth().status()
     if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
     await requireRunner().run(taskId)
+  })
+
+  ipcMain.handle('task:continue', async (_event, rawInput: ContinueTaskInput) => {
+    const input = continueTaskSchema.parse(rawInput)
+    const auth = await requireCodexAuth().status()
+    if (auth.state !== 'signed_in') throw new Error('먼저 AgentMonitoring에서 Codex에 로그인하세요.')
+    await requireRunner().continueTask(input.taskId, input.instruction)
   })
 
   ipcMain.handle('task:retry-verification', async (_event, taskId: string) => {

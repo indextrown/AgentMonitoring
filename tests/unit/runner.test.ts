@@ -431,6 +431,57 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('continues approval feedback in the same worktree and reruns the selected pipeline', async () => {
+    let callsPath = ''
+    const feedback = '메인 스레드 경고를 제거하고 기존 동작이 유지되는지 다시 검증해 주세요.'
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'approval-feedback-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(prompt) + '\\n')
+if (prompt.includes('구현 담당자') && prompt.includes(${JSON.stringify(feedback)})) {
+  writeFileSync('.main-thread-warning-fixed', 'fixed\\n')
+}
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      verificationPlan: {
+        version: 1,
+        mode: 'project-tests',
+        testDesign: 'swift-testing',
+        runtimeSource: 'off'
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+    const initial = fixture.store.getTask(fixture.taskId)
+    expect(initial.status).toBe('awaiting_approval')
+
+    await fixture.runner.continueTask(fixture.taskId, feedback)
+
+    const revised = fixture.store.getTask(fixture.taskId)
+    const prompts = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as string)
+    expect(revised).toMatchObject({
+      status: 'awaiting_approval',
+      branchName: initial.branchName,
+      worktreePath: initial.worktreePath
+    })
+    expect(revised.prompt).toBe(initial.prompt)
+    expect(revised.revisionRequests?.map((request) => request.instruction)).toEqual([feedback])
+    expect(revised.revisionRequests?.[0].appliedAt).toBeTruthy()
+    expect(await readFile(join(revised.worktreePath!, '.main-thread-warning-fixed'), 'utf8')).toBe('fixed\n')
+    expect(prompts.filter((prompt) => prompt.includes('당신은 테스트 설계자입니다.'))).toHaveLength(2)
+    for (const role of ['당신은 테스트 설계자입니다.', '당신은 읽기 전용 테스트 비평가입니다.', '당신은 구현 담당자입니다.', '당신은 최종 읽기 전용 Reviewer입니다.']) {
+      expect(prompts.some((prompt) => prompt.includes(role) && prompt.includes(feedback))).toBe(true)
+    }
+    expect(fixture.store.getSnapshot().events.some((event) => event.kind === 'task_revision_requested')).toBe(true)
+    fixture.store.close()
+  })
+
   it('pauses on a Codex usage limit without consuming an implementation attempt', async () => {
     const fixture = await createExecutionFixture({
       codexSource: () => `#!/usr/bin/env node

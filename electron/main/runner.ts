@@ -424,6 +424,19 @@ export function buildTaskTechSpecContext(task: TaskRecord): string {
   ].join('\n')
 }
 
+export function buildTaskRevisionRequestContext(task: TaskRecord): string {
+  const requests = task.revisionRequests ?? []
+  if (requests.length === 0) return ''
+  return [
+    '아래 내용은 사람이 승인 전에 추가한 후속 수정 계약입니다.',
+    '원래 작업 목표와 승인된 검증 조건을 유지하면서 모든 요청을 함께 만족하세요.',
+    '서로 충돌하는 내용이 있으면 가장 최근 요청을 우선하되, 요구사항을 임의로 약화하지 마세요.',
+    '<task-revision-requests>',
+    ...requests.map((request, index) => `${index + 1}. ${request.instruction}`),
+    '</task-revision-requests>'
+  ].join('\n')
+}
+
 export function resolveTaskVerificationPlan(task: TaskRecord): {
   plan: TaskVerificationPlan
   legacy: boolean
@@ -605,6 +618,10 @@ export class AgentRunner {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
     let task = this.store.getTask(taskId)
+    const hasPendingHumanRevision = (task.revisionRequests ?? []).some((request) => !request.appliedAt)
+    const beginsHumanRevision = ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) &&
+      hasPendingHumanRevision
+    const taskRevisionContext = buildTaskRevisionRequestContext(task)
     const resumesFailedWork = ['failed', 'stopped'].includes(task.status)
     const previousReviewerFindings = task.verificationResult?.reviewer.status === 'failed'
       ? this.store.listTaskFindings(taskId)
@@ -612,7 +629,7 @@ export class AgentRunner {
     const previousTestFailure = resumesFailedWork && previousReviewerFindings.length === 0
       ? this.store.latestTaskEvent(taskId, 'test_failed')
       : null
-    const previousRepairContext = previousReviewerFindings.length > 0
+    const automatedRepairContext = previousReviewerFindings.length > 0
       ? [
           '이 작업은 직전 Reviewer 검토에서 수정할 문제가 남았습니다.',
           '기존 작업공간의 변경을 유지하고 아래 지적을 모두 해결하세요.',
@@ -625,6 +642,7 @@ export class AgentRunner {
             previousTestFailure.message
           ].join('\n\n')
         : ''
+    const previousRepairContext = [taskRevisionContext, automatedRepairContext].filter(Boolean).join('\n\n')
     const project = this.store.getProject(task.projectId)
     const { plan, legacy } = resolveTaskVerificationPlan(task)
     const usesProjectTests = verificationUsesProjectTests(plan)
@@ -676,9 +694,11 @@ export class AgentRunner {
           task,
           'agent',
           'orchestrator',
-          previousReviewerFindings.length > 0
-            ? `미해결 Reviewer finding ${previousReviewerFindings.length}개를 복원해 첫 구현 시도부터 수정합니다.`
-            : '직전 자동 검증 실패 진단을 복원해 첫 구현 시도부터 이어갑니다.'
+          hasPendingHumanRevision
+            ? `사용자의 추가 수정 요청 ${task.revisionRequests?.length ?? 0}개를 같은 작업공간에서 이어서 반영합니다.`
+            : previousReviewerFindings.length > 0
+              ? `미해결 Reviewer finding ${previousReviewerFindings.length}개를 복원해 첫 구현 시도부터 수정합니다.`
+              : '직전 자동 검증 실패 진단을 복원해 첫 구현 시도부터 이어갑니다.'
         )
       }
       const approvedRuntimeContract = runtimeContractPrompt(task)
@@ -705,11 +725,12 @@ export class AgentRunner {
       }
       let preparedManifestFingerprint = await this.dependencyManifestFingerprint(worktreePath)
 
-      let critiqueMessage = previousRepairContext
+      const reusesExistingTestDesign = Boolean(automatedRepairContext) && !beginsHumanRevision
+      let critiqueMessage = reusesExistingTestDesign
         ? '직전 실행에서 설계한 테스트를 유지하고, 저장된 실패 진단부터 수정합니다.'
         : '이 검증 계획은 새 테스트 설계를 사용하지 않습니다.'
       const designsTests = usesProjectTests &&
-        !previousRepairContext &&
+        !reusesExistingTestDesign &&
         !['existing-tests', 'skip'].includes(plan.testDesign)
       if (designsTests) {
         this.setVerificationStep(taskId, plan, 'test-design', 'running', 'Test Designer와 Critic이 테스트 범위를 설계하고 있습니다.')
@@ -722,6 +743,7 @@ export class AgentRunner {
             [
               `작업 목표: ${task.prompt}`,
               buildTaskTechSpecContext(task),
+              taskRevisionContext,
               '당신은 테스트 설계자입니다. 프로덕션 구현은 수정하지 마세요.',
               '기존 테스트 구조를 확인하고 이 목표의 성공·실패·경계 조건을 검증하는 테스트만 추가하거나 보완하세요.',
               'Tuist 생성, xcodebuild, Simulator 실행은 Orchestrator가 이후 실제 환경에서 진행합니다. Codex sandbox 내의 workspace·cache·CoreSimulatorService 오류를 해결하거나 우회하려고 시도하지 마세요.',
@@ -740,6 +762,7 @@ export class AgentRunner {
             [
               `작업 목표: ${task.prompt}`,
               buildTaskTechSpecContext(task),
+              taskRevisionContext,
               '당신은 읽기 전용 테스트 비평가입니다.',
               '현재 추가된 테스트가 구현 세부사항이 아니라 사용자 요구와 실패 경로를 검증하는지 평가하세요.',
               '누락된 경계 조건과 테스트를 약화해 통과할 수 있는 지점을 짧게 정리하세요.',
@@ -752,7 +775,7 @@ export class AgentRunner {
           this.setVerificationStep(taskId, plan, 'test-design', 'failed', '테스트 설계 또는 비평에 실패했습니다.')
           throw error
         }
-      } else if (previousRepairContext && usesProjectTests) {
+      } else if (reusesExistingTestDesign && usesProjectTests) {
         this.setVerificationStep(
           taskId,
           plan,
@@ -762,7 +785,7 @@ export class AgentRunner {
         )
       }
 
-      let repairContext = previousRepairContext
+      let repairContext = automatedRepairContext
       let repairImagePaths: string[] = []
       let automationPassed = false
       let runtimeResult: RuntimeRunResult | null = null
@@ -786,6 +809,7 @@ export class AgentRunner {
           [
             `작업 목표: ${task.prompt}`,
             buildTaskTechSpecContext(task),
+            taskRevisionContext,
             '당신은 구현 담당자입니다. 현재 테스트와 프로젝트 규칙을 지키며 목표를 완성하세요.',
             '테스트를 삭제하거나 약화하지 마세요. 관련 없는 파일은 수정하지 마세요.',
             task.techSpec?.openQuestions.length
@@ -1008,6 +1032,12 @@ export class AgentRunner {
 
       if (control.stopped) throw new StoppedError()
       const finalStatus = plan.mode === 'manual-review' ? 'awaiting_manual_validation' : 'awaiting_approval'
+      if (
+        hasPendingHumanRevision &&
+        this.store.getTask(taskId).verificationResult?.reviewer.status === 'passed'
+      ) {
+        this.store.markTaskRevisionRequestsApplied(taskId)
+      }
       this.store.transitionTask(taskId, finalStatus)
       this.emit(
         task,
@@ -1026,6 +1056,19 @@ export class AgentRunner {
     }
   }
 
+  async continueTask(taskId: string, instruction: string): Promise<void> {
+    if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
+    const task = this.store.getTask(taskId)
+    if (!['awaiting_approval', 'awaiting_manual_validation'].includes(task.status)) {
+      throw new Error('승인을 기다리는 작업에만 추가 수정 요청을 보낼 수 있습니다.')
+    }
+    if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
+      throw new Error('추가 수정을 이어갈 격리 작업공간을 찾을 수 없습니다.')
+    }
+    this.store.addTaskRevisionRequest(taskId, instruction)
+    await this.run(taskId)
+  }
+
   async retryVerification(taskId: string): Promise<void> {
     if (this.activeRuns.has(taskId)) throw new Error('이미 실행 중인 작업입니다.')
 
@@ -1038,6 +1081,9 @@ export class AgentRunner {
       'awaiting_manual_validation'
     ].includes(task.status)) {
       throw new Error('중단되었거나 사람의 확인을 기다리는 작업만 구현 없이 다시 검증할 수 있습니다.')
+    }
+    if ((task.revisionRequests ?? []).some((request) => !request.appliedAt)) {
+      throw new Error('아직 구현하지 않은 추가 수정 요청이 있습니다. 실행을 눌러 수정부터 이어가세요.')
     }
     if (!task.worktreePath || !(await pathExists(task.worktreePath))) {
       throw new Error('다시 검증할 격리 작업공간을 찾을 수 없습니다.')
@@ -1732,6 +1778,14 @@ export class AgentRunner {
       '## Summary',
       '',
       task.prompt,
+      ...(task.revisionRequests?.length
+        ? [
+            '',
+            '### Approval feedback',
+            '',
+            ...task.revisionRequests.map((request) => `- ${request.instruction}`)
+          ]
+        : []),
       '',
       '## Validation',
       '',
@@ -2259,6 +2313,7 @@ export class AgentRunner {
       [
         `작업 목표: ${task.prompt}`,
         buildTaskTechSpecContext(task),
+        buildTaskRevisionRequestContext(task),
         '당신은 최종 읽기 전용 Reviewer입니다.',
         diffInstruction,
         '기존 테스트와 실행 결과를 함께 검토하세요.',

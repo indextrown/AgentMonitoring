@@ -103,6 +103,8 @@ awaiting_approval/awaiting_manual_validation → running → testing → awaitin
 
 `running → completed` 전이는 금지한다. 자동 검증 작업은 `awaiting_approval`, 수동 검토 작업은 `awaiting_manual_validation`에서 멈추고 사람이 승인해야 한다. PR 방식은 원격 브랜치를 게시한 뒤 `awaiting_merge`에서 멈추고, GitHub 병합과 로컬 fast-forward를 확인한 뒤 `completed`가 된다. 승인 시 원격 기준 브랜치가 앞서 있으면 작업 브랜치를 재배치한 뒤 검증 상태를 `running`으로 되돌리고 선택한 검증과 Reviewer를 다시 실행한다.
 
+승인 대기 중 사람이 새 문제를 발견하면 `task:continue`가 요청을 `tasks.revision_requests_json`에 누적한다. 원본 목표, 승인된 테크스펙과 runtime 계약은 수정하지 않는다. AgentRunner는 같은 worktree와 브랜치를 재사용하고 후속 요청을 Test Designer, Critic, Implementer와 Reviewer에 추가 계약으로 전달한 뒤 고정된 검증 계획을 다시 실행한다. 완료되면 작업은 다시 승인 대기로 돌아간다. 원격 반영 뒤 로컬 동기화만 남은 작업에는 후속 요청을 허용하지 않는다.
+
 ## 역할과 권한
 
 | 역할 | sandbox | 변경 권한 | 책임 |

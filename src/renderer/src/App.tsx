@@ -119,6 +119,7 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'refineTechSpec',
   'recommendVerificationPlan',
   'retryTaskVerification',
+  'continueTask',
   'getStorageOverview',
   'setStoragePolicy',
   'cleanupStorage',
@@ -326,6 +327,7 @@ function duration(task: TaskRecord): string {
 }
 
 function eventIcon(kind: EventKind): typeof Activity {
+  if (kind === 'task_revision_requested') return MessageSquare
   if (kind.includes('finding')) return Bug
   if (kind.includes('note')) return NotebookPen
   if (kind.includes('test')) return kind === 'test_failed' ? AlertTriangle : CheckCircle2
@@ -572,6 +574,18 @@ export function App(): React.JSX.Element {
       .then(() => load(task.projectId))
       .catch((retryError) => setError(String(retryError)))
     void load(task.projectId)
+  }
+
+  const continueTask = async (task: TaskRecord, instruction: string): Promise<void> => {
+    setError(null)
+    setSelectedTask(task)
+    try {
+      await bridge.continueTask({ taskId: task.id, instruction })
+      await load(task.projectId)
+    } catch (continueError) {
+      setError(String(continueError))
+      throw continueError
+    }
   }
 
   const launchTaskSimulator = (task: TaskRecord, destinationId: string): void => {
@@ -951,6 +965,7 @@ export function App(): React.JSX.Element {
           events={snapshot.events.filter((event) => event.taskId === selectedTask.id)}
           onClose={() => setSelectedTask(null)}
           onRun={runTask}
+          onContinue={continueTask}
           onRetryVerification={retryTaskVerification}
           onRegenerateRuntimeScenario={(task) => void regenerateTaskRuntimeScenario(task)}
           canLaunchSimulator={selectedProject?.id === selectedTask.projectId && selectedProject.runtimeAdapter?.kind === 'ios-simulator'}
@@ -3623,7 +3638,7 @@ function SearchModal({
     const normalized = query.trim().toLowerCase()
     const matches = (value: string): boolean => !normalized || value.toLowerCase().includes(normalized)
     return {
-      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.techSpec?.markdown ?? ''} ${task.status}`)).slice(0, 6),
+      tasks: snapshot.tasks.filter((task) => matches(`${task.title} ${task.prompt} ${task.techSpec?.markdown ?? ''} ${(task.revisionRequests ?? []).map((request) => request.instruction).join(' ')} ${task.status}`)).slice(0, 6),
       notes: snapshot.notes.filter((note) => matches(`${note.title} ${note.body}`)).slice(0, 5),
       events: snapshot.events.filter((event) => matches(`${event.actor} ${event.message} ${event.kind}`)).slice(0, 5)
     }
@@ -3656,6 +3671,7 @@ function TaskDrawer({
   evidence,
   onClose,
   onRun,
+  onContinue,
   onRetryVerification,
   onRegenerateRuntimeScenario,
   canLaunchSimulator,
@@ -3672,6 +3688,7 @@ function TaskDrawer({
   evidence: RuntimeEvidenceRecord[]
   onClose: () => void
   onRun: (task: TaskRecord) => void
+  onContinue: (task: TaskRecord, instruction: string) => Promise<void>
   onRetryVerification: (task: TaskRecord) => void
   onRegenerateRuntimeScenario: (task: TaskRecord) => void
   canLaunchSimulator: boolean
@@ -3695,6 +3712,12 @@ function TaskDrawer({
     ? task.runtimeContract.runtimeScenarios.cases.reduce((count, scenario) => count + scenario.steps.reduce((subtotal, step) => subtotal + (step.kind === 'assert' ? step.assertions.length : 0), 0), 0)
     : task.runtimeContract?.runtimeScenario.assertions.length ?? 0
   const awaitingLocalPublicationSync = isAwaitingLocalPublicationSync(task)
+  const hasPendingRevisionRequest = (task.revisionRequests ?? []).some((request) => !request.appliedAt)
+  const canContinueTask = ['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) &&
+    Boolean(task.worktreePath) &&
+    !awaitingLocalPublicationSync
+  const [revisionInstruction, setRevisionInstruction] = useState('')
+  const [revisionSubmitting, setRevisionSubmitting] = useState(false)
   const canLaunchTaskApp = canLaunchSimulator && Boolean(task.worktreePath) && !['queued', 'running', 'testing'].includes(task.status)
   const [taskDestinations, setTaskDestinations] = useState<ProjectRunDestination[]>([])
   const [taskDestinationId, setTaskDestinationId] = useState('')
@@ -3742,12 +3765,66 @@ function TaskDrawer({
     : runtimeReport
       ? RUNTIME_REPORT_OUTCOME_LABELS[runtimeReport.latestOutcome]
       : null
+  const submitRevisionRequest = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+    const instruction = revisionInstruction.trim()
+    if (instruction.length < 5 || revisionSubmitting) return
+    setRevisionSubmitting(true)
+    try {
+      await onContinue(task, instruction)
+      setRevisionInstruction('')
+    } catch {
+      // 상위 컴포넌트가 사용자에게 오류를 표시하며 입력은 재시도를 위해 유지합니다.
+    } finally {
+      setRevisionSubmitting(false)
+    }
+  }
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
       <aside className="task-drawer">
         <header><div><span className={`status-pill ${statusTone(task.status)}`}>{STATUS_LABELS[task.status]}</span><h2>{task.title}</h2><p>WORK-{task.id.slice(0, 8).toUpperCase()} · codex</p></div><button aria-label="닫기" onClick={onClose}><X size={16} /></button></header>
         <div className="task-drawer-scroll">
         <section className="task-contract"><strong>작업 계약</strong><p>{task.prompt}</p><div><span><Clock3 size={12} />최대 구현 {task.maxAttempts}회</span><span><GitBranch size={12} />{task.branchName ?? '실행 전'}</span></div></section>
+        {canContinueTask && (
+          <section className="task-revision-request">
+            <div className="drawer-section-title">
+              <strong>추가 수정 요청</strong>
+              <span>같은 작업에서 계속</span>
+            </div>
+            <p>실행 결과에서 새 문제를 발견했다면 현재 worktree와 브랜치를 유지한 채 수정·검증을 다시 진행할 수 있습니다.</p>
+            {(task.revisionRequests?.length ?? 0) > 0 && (
+              <details>
+                <summary>이전 추가 요청 {task.revisionRequests!.length}개</summary>
+                <ol>
+                  {task.revisionRequests!.map((request) => (
+                    <li key={request.id}>
+                      <span>{request.instruction}</span>
+                      <time>{request.appliedAt ? `${timeAgo(request.appliedAt)} 검증 완료` : '반영 대기'}</time>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+            <form onSubmit={(event) => void submitRevisionRequest(event)}>
+              <label htmlFor={`task-revision-${task.id}`}>추가로 수정할 내용</label>
+              <textarea
+                id={`task-revision-${task.id}`}
+                maxLength={5_000}
+                placeholder="예: 메인 스레드 경고가 발생합니다. 원인을 수정하고 기존 검증을 다시 실행해 주세요."
+                rows={4}
+                value={revisionInstruction}
+                onChange={(event) => setRevisionInstruction(event.target.value)}
+              />
+              <div>
+                <small>같은 브랜치 · 구현 · 기존 검증 · Reviewer · 다시 승인 대기</small>
+                <button className="primary-button" disabled={revisionInstruction.trim().length < 5 || revisionSubmitting} type="submit">
+                  {revisionSubmitting ? <LoaderCircle className="spin" size={13} /> : <MessageSquare size={13} />}
+                  {revisionSubmitting ? '요청 전달 중' : '요청하고 작업 이어가기'}
+                </button>
+              </div>
+            </form>
+          </section>
+        )}
         {task.techSpec && (
           <section className="approved-tech-spec">
             <div className="drawer-section-title"><strong>승인된 테크스펙</strong><span>revision {task.techSpec.revision}</span></div>
@@ -3977,8 +4054,8 @@ function TaskDrawer({
           {task.worktreePath && <button className="secondary-button" onClick={onOpenPath}><FolderOpen size={14} />작업공간 열기</button>}
           {canLaunchSimulator && task.worktreePath && <button className="secondary-button" onClick={onOpenXcode}><SquareTerminal size={14} />Xcode로 열기</button>}
           {task.runtimeContract && ['failed', 'stopped', 'blocked_environment'].includes(task.status) && <button className="secondary-button" onClick={() => onRegenerateRuntimeScenario(task)}><RotateCcw size={14} />검증 시나리오 다시 만들기</button>}
-          {['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}
-          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
+          {(['queued', 'failed', 'stopped', 'blocked_agent'].includes(task.status) || (task.status === 'blocked_environment' && hasPendingRevisionRequest)) && <button className="primary-button" onClick={() => onRun(task)}><Play size={14} />{task.status === 'blocked_environment' && hasPendingRevisionRequest ? '환경 준비 후 수정 계속' : task.status === 'failed' && task.verificationResult?.reviewer.status === 'failed' ? '지적 반영하고 실행' : '실행'}</button>}
+          {task.worktreePath && ['blocked_environment', 'failed', 'stopped'].includes(task.status) && task.verificationResult?.reviewer.status !== 'failed' && !hasPendingRevisionRequest && <button className="primary-button" onClick={() => onRetryVerification(task)}><ShieldCheck size={14} />{task.status === 'blocked_environment' ? '환경 준비 후 다시 검증' : '구현 없이 다시 검증'}</button>}
           {['failed', 'stopped', 'blocked_environment', 'blocked_agent'].includes(task.status) && <button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button>}
           {isActiveTask(task) && <button className="danger-button" onClick={() => onAction(task, 'stop')}><Octagon size={14} />중단</button>}
           {['awaiting_approval', 'awaiting_manual_validation'].includes(task.status) && !awaitingLocalPublicationSync && <><button className="danger-button" onClick={() => onAction(task, 'discard')}><Trash2 size={14} />폐기</button><button className="primary-button" onClick={() => onAction(task, 'approve')}><GitBranch size={14} />{(task.publishStrategy ?? 'pull-request') === 'pull-request' ? '브랜치 올리고 PR 만들기' : directPublishLabel(task)}</button></>}

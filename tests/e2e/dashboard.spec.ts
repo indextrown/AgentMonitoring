@@ -679,6 +679,34 @@ test('explains and confirms publishing an approved task through a PR', async ({ 
   await expect(drawer.getByText('완료', { exact: true })).toBeVisible()
 })
 
+test('continues an approval-pending task with human feedback in the same task', async ({ page }) => {
+  await page.goto('/?workspace=empty')
+  await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('.command-suggestions').getByRole('button', { name: /pnpm test/ }).click()
+  await page.getByRole('button', { name: '첫 작업 만들기' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('작업 제목').fill('승인 후 경고 수정')
+  await dialog.getByLabel('목표와 완료 조건').fill('기능을 구현하고 기존 검증을 통과한 뒤 사람이 작업본을 확인한다.')
+  await dialog.getByRole('button', { name: '검증 계획 확인하고 작업 등록' }).click()
+
+  const drawer = page.locator('.task-drawer')
+  await drawer.getByRole('button', { name: '실행', exact: true }).click()
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  const branch = await drawer.locator('.task-contract span').last().textContent()
+
+  const feedback = '메인 스레드 경고를 제거하고 기존 검증을 다시 실행해 주세요.'
+  await drawer.getByLabel('추가로 수정할 내용').fill(feedback)
+  await drawer.getByRole('button', { name: '요청하고 작업 이어가기' }).click()
+
+  await expect(drawer.getByText('승인 대기', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('이전 추가 요청 1개')).toBeVisible()
+  await drawer.getByText('이전 추가 요청 1개').click()
+  await expect(drawer.getByText(feedback, { exact: true })).toBeVisible()
+  await expect(drawer.locator('.task-contract')).toContainText(branch ?? '')
+  await expect(drawer.locator('.drawer-events')).toContainText('추가 수정 요청:')
+})
+
 test('lets each task publish directly to the remote base branch', async ({ page }) => {
   await page.goto('/?workspace=empty')
   await page.getByRole('button', { name: '실제 Git 프로젝트 추가' }).last().click()
