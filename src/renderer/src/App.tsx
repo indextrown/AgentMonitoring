@@ -64,7 +64,8 @@ import { normalizeRuntimeScenarioEnvironment } from '../../shared/runtime-scenar
 import {
   CODEX_MODEL_ROLES,
   CODEX_MODEL_ROLE_LABELS,
-  RECOMMENDED_CODEX_MODEL_PROFILE
+  RECOMMENDED_CODEX_MODEL_PROFILE,
+  codexExecutionMode
 } from '../../shared/codex-models'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
 import type {
@@ -2521,6 +2522,7 @@ function cloneModelProfile(profile?: CodexModelProfile | null): CodexModelProfil
   return profile
     ? {
         ...profile,
+        executionMode: codexExecutionMode(profile),
         selection: profile.selection ? { ...profile.selection } : null,
         roleSelections: Object.fromEntries(
           Object.entries(profile.roleSelections).map(([role, selection]) => [role, { ...selection }])
@@ -2530,13 +2532,14 @@ function cloneModelProfile(profile?: CodexModelProfile | null): CodexModelProfil
 }
 
 function modelProfileSummary(profile: CodexModelProfile | null | undefined, catalog: CodexModelCatalog | null): string {
+  const execution = codexExecutionMode(profile) === 'root-subagents' ? '루트 + 서브에이전트 · ' : ''
   if (!profile || profile.mode === 'recommended') {
-    if (!catalog) return 'Codex 추천 기본값'
+    if (!catalog) return `${execution}Codex 추천 기본값`
     const selection = catalogDefaultSelection(catalog)
-    return `Codex 추천 · ${selection.model} · ${selection.reasoningEffort}`
+    return `${execution}Codex 추천 · ${selection.model} · ${selection.reasoningEffort}`
   }
-  if (profile.mode === 'single') return `${profile.selection?.model ?? '모델 미선택'} · ${profile.selection?.reasoningEffort ?? '-'}`
-  return `역할별 모델 · 기본 ${profile.selection?.model ?? '미선택'}`
+  if (profile.mode === 'single') return `${execution}${profile.selection?.model ?? '모델 미선택'} · ${profile.selection?.reasoningEffort ?? '-'}`
+  return `${execution}역할별 모델 · 기본 ${profile.selection?.model ?? '미선택'}`
 }
 
 function CodexModelSelectionEditor({
@@ -2610,6 +2613,22 @@ function CodexModelProfileEditor({
   return (
     <div className="codex-model-profile-editor">
       <label>
+        <span>실행 구조</span>
+        <select
+          value={codexExecutionMode(profile)}
+          onChange={(event) => onChange({
+            ...profile,
+            executionMode: event.target.value as NonNullable<CodexModelProfile['executionMode']>
+          })}
+        >
+          <option value="independent">역할별 독립 실행</option>
+          <option value="root-subagents">루트 + 서브에이전트</option>
+        </select>
+        <small>{codexExecutionMode(profile) === 'root-subagents'
+          ? '테크스펙·검증 준비 모델이 루트가 되어 각 역할을 한 명씩 위임합니다. 호출량은 늘지만 루트가 결과 형식을 통제합니다.'
+          : '각 역할을 선택한 모델로 바로 실행합니다. 가장 단순하고 토큰 사용량이 적습니다.'}</small>
+      </label>
+      <label>
         <span>모델 사용 방식</span>
         <select value={profile.mode} onChange={(event) => setMode(event.target.value as CodexModelProfile['mode'])}>
           <option value="recommended">Codex 추천 기본값</option>
@@ -2638,7 +2657,9 @@ function CodexModelProfileEditor({
               allowInherited
               catalog={catalog}
               key={role}
-              label={CODEX_MODEL_ROLE_LABELS[role]}
+              label={codexExecutionMode(profile) === 'root-subagents' && role === 'planning'
+                ? 'Root · 계획·조정'
+                : CODEX_MODEL_ROLE_LABELS[role]}
               selection={profile.roleSelections[role] ?? null}
               onChange={(selection) => {
                 const roleSelections = { ...profile.roleSelections }
@@ -4173,11 +4194,22 @@ function TaskDrawer({
         <section className="task-model-plan">
           <div className="drawer-section-title"><strong>AI 모델</strong><span>{task.modelPlan ? '등록 시 고정됨' : 'Codex 추천 기본값'}</span></div>
           {task.modelPlan ? (
+            <>
+            <div className={`task-model-execution ${codexExecutionMode(task.modelPlan)}`}>
+              <Bot size={14} />
+              <div>
+                <strong>{codexExecutionMode(task.modelPlan) === 'root-subagents' ? '루트 + 서브에이전트' : '역할별 독립 실행'}</strong>
+                <small>{codexExecutionMode(task.modelPlan) === 'root-subagents'
+                  ? `${task.modelPlan.roles.planning.model} 루트가 각 역할을 한 명씩 위임합니다.`
+                  : '각 역할 모델이 해당 단계를 직접 실행합니다.'}</small>
+              </div>
+            </div>
             <div className="task-model-plan-grid">
               {CODEX_MODEL_ROLES.map((role) => (
-                <div key={role}><span>{CODEX_MODEL_ROLE_LABELS[role]}</span><code>{task.modelPlan!.roles[role].model}</code><small>{task.modelPlan!.roles[role].reasoningEffort}</small></div>
+                <div key={role}><span>{codexExecutionMode(task.modelPlan) === 'root-subagents' && role === 'planning' ? 'Root · 계획·조정' : CODEX_MODEL_ROLE_LABELS[role]}</span><code>{task.modelPlan!.roles[role].model}</code><small>{task.modelPlan!.roles[role].reasoningEffort}</small></div>
               ))}
             </div>
+            </>
           ) : <p>이 작업은 모델 고정 기능이 추가되기 전에 만들어져 실행 시점의 Codex 추천 모델을 사용합니다.</p>}
         </section>
         {(canContinueTask || (task.revisionRequests?.length ?? 0) > 0) && (

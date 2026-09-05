@@ -981,6 +981,72 @@ console.log(JSON.stringify({ type: 'turn.completed' }))
     fixture.store.close()
   })
 
+  it('runs hierarchical stages with the planning root and one configured role subagent', async () => {
+    let callsPath = ''
+    const fixture = await createExecutionFixture({
+      codexSource: (directory) => {
+        callsPath = join(directory, 'hierarchical-model-calls.jsonl')
+        return `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs'
+const prompt = process.argv.at(-1) ?? ''
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args: process.argv.slice(2), prompt }) + '\\n')
+const message = prompt.includes('최종 읽기 전용 Reviewer') ? 'VERDICT: PASS' : 'stage complete'
+console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: message } }))
+console.log(JSON.stringify({ type: 'turn.completed' }))
+`
+      },
+      testCommand: null,
+      verificationPlan: {
+        version: 1,
+        mode: 'manual-review',
+        testDesign: 'skip',
+        runtimeSource: 'off'
+      },
+      modelPlan: {
+        version: 1,
+        source: 'task',
+        executionMode: 'root-subagents',
+        resolvedAt: '2026-09-05T00:00:00.000Z',
+        roles: {
+          planning: { model: 'gpt-root', reasoningEffort: 'high' },
+          'test-designer': { model: 'gpt-test-designer', reasoningEffort: 'high' },
+          critic: { model: 'gpt-critic', reasoningEffort: 'high' },
+          implementer: { model: 'gpt-implementer', reasoningEffort: 'medium' },
+          reviewer: { model: 'gpt-reviewer', reasoningEffort: 'xhigh' }
+        }
+      }
+    })
+
+    await fixture.runner.run(fixture.taskId)
+
+    const calls = (await readFile(callsPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as {
+      args: string[]
+      prompt: string
+    })
+    expect(calls).toHaveLength(2)
+    expect(calls[0].args).toEqual(expect.arrayContaining([
+      '--model',
+      'gpt-root',
+      '--config',
+      'model_reasoning_effort="high"',
+      'agents.enabled=true',
+      'agents.max_concurrent_threads_per_session=1',
+      'agents.default_subagent_model="gpt-implementer"',
+      'agents.default_subagent_reasoning_effort="medium"'
+    ]))
+    expect(calls[0].prompt).toContain('Implementer 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.')
+    expect(calls[0].prompt).toContain('다른 쓰기 에이전트를 만들거나 동시에 파일을 수정하지 마세요.')
+    expect(calls[1].args).toEqual(expect.arrayContaining([
+      '--model',
+      'gpt-root',
+      'agents.default_subagent_model="gpt-reviewer"',
+      'agents.default_subagent_reasoning_effort="xhigh"'
+    ]))
+    expect(calls[1].prompt).toContain('Reviewer 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.')
+    expect(calls[1].prompt).toContain('루트 모두 읽기 전용')
+    fixture.store.close()
+  })
+
   it('runs a Simulator-only task without invoking Test Designer or the project test command', async () => {
     let callsPath = ''
     let launchCount = 0

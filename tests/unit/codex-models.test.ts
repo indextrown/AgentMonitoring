@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  codexExecutionMode,
   codexModelArguments,
+  codexSubagentArguments,
   resolveCodexModelPlan
 } from '../../src/shared/codex-models'
 import type { CodexModelCatalog } from '../../src/shared/types'
@@ -39,6 +41,7 @@ describe('Codex model profiles', () => {
   it('freezes the current Codex recommendation into every task role', () => {
     const plan = resolveCodexModelPlan(catalog, null, 'codex-recommended', '2026-09-05T01:00:00.000Z')
     expect(plan.source).toBe('codex-recommended')
+    expect(plan.executionMode).toBe('independent')
     expect(Object.values(plan.roles).every((selection) => selection.model === 'gpt-default')).toBe(true)
     expect(plan.roles.implementer.reasoningEffort).toBe('low')
   })
@@ -47,11 +50,13 @@ describe('Codex model profiles', () => {
     const plan = resolveCodexModelPlan(catalog, {
       version: 1,
       mode: 'role-based',
+      executionMode: 'root-subagents',
       selection: { model: 'gpt-default', reasoningEffort: 'high' },
       roleSelections: { reviewer: { model: 'gpt-review', reasoningEffort: 'xhigh' } }
     }, 'project')
     expect(plan.roles.implementer).toEqual({ model: 'gpt-default', reasoningEffort: 'high' })
     expect(plan.roles.reviewer).toEqual({ model: 'gpt-review', reasoningEffort: 'xhigh' })
+    expect(codexExecutionMode(plan)).toBe('root-subagents')
     expect(() => resolveCodexModelPlan(catalog, {
       version: 1,
       mode: 'single',
@@ -67,5 +72,19 @@ describe('Codex model profiles', () => {
       '--config',
       'model_reasoning_effort="xhigh"'
     ])
+    expect(codexSubagentArguments({ model: 'gpt-review', reasoningEffort: 'xhigh' })).toEqual([
+      '--config',
+      'agents.enabled=true',
+      '--config',
+      'agents.max_concurrent_threads_per_session=1',
+      '--config',
+      'agents.default_subagent_model="gpt-review"',
+      '--config',
+      'agents.default_subagent_reasoning_effort="xhigh"'
+    ])
+  })
+
+  it('treats profiles and tasks saved before orchestration modes as independent runs', () => {
+    expect(codexExecutionMode({})).toBe('independent')
   })
 })

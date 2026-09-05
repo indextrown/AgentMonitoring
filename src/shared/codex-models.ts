@@ -1,5 +1,6 @@
 import type {
   CodexModelCatalog,
+  CodexExecutionMode,
   CodexModelProfile,
   CodexModelRole,
   CodexModelSelection,
@@ -25,6 +26,7 @@ export const CODEX_MODEL_ROLE_LABELS: Record<CodexModelRole, string> = {
 export const RECOMMENDED_CODEX_MODEL_PROFILE: CodexModelProfile = {
   version: 1,
   mode: 'recommended',
+  executionMode: 'independent',
   selection: null,
   roleSelections: {}
 }
@@ -77,7 +79,19 @@ export function resolveCodexModelPlan(
     return [role, { ...selection }]
   })) as CodexResolvedModelPlan['roles']
 
-  return { version: 1, source, roles, resolvedAt }
+  return {
+    version: 1,
+    source,
+    executionMode: configured.executionMode ?? 'independent',
+    roles,
+    resolvedAt
+  }
+}
+
+export function codexExecutionMode(
+  value: Pick<CodexModelProfile, 'executionMode'> | Pick<CodexResolvedModelPlan, 'executionMode'> | null | undefined
+): CodexExecutionMode {
+  return value?.executionMode === 'root-subagents' ? 'root-subagents' : 'independent'
 }
 
 export function codexModelArguments(selection: CodexModelSelection | null | undefined): string[] {
@@ -87,6 +101,19 @@ export function codexModelArguments(selection: CodexModelSelection | null | unde
     selection.model,
     '--config',
     `model_reasoning_effort="${selection.reasoningEffort}"`
+  ]
+}
+
+export function codexSubagentArguments(selection: CodexModelSelection): string[] {
+  return [
+    '--config',
+    'agents.enabled=true',
+    '--config',
+    'agents.max_concurrent_threads_per_session=1',
+    '--config',
+    `agents.default_subagent_model=${JSON.stringify(selection.model)}`,
+    '--config',
+    `agents.default_subagent_reasoning_effort=${JSON.stringify(selection.reasoningEffort)}`
   ]
 }
 

@@ -66,6 +66,7 @@ const codexModelSelectionSchema = z.object({
 const codexModelProfileSchema = z.object({
   version: z.literal(1),
   mode: z.enum(['recommended', 'single', 'role-based']),
+  executionMode: z.enum(['independent', 'root-subagents']).optional(),
   selection: codexModelSelectionSchema.nullable(),
   roleSelections: z.object({
     planning: codexModelSelectionSchema.optional(),

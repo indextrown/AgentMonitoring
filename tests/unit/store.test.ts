@@ -21,6 +21,7 @@ describe('AppStore', () => {
     const modelProfile = {
       version: 1 as const,
       mode: 'role-based' as const,
+      executionMode: 'root-subagents' as const,
       selection: { model: 'gpt-default', reasoningEffort: 'medium' as const },
       roleSelections: { reviewer: { model: 'gpt-review', reasoningEffort: 'high' as const } }
     }
@@ -34,6 +35,7 @@ describe('AppStore', () => {
     const modelPlan = {
       version: 1 as const,
       source: 'project' as const,
+      executionMode: 'root-subagents' as const,
       resolvedAt: '2026-09-05T00:00:00.000Z',
       roles: {
         planning: { model: 'gpt-default', reasoningEffort: 'medium' as const },

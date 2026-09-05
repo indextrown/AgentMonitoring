@@ -76,10 +76,13 @@ export interface CodexModelSelection {
 }
 
 export type CodexModelProfileMode = 'recommended' | 'single' | 'role-based'
+export type CodexExecutionMode = 'independent' | 'root-subagents'
 
 export interface CodexModelProfile {
   version: 1
   mode: CodexModelProfileMode
+  /** 이전 버전에서 저장한 프로필은 역할별 독립 실행으로 해석합니다. */
+  executionMode?: CodexExecutionMode
   selection: CodexModelSelection | null
   roleSelections: Partial<Record<CodexModelRole, CodexModelSelection>>
 }
@@ -87,6 +90,8 @@ export interface CodexModelProfile {
 export interface CodexResolvedModelPlan {
   version: 1
   source: 'codex-recommended' | 'project' | 'task'
+  /** 이전 버전에서 생성한 작업은 역할별 독립 실행으로 해석합니다. */
+  executionMode?: CodexExecutionMode
   roles: Record<CodexModelRole, CodexModelSelection>
   resolvedAt: string
 }

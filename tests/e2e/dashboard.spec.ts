@@ -459,6 +459,8 @@ test('configures project and task-specific Codex models', async ({ page }) => {
 
   const settings = page.locator('.settings-form')
   const profile = settings.locator('.codex-model-profile-editor')
+  await expect(profile.getByLabel('실행 구조')).toHaveValue('independent')
+  await profile.getByLabel('실행 구조').selectOption('root-subagents')
   await expect(profile.getByLabel('모델 사용 방식')).toHaveValue('recommended')
   await profile.getByLabel('모델 사용 방식').selectOption('role-based')
   await profile.locator('.codex-role-models .codex-model-selection').nth(3).getByLabel('Implementer').selectOption('gpt-5.6-terra')
@@ -468,7 +470,7 @@ test('configures project and task-specific Codex models', async ({ page }) => {
   await page.getByRole('button', { name: /대시보드/ }).click()
   await page.getByRole('button', { name: '새 작업' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog.getByText(/프로젝트 설정 사용 · 역할별 모델/)).toBeVisible()
+  await expect(dialog.getByText(/프로젝트 설정 사용 · 루트 \+ 서브에이전트 · 역할별 모델/)).toBeVisible()
   await dialog.getByLabel('이 작업만 AI 모델 변경').check()
   await expect(dialog.locator('.task-model-selector .codex-model-profile-editor')).toBeVisible()
 })

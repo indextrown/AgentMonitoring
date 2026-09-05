@@ -23,7 +23,13 @@ import type {
   VerificationStepKey,
   VerificationStepStatus
 } from '../../src/shared/types'
-import { codexModelArguments, codexModelLabel } from '../../src/shared/codex-models'
+import {
+  CODEX_MODEL_ROLE_LABELS,
+  codexExecutionMode,
+  codexModelArguments,
+  codexModelLabel,
+  codexSubagentArguments
+} from '../../src/shared/codex-models'
 import {
   createVerificationResult,
   isActiveTask,
@@ -327,6 +333,28 @@ export function codexUsageLimitMessage(output: string): string | null {
   return retryAt
     ? `Codex 사용 한도에 도달했습니다. ${retryAt} 이후 실행을 눌러 이어서 작업하세요.`
     : 'Codex 사용 한도에 도달했습니다. 한도가 초기화된 뒤 실행을 눌러 이어서 작업하세요.'
+}
+
+export function buildDelegatedStagePrompt(
+  actor: CodexModelRole,
+  selection: NonNullable<TaskRecord['modelPlan']>['roles'][CodexModelRole],
+  sandbox: 'read-only' | 'workspace-write',
+  prompt: string
+): string {
+  const role = CODEX_MODEL_ROLE_LABELS[actor]
+  const writePolicy = sandbox === 'workspace-write'
+    ? '서브에이전트 한 명만 파일을 수정할 수 있습니다. 다른 쓰기 에이전트를 만들거나 동시에 파일을 수정하지 마세요.'
+    : '서브에이전트와 루트 모두 읽기 전용으로 조사하고 파일을 수정하지 마세요.'
+  return [
+    '당신은 AgentMonitoring의 루트 오케스트레이터입니다.',
+    `아래 작업은 직접 수행하지 말고 ${role} 역할의 Codex 서브에이전트를 정확히 한 명 생성해 위임하세요.`,
+    `서브에이전트는 model=${selection.model}, reasoning_effort=${selection.reasoningEffort} 설정을 사용해야 합니다. 실행 기본값에도 같은 설정이 지정되어 있습니다.`,
+    writePolicy,
+    '서브에이전트가 끝날 때까지 기다린 뒤, 서브에이전트의 최종 응답을 의미나 형식을 바꾸지 말고 그대로 최종 응답으로 반환하세요.',
+    '서브에이전트를 만들 수 없으면 작업을 대신 수행하지 말고 `SUBAGENT_FAILURE:`로 시작하는 이유를 반환하세요.',
+    `--- ${role}에게 전달할 작업 ---`,
+    prompt
+  ].join('\n\n')
 }
 
 function normalizeProjectTestDiagnosticLine(line: string): string {
@@ -2724,29 +2752,38 @@ export class AgentRunner {
   private async runCodexStage(
     task: TaskRecord,
     cwd: string,
-    actor: string,
+    actor: CodexModelRole,
     sandbox: 'read-only' | 'workspace-write',
     prompt: string,
     imagePaths: string[] = []
   ): Promise<ProcessResult> {
     const control = this.activeRuns.get(task.id)
     if (!control || control.stopped) throw new StoppedError()
-    const model = task.modelPlan?.roles[actor as CodexModelRole]
-    this.emit(task, 'agent', actor, `${actor} 단계 시작 · ${codexModelLabel(model)}`)
+    const roleModel = task.modelPlan?.roles[actor]
+    const hierarchical = Boolean(task.modelPlan) && codexExecutionMode(task.modelPlan) === 'root-subagents'
+    const rootModel = hierarchical ? task.modelPlan?.roles.planning : roleModel
+    const delegatedPrompt = hierarchical && roleModel
+      ? buildDelegatedStagePrompt(actor, roleModel, sandbox, prompt)
+      : prompt
+    const executionLabel = hierarchical && roleModel
+      ? `루트 ${codexModelLabel(rootModel)} → ${CODEX_MODEL_ROLE_LABELS[actor]} ${codexModelLabel(roleModel)}`
+      : codexModelLabel(roleModel)
+    this.emit(task, 'agent', actor, `${actor} 단계 시작 · ${executionLabel}`)
 
     const result = await this.runProcess(
       this.codexCommand,
       [
         ...(this.codexHome ? CODEX_AUTH_ARGUMENTS : []),
         'exec',
-        ...codexModelArguments(model),
+        ...codexModelArguments(rootModel),
+        ...(hierarchical && roleModel ? codexSubagentArguments(roleModel) : []),
         '--json',
         ...imagePaths.flatMap((path) => ['--image', path]),
         '--sandbox',
         sandbox,
         '--cd',
         cwd,
-        prompt
+        delegatedPrompt
       ],
       cwd,
       control,
@@ -2780,7 +2817,10 @@ export class AgentRunner {
       }
       throw new Error(`${actor} 단계가 종료 코드 ${result.code}로 실패했습니다.\n${result.output.slice(-2_000)}`)
     }
-    this.emit(task, 'agent', actor, `${actor} 단계 완료 · ${codexModelLabel(model)}`)
+    if (hierarchical && /^SUBAGENT_FAILURE:/m.test(result.finalMessage)) {
+      throw new Error(`${actor} 서브에이전트 위임에 실패했습니다.\n${result.finalMessage.slice(-2_000)}`)
+    }
+    this.emit(task, 'agent', actor, `${actor} 단계 완료 · ${executionLabel}`)
     return result
   }
 
