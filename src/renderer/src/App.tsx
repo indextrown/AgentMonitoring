@@ -68,6 +68,7 @@ import {
   codexExecutionMode
 } from '../../shared/codex-models'
 import { AGENT_MONITORING_BRIDGE_VERSION } from '../../shared/types'
+import { TechSpecLiveProgress, useTechSpecPlanning } from './tech-spec-planning'
 import type {
   AgentMonitoringBridge,
   CodexAuthStatus,
@@ -131,6 +132,9 @@ const requiredBridgeMethods: Array<keyof AgentMonitoringBridge> = [
   'deleteProjectRuntimeEnvironment',
   'generateTechSpec',
   'refineTechSpec',
+  'cancelTechSpec',
+  'releaseTechSpecDraft',
+  'onTechSpecProgress',
   'recommendVerificationPlan',
   'retryTaskVerification',
   'continueTask',
@@ -3268,7 +3272,8 @@ function TaskModal({
   const [techSpecApproved, setTechSpecApproved] = useState(false)
   const [techSpecSource, setTechSpecSource] = useState<string | null>(null)
   const [techSpecFeedback, setTechSpecFeedback] = useState('')
-  const [techSpecLoading, setTechSpecLoading] = useState(false)
+  const planning = useTechSpecPlanning(project.id, bridge)
+  const techSpecLoading = planning.loading
   const [techSpecError, setTechSpecError] = useState<string | null>(null)
   const [maxAttempts, setMaxAttempts] = useState(3)
   const [publishStrategy, setPublishStrategy] = useState<PublishStrategy>(project.publishStrategy ?? 'pull-request')
@@ -3326,10 +3331,12 @@ function TaskModal({
   }
 
   const generateTechSpec = async (): Promise<void> => {
-    setTechSpecLoading(true)
+    setTechSpecApproved(false)
+    invalidateDownstreamPlanning()
     setTechSpecError(null)
     try {
-      const result = await onGenerateTechSpec({ projectId: project.id, title, prompt, modelProfile: taskModelProfile })
+      const result = await planning.run((ids) => onGenerateTechSpec({ ...ids, projectId: project.id, title, prompt, modelProfile: taskModelProfile }))
+      if (!result) return
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
       setTechSpecApproved(false)
@@ -3337,17 +3344,17 @@ function TaskModal({
       invalidateDownstreamPlanning()
     } catch (error) {
       setTechSpecError(String(error).replace(/^Error:\s*/, ''))
-    } finally {
-      setTechSpecLoading(false)
     }
   }
 
   const refineTechSpec = async (): Promise<void> => {
     if (!techSpec || techSpecFeedback.trim().length < 3) return
-    setTechSpecLoading(true)
+    setTechSpecApproved(false)
+    invalidateDownstreamPlanning()
     setTechSpecError(null)
     try {
-      const result = await onRefineTechSpec({
+      const result = await planning.run((ids) => onRefineTechSpec({
+        ...ids,
         projectId: project.id,
         title,
         prompt,
@@ -3360,7 +3367,8 @@ function TaskModal({
         },
         feedback: techSpecFeedback,
         modelProfile: taskModelProfile
-      })
+      }))
+      if (!result) return
       setTechSpec(result)
       setTechSpecSource(requirementsKey)
       setTechSpecApproved(false)
@@ -3368,8 +3376,6 @@ function TaskModal({
       invalidateDownstreamPlanning()
     } catch (error) {
       setTechSpecError(String(error).replace(/^Error:\s*/, ''))
-    } finally {
-      setTechSpecLoading(false)
     }
   }
 
@@ -3540,6 +3546,7 @@ function TaskModal({
             <input
               type="checkbox"
               checked={useTechSpec}
+              disabled={techSpecLoading}
               onChange={(event) => {
                 setUseTechSpec(event.target.checked)
                 setTechSpecApproved(false)
@@ -3566,10 +3573,15 @@ function TaskModal({
                 onClick={() => void generateTechSpec()}
               >
                 {techSpecLoading ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
-                {techSpecLoading ? '저장소 분석 중' : '테크스펙 만들기'}
+                {techSpecLoading ? '테크스펙 생성 중' : '테크스펙 만들기'}
               </button>
             </div>
           )}
+          {useTechSpec && <TechSpecLiveProgress planning={planning} />}
+          {useTechSpec && planning.progress && !techSpecLoading && <div className="tech-spec-reset">
+            <button className="text-button" type="button" onClick={() => void planning.reset().catch((error) => setTechSpecError(String(error)))}>새 대화로 시작</button>
+            <small>현재 문서는 유지하고 다음 요청부터 새 대화를 사용합니다. 화면을 닫으면 계획 대화가 종료됩니다.</small>
+          </div>}
           {useTechSpec && techSpec && (
             <div className="tech-spec-review">
               <header>
@@ -3588,6 +3600,7 @@ function TaskModal({
                 <span>테크스펙 요약</span>
                 <input
                   aria-label="테크스펙 요약"
+                  disabled={techSpecLoading}
                   maxLength={500}
                   value={techSpec.summary}
                   onChange={(event) => {
@@ -3601,6 +3614,7 @@ function TaskModal({
                 <span>테크스펙 본문</span>
                 <textarea
                   aria-label="테크스펙 본문"
+                  disabled={techSpecLoading}
                   minLength={100}
                   maxLength={30000}
                   rows={15}
@@ -3623,6 +3637,7 @@ function TaskModal({
                   <span>AI에게 개선 요청</span>
                   <textarea
                     aria-label="테크스펙 개선 의견"
+                    disabled={techSpecLoading}
                     rows={3}
                     maxLength={5000}
                     value={techSpecFeedback}

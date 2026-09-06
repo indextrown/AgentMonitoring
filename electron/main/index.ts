@@ -183,7 +183,9 @@ const generateRuntimeScenarioSchema = z.object({
 
 const recommendVerificationPlanSchema = generateRuntimeScenarioSchema
 
-const generateTechSpecSchema = generateRuntimeScenarioSchema.omit({ techSpec: true })
+const generateTechSpecSchema = generateRuntimeScenarioSchema.omit({ techSpec: true }).extend({
+  draftId: z.string().uuid(), requestId: z.string().uuid()
+})
 
 const refineTechSpecSchema = generateTechSpecSchema.extend({
   current: techSpecDraftSchema,
@@ -252,6 +254,9 @@ let codexAuth: CodexAuthManager | null = null
 let scenarioGenerator: RuntimeScenarioGenerator | null = null
 let verificationPlanRecommender: VerificationPlanRecommender | null = null
 let techSpecGenerator: TechSpecGenerator | null = null
+const planningRequests = new Map<string, { owner: number; draftKey: string; controller: AbortController }>()
+let planningCleanup: Promise<void> | null = null
+let signingOut = false
 let shutdownStarted = false
 const smokeTest = process.env.AGENT_MONITORING_SMOKE_TEST === '1'
 
@@ -344,10 +349,21 @@ async function resolveModelPlan(
   return resolveCodexModelPlan(await requireCodexAuth().models(), profile, source)
 }
 
+function clearPlanningConversations(reason: string): Promise<void> {
+  for (const request of planningRequests.values()) request.controller.abort(new Error(reason))
+  if (planningCleanup) return planningCleanup
+  const cleanup = (techSpecGenerator?.dispose() ?? Promise.resolve()).finally(() => {
+    if (planningCleanup === cleanup) planningCleanup = null
+  })
+  planningCleanup = cleanup
+  return cleanup
+}
+
 async function shutdownApplication(): Promise<void> {
   const activeRunner = runner
   const activeProjectSimulator = projectSimulator
   const activeCodexAuth = codexAuth
+  const activeTechSpecGenerator = techSpecGenerator
   const activeStore = store
   runner = null
   projectSimulator = null
@@ -360,6 +376,12 @@ async function shutdownApplication(): Promise<void> {
 
   try {
     await shutdownResources({
+      planning: {
+        dispose: async () => {
+          for (const request of planningRequests.values()) request.controller.abort(new Error('앱을 종료했습니다.'))
+          await activeTechSpecGenerator?.dispose()
+        }
+      },
       projectSimulator: activeProjectSimulator,
       runner: activeRunner,
       codexAuth: activeCodexAuth,
@@ -390,6 +412,12 @@ async function createWindow(): Promise<void> {
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+  mainWindow.webContents.once('destroyed', () => {
+    void clearPlanningConversations('작업 등록 창이 닫혔습니다.').catch(() => undefined)
+  })
+  mainWindow.webContents.on('render-process-gone', () => {
+    void clearPlanningConversations('작업 등록 화면 연결이 끊어졌습니다.').catch(() => undefined)
+  })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
 
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
@@ -416,7 +444,14 @@ function registerIpc(): void {
   )
 
   ipcMain.handle('codex-auth:cancel', () => requireCodexAuth().cancelLogin())
-  ipcMain.handle('codex-auth:logout', () => requireCodexAuth().logout())
+  ipcMain.handle('codex-auth:logout', async () => {
+    if (signingOut) throw new Error('로그아웃 중입니다.')
+    signingOut = true
+    try {
+      await clearPlanningConversations('로그아웃하여 계획 대화를 종료했습니다.')
+      return await requireCodexAuth().logout()
+    } finally { signingOut = false }
+  })
   ipcMain.handle('codex-models:list', (_event, refresh = false) =>
     requireCodexAuth().models(z.boolean().parse(refresh))
   )
@@ -659,34 +694,51 @@ function registerIpc(): void {
     return { project, discovery }
   })
 
-  ipcMain.handle('tech-spec:generate', async (_event, rawInput: GenerateTechSpecInput) => {
-    const input = generateTechSpecSchema.parse(rawInput)
-    const auth = await requireCodexAuth().status()
-    if (auth.state !== 'signed_in') throw new Error('테크스펙을 만들려면 먼저 Codex에 로그인하세요.')
-    const project = requireStore().getProject(input.projectId)
-    const modelPlan = await resolveModelPlan(project, input.modelProfile)
-    return requireTechSpecGenerator().generate({
-      projectPath: project.path,
-      title: input.title,
-      prompt: input.prompt,
-      model: modelPlan.roles.planning
-    })
+  const planTechSpec = async (event: Electron.IpcMainInvokeEvent, rawInput: GenerateTechSpecInput | RefineTechSpecInput, refine: boolean) => {
+    if (signingOut || planningCleanup) throw new Error('이전 계획 대화를 정리 중입니다. 잠시 후 다시 시도해 주세요.')
+    const input = refine ? refineTechSpecSchema.parse(rawInput) : generateTechSpecSchema.parse(rawInput)
+    const draftKey = `${event.sender.id}:${input.projectId}:${input.draftId}`
+    if (planningRequests.has(input.requestId) || [...planningRequests.values()].some((request) => request.draftKey === draftKey)) {
+      throw new Error('이 초안의 계획 요청이 이미 진행 중입니다.')
+    }
+    const generator = requireTechSpecGenerator()
+    const controller = new AbortController()
+    planningRequests.set(input.requestId, { owner: event.sender.id, draftKey, controller })
+    const destroyed = (): void => {
+      controller.abort(new Error('작업 등록 화면이 닫혔습니다.'))
+      void generator.release(draftKey)
+    }
+    event.sender.once('destroyed', destroyed)
+    try {
+      const auth = await requireCodexAuth().status()
+      controller.signal.throwIfAborted()
+      if (auth.state !== 'signed_in') throw new Error('테크스펙을 만들려면 먼저 Codex에 로그인하세요.')
+      const project = requireStore().getProject(input.projectId)
+      const modelPlan = await resolveModelPlan(project, input.modelProfile)
+      controller.signal.throwIfAborted()
+      const options = {
+        ...input, draftKey, projectPath: project.path, model: modelPlan.roles.planning, signal: controller.signal,
+        onProgress: (progress: import('../../src/shared/types').TechSpecProgress) => {
+          if (!event.sender.isDestroyed() && !controller.signal.aborted) event.sender.send('tech-spec:progress', progress)
+        }
+      }
+      return refine ? await generator.refine({ ...options, ...refineTechSpecSchema.parse(rawInput) }) : await generator.generate(options)
+    } finally {
+      planningRequests.delete(input.requestId)
+      event.sender.removeListener('destroyed', destroyed)
+    }
+  }
+  ipcMain.handle('tech-spec:generate', (event, input: GenerateTechSpecInput) => planTechSpec(event, input, false))
+  ipcMain.handle('tech-spec:refine', (event, input: RefineTechSpecInput) => planTechSpec(event, input, true))
+  ipcMain.handle('tech-spec:cancel', (event, rawId: string) => {
+    const request = planningRequests.get(z.string().uuid().parse(rawId))
+    if (request?.owner === event.sender.id) request.controller.abort(new Error('테크스펙 생성을 취소했습니다.'))
   })
-
-  ipcMain.handle('tech-spec:refine', async (_event, rawInput: RefineTechSpecInput) => {
-    const input = refineTechSpecSchema.parse(rawInput)
-    const auth = await requireCodexAuth().status()
-    if (auth.state !== 'signed_in') throw new Error('테크스펙을 개선하려면 먼저 Codex에 로그인하세요.')
-    const project = requireStore().getProject(input.projectId)
-    const modelPlan = await resolveModelPlan(project, input.modelProfile)
-    return requireTechSpecGenerator().refine({
-      projectPath: project.path,
-      title: input.title,
-      prompt: input.prompt,
-      current: input.current,
-      feedback: input.feedback,
-      model: modelPlan.roles.planning
-    })
+  ipcMain.handle('tech-spec:release', async (event, raw: unknown) => {
+    const input = z.object({ projectId: z.string().uuid(), draftId: z.string().uuid() }).strict().parse(raw)
+    const key = `${event.sender.id}:${input.projectId}:${input.draftId}`
+    for (const request of planningRequests.values()) if (request.draftKey === key) request.controller.abort(new Error('계획 대화를 종료했습니다.'))
+    await techSpecGenerator?.release(key)
   })
 
   ipcMain.handle('runtime-scenario:generate', async (_event, rawInput: GenerateRuntimeScenarioInput) => {

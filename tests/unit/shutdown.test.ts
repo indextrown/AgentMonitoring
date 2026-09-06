@@ -39,4 +39,16 @@ describe('shutdownResources', () => {
     await expect(shutdown).rejects.toThrow('runner failure')
     expect(order).toEqual(['runner', 'auth', 'store'])
   })
+
+  it('cleans up the remaining resources even when planning disposal fails', async () => {
+    const order: string[] = []
+    await expect(shutdownResources({
+      planning: { dispose: async () => { order.push('planning'); throw new Error('planning failure') } },
+      projectSimulator: { dispose: async () => { order.push('simulator') } },
+      runner: { dispose: async () => { order.push('runner') } },
+      codexAuth: { dispose: async () => { order.push('auth') } },
+      store: { close: () => { order.push('store') } }
+    })).rejects.toThrow('planning failure')
+    expect(order).toEqual(['planning', 'simulator', 'runner', 'auth', 'store'])
+  })
 })

@@ -15,13 +15,15 @@ interface DisposableProjectSimulator {
 }
 
 export async function shutdownResources(resources: {
+  planning?: DisposableRunner | null
   projectSimulator?: DisposableProjectSimulator | null
   runner: DisposableRunner | null
   codexAuth: DisposableAuth | null
   store: ClosableStore | null
 }): Promise<void> {
   try {
-    await resources.projectSimulator?.dispose()
+    try { if (resources.planning) await resources.planning.dispose() }
+    finally { await resources.projectSimulator?.dispose() }
   } finally {
     try {
       await resources.runner?.dispose()

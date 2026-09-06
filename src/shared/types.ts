@@ -842,6 +842,8 @@ export interface RecommendVerificationPlanInput {
 
 export interface GenerateTechSpecInput {
   projectId: string
+  draftId: string
+  requestId: string
   title: string
   prompt: string
   modelProfile?: CodexModelProfile
@@ -852,7 +854,22 @@ export interface RefineTechSpecInput extends GenerateTechSpecInput {
   feedback: string
 }
 
-export const AGENT_MONITORING_BRIDGE_VERSION = 20
+export interface TechSpecProgress {
+  requestId: string
+  stage: 'preparing' | 'investigating' | 'writing' | 'validating'
+  message: string
+  startedAt: number
+  updatedAt: number
+  preview: string
+  model: string
+  effort: string
+  reusedConversation: boolean
+  reusedRepository: boolean
+  toolCalls?: number
+  draftingRequested?: boolean
+}
+
+export const AGENT_MONITORING_BRIDGE_VERSION = 21
 
 export interface AgentMonitoringBridge {
   apiVersion: number
@@ -892,6 +909,9 @@ export interface AgentMonitoringBridge {
   autoConfigureProjectRuntime: (projectId: string) => Promise<AutoConfigureProjectRuntimeResult>
   generateTechSpec: (input: GenerateTechSpecInput) => Promise<GeneratedTechSpec>
   refineTechSpec: (input: RefineTechSpecInput) => Promise<GeneratedTechSpec>
+  cancelTechSpec: (requestId: string) => Promise<void>
+  releaseTechSpecDraft: (projectId: string, draftId: string) => Promise<void>
+  onTechSpecProgress: (listener: (progress: TechSpecProgress) => void) => () => void
   generateRuntimeScenario: (input: GenerateRuntimeScenarioInput) => Promise<GeneratedRuntimeScenario>
   recommendVerificationPlan: (
     input: RecommendVerificationPlanInput
