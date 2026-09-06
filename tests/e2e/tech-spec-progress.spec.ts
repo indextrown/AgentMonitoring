@@ -12,6 +12,8 @@ test('streams a non-approvable draft, resumes feedback, cancels safely and reset
   await dialog.getByRole('button', { name: '테크스펙 만들기', exact: true }).click()
   const progress = dialog.getByRole('region', { name: '테크스펙 생성 진행 상황' })
   await expect(progress).toContainText('새 계획 대화')
+  await expect(progress).toContainText('조사 도구 호출')
+  await expect(progress).toContainText('조사 45초 또는 도구 호출 8회')
   const panel = await progress.boundingBox()
   const cancel = await dialog.getByRole('button', { name: '생성 취소', exact: true }).boundingBox()
   expect(panel).not.toBeNull()

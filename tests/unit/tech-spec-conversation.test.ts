@@ -8,6 +8,7 @@ import { TechSpecGenerator } from '../../electron/main/tech-spec-generator'
 import { TechSpecConversations, markdownPreview } from '../../electron/main/tech-spec-conversation'
 import { PlanningRepositoryContext } from '../../electron/main/planning-repository-context'
 import type { TechSpecProgress } from '../../src/shared/types'
+import { PlanningDiagnostics } from '../../electron/main/planning-diagnostics'
 
 const exec = promisify(execFile)
 const directories: string[] = []
@@ -133,8 +134,100 @@ describe('technical spec planning conversations', () => {
     const { input, command, codexHome, calls } = await fixture()
     const service = new TechSpecConversations(command, codexHome, 1_500)
     generators.push(service)
-    await expect(service.run({ ...input, instructions: '[[slow]]', requirements: 'timeout', outputSchema: {} })).rejects.toThrow('3분')
+    await expect(service.run({ ...input, instructions: '[[slow]]', requirements: 'timeout', outputSchema: {} })).rejects.toThrow('전체 제한')
     expect((await calls()).some((call) => call.method === 'turn/interrupt')).toBe(true)
+  })
+
+  it.each(['[[research]]', '[[delay-research]]'])('requests an early draft once in the same turn for %s', async (instructions) => {
+    const { input, command, codexHome, calls } = await fixture()
+    const service = new TechSpecConversations(command, codexHome, 3_000, 60_000, { researchMs: 80 })
+    generators.push(service)
+    const events: TechSpecProgress[] = []
+    const result = await service.run({ ...input, instructions, requirements: 'Feature', outputSchema: {}, onProgress: (p) => events.push(p) })
+    expect(JSON.parse(result).markdown).toContain('목표')
+    const records = await calls()
+    expect(records.filter((call) => call.method === 'turn/start')).toHaveLength(1)
+    const steers = records.filter((call) => call.method === 'turn/steer')
+    expect(steers).toHaveLength(1)
+    expect(steers[0].params.expectedTurnId).toBe('turn-1')
+    expect(steers[0].params.input[0].text).toContain('요구사항을 삭제하지 마세요')
+    expect(events.some((p) => p.draftingRequested)).toBe(true)
+  })
+
+  it('distinguishes an inactive provider from a wall timeout and interrupts it', async () => {
+    const { input, command, codexHome, calls } = await fixture()
+    const service = new TechSpecConversations(command, codexHome, 3_000, 60_000, { researchMs: 40, inactiveMs: 100 })
+    generators.push(service)
+    await expect(service.run({ ...input, instructions: '[[slow]]', requirements: '', outputSchema: {} })).rejects.toMatchObject({ category: 'inactive' })
+    const records = await calls()
+    expect(records.filter((call) => call.method === 'turn/start')).toHaveLength(1)
+    expect(records.some((call) => call.method === 'turn/interrupt')).toBe(true)
+  })
+
+  it('keeps the wall deadline despite continuous reasoning and never exposes reasoning', async () => {
+    const { input, command, codexHome } = await fixture()
+    const events: TechSpecProgress[] = []
+    const service = new TechSpecConversations(command, codexHome, 1_000, 60_000, { researchMs: 30, inactiveMs: 100 })
+    generators.push(service)
+    await expect(service.run({ ...input, instructions: '[[heartbeat]]', requirements: '', outputSchema: {}, onProgress: (p) => events.push(p) })).rejects.toMatchObject({ category: 'timeout' })
+    expect(JSON.stringify(events)).not.toContain('PRIVATE REASONING')
+    expect(events.at(-1)!.updatedAt).toBeGreaterThan(events[0].updatedAt)
+  })
+
+  it('does not steer while Markdown is already streaming', async () => {
+    const { input, command, codexHome, calls } = await fixture()
+    const service = new TechSpecConversations(command, codexHome, 1_000, 60_000, { researchMs: 30 })
+    generators.push(service)
+    await expect(service.run({ ...input, instructions: '[[writing]]', requirements: '', outputSchema: {} })).rejects.toThrow('전체 제한')
+    expect((await calls()).some((call) => call.method === 'turn/steer')).toBe(false)
+  })
+
+  it('does not queue another answer when research finished but visible Markdown has not arrived', async () => {
+    const { input, command, codexHome, calls } = await fixture()
+    const service = new TechSpecConversations(command, codexHome, 3_000, 60_000, { researchMs: 30 })
+    generators.push(service)
+    const result = await service.run({ ...input, instructions: '[[completed-research]]', requirements: '', outputSchema: {} })
+    expect(JSON.parse(result).markdown).toContain('목표')
+    expect((await calls()).some((call) => call.method === 'turn/steer')).toBe(false)
+  })
+
+  it('reports rejected steering without a duplicate AI turn or unhandled rejection', async () => {
+    const { input, command, codexHome, calls } = await fixture()
+    const service = new TechSpecConversations(command, codexHome, 1_000, 60_000, { researchMs: 30 })
+    generators.push(service)
+    const events: TechSpecProgress[] = []
+    await expect(service.run({ ...input, instructions: '[[steer-error]]', requirements: '', outputSchema: {}, onProgress: (p) => events.push(p) })).rejects.toThrow('전체 제한')
+    expect(events.some((p) => p.message.includes('전달하지 못했습니다'))).toBe(true)
+    expect((await calls()).filter((call) => call.method === 'turn/start')).toHaveLength(1)
+  })
+
+  it('records valid and invalid generation outcomes without requirements, paths or response bodies', async () => {
+    const { generator, input, codexHome } = await fixture()
+    await generator.generate({ ...input, prompt: 'PRIVATE REQUIREMENT' })
+    await expect(generator.generate({ ...input, prompt: '[[bad-json]] PRIVATE REQUIREMENT' })).rejects.toThrow('요청 ID')
+    const content = await readFile(join(codexHome, '..', 'planning-diagnostics', 'tech-spec.jsonl'), 'utf8')
+    const records = content.trim().split('\n').map((line) => JSON.parse(line))
+    expect(records.map((record) => record.outcome)).toEqual(['completed', 'invalid-output'])
+    expect(records[0].toolCalls).toBe(1)
+    expect(records[1].stage).toBe('validating')
+    expect(content).not.toContain('PRIVATE')
+    expect(content).not.toContain(input.projectPath)
+    expect(content).not.toContain('요구사항과 기존 구조')
+  })
+
+  it('retains only the latest 50 diagnostic records and ignores extra payload fields', async () => {
+    const { codexHome } = await fixture()
+    const diagnostics = new PlanningDiagnostics(codexHome)
+    await Promise.all(Array.from({ length: 55 }, (_, i) => diagnostics.record({
+      requestId: `request-${i}`, startedAt: i, durationMs: 100, stage: 'writing', outcome: 'completed', toolCalls: 2,
+      draftingRequested: true, firstPreviewMs: 50, reusedConversation: false, reusedRepository: false,
+      ...{ prompt: 'PRIVATE PROMPT', preview: 'PRIVATE BODY' }
+    })))
+    const content = await readFile(join(codexHome, 'tech-spec.jsonl'), 'utf8')
+    const records = content.trim().split('\n').map((line) => JSON.parse(line))
+    expect(records).toHaveLength(50)
+    expect(records[0].requestId).toBe('request-5')
+    expect(content).not.toContain('PRIVATE')
   })
 
   it('invalidates cached metadata on edits, additions, staged changes, branch switches and commits', async () => {

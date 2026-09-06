@@ -865,6 +865,8 @@ export interface TechSpecProgress {
   effort: string
   reusedConversation: boolean
   reusedRepository: boolean
+  toolCalls?: number
+  draftingRequested?: boolean
 }
 
 export const AGENT_MONITORING_BRIDGE_VERSION = 21

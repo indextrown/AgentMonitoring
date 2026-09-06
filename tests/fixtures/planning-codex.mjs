@@ -20,24 +20,49 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   } else if (message.method === 'turn/start') {
     const turnId = `turn-${++turnCount}`
     const threadId = params.threadId
-    active = { threadId, turnId }
     const emit = (method, value) => send({ method, params: { threadId, turnId, ...value } })
     const instructions = params.input[0].text
+    const payload = { summary: '기능 설계', markdown: '# 목표\n\n' + '요구사항과 기존 구조를 확인해 기능 및 검증 전략을 설계합니다.\n'.repeat(5), openQuestions: [], changeSummary: '검증 기준을 정리했습니다.' }
+    const text = instructions.includes('[[bad-json]]') ? 'not json' : JSON.stringify(payload)
+    const complete = () => {
+      emit('item/completed', { item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text } })
+      emit('turn/completed', { turn: { id: turnId, status: 'completed', items: [] } })
+    }
+    active = { threadId, turnId, instructions, complete }
     // Exercise events arriving before the RPC response.
     emit('item/started', { item: { id: 'command', type: 'commandExecution', commandActions: [{ path: 'Feature.swift' }] } })
     send({ id: message.id, result: { turn: { id: turnId } } })
     if (instructions.includes('[[disconnect]]')) { process.exit(1); return }
     if (instructions.includes('[[slow]]')) return
-    const payload = { summary: '기능 설계', markdown: '# 목표\n\n' + '요구사항과 기존 구조를 확인해 기능 및 검증 전략을 설계합니다.\n'.repeat(5), openQuestions: [], changeSummary: '검증 기준을 정리했습니다.' }
-    const text = instructions.includes('[[bad-json]]') ? 'not json' : JSON.stringify(payload)
+    if (instructions.includes('[[research]]')) {
+      for (let i = 0; i < 12; i++) emit('item/started', { item: { id: `tool-${i}`, type: 'commandExecution', commandActions: [] } })
+      return
+    }
+    if (instructions.includes('[[delay-research]]') || instructions.includes('[[steer-error]]')) return
+    if (instructions.includes('[[completed-research]]')) {
+      emit('item/completed', { item: { id: 'command', type: 'commandExecution' } })
+      setTimeout(complete, 150)
+      return
+    }
+    if (instructions.includes('[[heartbeat]]')) {
+      setInterval(() => emit('item/reasoning/textDelta', { delta: 'PRIVATE REASONING' }), 10)
+      return
+    }
     const middle = Math.floor(text.length / 2)
     emit('item/agentMessage/delta', { itemId: 'answer', delta: text.slice(0, middle) })
+    if (instructions.includes('[[writing]]')) return
     setTimeout(() => {
       if (instructions.includes('[[empty]]')) { emit('turn/completed', { turn: { id: turnId, status: 'completed', items: [] } }); return }
       emit('item/agentMessage/delta', { itemId: 'answer', delta: text.slice(middle) })
-      emit('item/completed', { item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text } })
-      emit('turn/completed', { turn: { id: turnId, status: 'completed', items: [] } })
+      complete()
     }, 20)
+  } else if (message.method === 'turn/steer') {
+    if (active.instructions.includes('[[steer-error]]')) {
+      send({ id: message.id, error: { message: 'unsupported steering' } })
+      return
+    }
+    send({ id: message.id, result: { turnId: active.turnId } })
+    if (/\[\[(research|delay-research)\]\]/.test(active.instructions)) active.complete()
   } else if (message.method === 'turn/interrupt') {
     send({ id: message.id, result: {} })
     send({ method: 'turn/completed', params: { ...active, turn: { id: active.turnId, status: 'interrupted' } } })

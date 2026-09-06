@@ -58,14 +58,14 @@ export class PlanningRepositoryContext {
     const words = requirements.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g) ?? []
     const score = (path: string): number => words.filter((word) => path.toLowerCase().includes(word)).length * 10
       + (/package\.json$|Project\.swift$|Package\.swift$|README|\.xcodeproj/.test(path) ? 2 : 0)
-    const candidates = [...context.files].sort((a, b) => score(b) - score(a) || a.localeCompare(b)).slice(0, 80)
+    const candidates = [...context.files].sort((a, b) => score(b) - score(a) || a.localeCompare(b)).slice(0, 24)
     return [
       `현재 브랜치: ${context.branch}, HEAD: ${context.head}`,
       previous === context.fingerprint ? '지난 요청 이후 저장소 변경이 감지되지 않았습니다. 이전 조사 결과를 재사용하세요.' :
         '새 조사 또는 저장소 변경이 감지됐습니다. 이전 대화의 코드 관련 사실을 현재 파일과 재확인하세요.',
       `미커밋 변경 경로(최대 40): ${context.dirtyFiles.slice(0, 40).join(', ') || '없음'}`,
       `초기 조사 후보 ${candidates.length}개 / 전체 ${context.files.length}개:\n${candidates.join('\n')}`,
-      '후보는 검색 시작점이며 전체 구현 범위를 의미하지 않습니다. 요구사항과 관련된 파일만 우선 읽고 필요한 경우에만 추가 조사하세요.',
+      '후보는 검색 시작점이며 전체 구현 범위를 의미하지 않습니다. 후보를 전부 읽지 말고 요구사항과 직접 관련된 소수 파일부터 확인하세요.',
       '파일을 읽을 때 출력 범위를 제한하고 빌드 산출물·외부 의존성 전체 순회, 빌드·테스트 실행은 하지 마세요.',
       '비밀값과 인증 정보는 읽거나 문서에 포함하지 마세요. 조사하지 않은 사항은 확인 필요로 표시하세요.'
     ].join('\n\n')

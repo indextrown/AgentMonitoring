@@ -79,6 +79,8 @@ export function TechSpecLiveProgress({ planning }: { planning: ReturnType<typeof
     <p>{progress.model}{progress.effort && ` · ${progress.effort}`} · 경과 {Math.max(0, Math.floor((now - progress.startedAt) / 1000))}초
       {loading && ` · 마지막 활동 ${Math.max(0, Math.floor((now - progress.updatedAt) / 1000))}초 전`}</p>
     <p>{progress.reusedConversation ? '이전 대화 이어서 진행' : '새 계획 대화'} · {progress.reusedRepository ? '저장소 파일 목록 재사용' : '저장소 변경 확인'}</p>
+    <p>조사 도구 호출 {progress.toolCalls ?? 0}회 · {progress.draftingRequested ? '초안 우선 작성 요청됨' : '관련 코드를 먼저 확인합니다'}</p>
+    {loading && <p>조사 45초 또는 도구 호출 8회 이후에도 조사 도구가 실행 중이면 초안을 우선 요청해요. 미확인 내용은 따로 표시하며, 전체 제한은 3분이에요.</p>}
     {progress.preview && <details open={loading}>
       <summary>작성 중인 초안 · 아직 승인할 수 없는 미완성 내용</summary>
       <pre>{progress.preview}</pre>
